@@ -1,0 +1,23 @@
+# gitleaks config for the reconciliation-workflow-agent scan.
+#
+# gitleaks does NOT read .semgrepignore, so vendored-SDK false positives (the Amazon DCV web
+# client ships minified JS containing byte sequences that match the aws-access-token pattern)
+# must be allowlisted here. Extends the default gitleaks ruleset — real secret detection stays on
+# everywhere else.
+#
+# Triaged from ProbeScanExport-599211d3 (2026-07-27): the only gitleaks ERRORs were 6 hits inside
+# public/dcv-sdk/ (vendored, not our code) plus one fake test fixture (removed in-code instead).
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Vendored third-party SDK, generated static assets, and test fixtures — not real secrets."
+paths = [
+  '''chatbot-app/frontend/public/dcv-sdk/.*''',
+  '''chatbot-app/frontend/public/embed-example\.js''',
+  # API-route unit tests use deliberately-fake bearer/JWT fixtures. gitleaks scans git HISTORY,
+  # so even after the working-tree fixtures were replaced with opaque placeholders, the pre-fix
+  # commits still trip generic-api-key/jwt here. Test fixtures are never real secrets.
+  '''chatbot-app/frontend/__tests__/api/.*\.test\.ts''',
+]

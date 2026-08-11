@@ -1,0 +1,1454 @@
+{
+  "_comment": "IMPORTANT: After modifying this file, you MUST sync to DynamoDB! POST http://localhost:3000/api/tools/sync-registry (or production URL). Without syncing, changes will NOT take effect. See chatbot-app/agentcore/src/builtin_tools/__init__.py for full instructions.",
+  "shared_guidance": {
+    "citation_instructions": "Citation Instructions for Web Search Results:\n\nWhen your response is based on content returned by web search tools (web_search, url_fetcher, google_search, arxiv, wikipedia, tavily), you MUST appropriately cite your response.\n\n**Citation Rules:**\n- EVERY specific claim from search results should be wrapped in <cite> tags: <cite source=\"SOURCE_TITLE\" url=\"URL\">claim text</cite>\n- The source attribute should contain the title or name of the source\n- The url attribute should contain the source URL when available\n- Use citations for factual claims, statistics, quotes, and specific information from search results\n- Do NOT cite your own reasoning or general knowledge\n- If search results don't contain relevant information, inform the user that the answer cannot be found in the search results\n\n**Example:**\n<cite source=\"Wikipedia\" url=\"https://en.wikipedia.org/wiki/Example\">The population of Tokyo is approximately 14 million.</cite>\n\n**Important:**\n- Only cite information actually present in the search results\n- Use the minimum number of citations necessary to support claims\n- For multiple sources supporting the same claim, include all relevant sources"
+  },
+  "local_tools": [
+    {
+      "id": "calculator",
+      "name": "Calculator",
+      "description": "Perform mathematical calculations and computations",
+      "category": "utilities",
+      "icon": "",
+      "enabled": true,
+      "isDynamic": false,
+      "displayName": {
+        "running": "Calculating",
+        "complete": "Calculated"
+      },
+      "tags": ["math", "finance", "business", "report", "analysis"]
+    },
+    {
+      "id": "create_excalidraw_diagram",
+      "name": "Excalidraw Diagram",
+      "description": "Create hand-drawn style diagrams, flowcharts, and architecture diagrams",
+      "category": "utilities",
+      "icon": "",
+      "enabled": true,
+      "isDynamic": false,
+      "displayName": {
+        "running": "Creating Excalidraw diagram",
+        "complete": "Created Excalidraw diagram"
+      },
+      "tags": [
+        "diagram",
+        "flowchart",
+        "architecture",
+        "design",
+        "visualization"
+      ]
+    },
+    {
+      "id": "create_visualization",
+      "name": "Visualization Creator",
+      "description": "Create interactive charts and visualizations from data",
+      "category": "utilities",
+      "icon": "",
+      "enabled": true,
+      "isDynamic": false,
+      "displayName": {
+        "running": "Creating chart",
+        "complete": "Created chart"
+      },
+      "tags": ["report", "analysis", "business", "presentation", "data"]
+    }
+  ],
+  "builtin_tools": [
+    {
+      "id": "visual_design",
+      "name": "Visual Design",
+      "description": "Generate charts, diagrams, posters, infographics, and visual designs using Python code",
+      "category": "code_execution_tools",
+      "icon": "",
+      "enabled": true,
+      "isDynamic": true,
+      "displayName": {
+        "running": "Creating visual",
+        "complete": "Created visual"
+      },
+      "tags": [
+        "chart",
+        "diagram",
+        "design",
+        "poster",
+        "infographic",
+        "visualization",
+        "report",
+        "presentation",
+        "analysis"
+      ],
+      "tools": [
+        {
+          "id": "generate_chart",
+          "name": "Generate Chart",
+          "description": "Generate data charts and graphs using matplotlib or plotly",
+          "displayName": {
+            "running": "Generating chart",
+            "complete": "Generated chart"
+          }
+        },
+        {
+          "id": "create_visual_design",
+          "name": "Create Visual Design",
+          "description": "Create posters, infographics, artwork, and flow diagrams",
+          "displayName": {
+            "running": "Creating design",
+            "complete": "Created design"
+          }
+        }
+      ]
+    },
+    {
+      "id": "word_document_tools",
+      "name": "Word Documents",
+      "description": "Create, modify, and manage Word documents with automatic storage (5 tools)",
+      "category": "code_execution_tools",
+      "icon": "",
+      "enabled": true,
+      "isDynamic": true,
+      "tags": ["report", "business", "document", "writing"],
+      "tools": [
+        {
+          "id": "create_word_document",
+          "name": "Create Document",
+          "description": "Create new Word document from Markdown content",
+          "displayName": {
+            "running": "Creating Word document",
+            "complete": "Created Word document"
+          }
+        },
+        {
+          "id": "modify_word_document",
+          "name": "Modify Document",
+          "description": "Edit existing Word document using python-docx code",
+          "displayName": {
+            "running": "Modifying Word document",
+            "complete": "Modified Word document"
+          }
+        },
+        {
+          "id": "list_my_word_documents",
+          "name": "List Documents",
+          "description": "List all Word documents in workspace",
+          "displayName": {
+            "running": "Listing documents",
+            "complete": "Listed documents"
+          }
+        },
+        {
+          "id": "read_word_document",
+          "name": "Read Document",
+          "description": "Read and download document from workspace",
+          "displayName": {
+            "running": "Reading document",
+            "complete": "Read document"
+          }
+        },
+        {
+          "id": "preview_word_page",
+          "name": "Preview Pages",
+          "description": "Agent-only: Get screenshots of multiple pages to inspect layout before editing",
+          "displayName": {
+            "running": "Previewing pages",
+            "complete": "Previewed pages"
+          }
+        }
+      ]
+    },
+    {
+      "id": "excel_spreadsheet_tools",
+      "name": "Excel Spreadsheets",
+      "description": "Create, modify, and manage Excel spreadsheets with automatic storage (5 tools)",
+      "category": "code_execution_tools",
+      "icon": "",
+      "enabled": true,
+      "isDynamic": true,
+      "tags": ["report", "business", "finance", "data", "analysis"],
+      "tools": [
+        {
+          "id": "create_excel_spreadsheet",
+          "name": "Create Spreadsheet",
+          "description": "Create new Excel spreadsheet with openpyxl code",
+          "displayName": {
+            "running": "Creating Excel spreadsheet",
+            "complete": "Created Excel spreadsheet"
+          }
+        },
+        {
+          "id": "modify_excel_spreadsheet",
+          "name": "Modify Spreadsheet",
+          "description": "Edit existing Excel spreadsheet using openpyxl code",
+          "displayName": {
+            "running": "Modifying Excel spreadsheet",
+            "complete": "Modified Excel spreadsheet"
+          }
+        },
+        {
+          "id": "list_my_excel_spreadsheets",
+          "name": "List Spreadsheets",
+          "description": "List all Excel spreadsheets in workspace",
+          "displayName": {
+            "running": "Listing spreadsheets",
+            "complete": "Listed spreadsheets"
+          }
+        },
+        {
+          "id": "read_excel_spreadsheet",
+          "name": "Read Spreadsheet",
+          "description": "Read and download spreadsheet from workspace",
+          "displayName": {
+            "running": "Reading spreadsheet",
+            "complete": "Read spreadsheet"
+          }
+        },
+        {
+          "id": "preview_excel_sheets",
+          "name": "Preview Sheets",
+          "description": "Agent-only: Get screenshots of sheets to inspect layout before editing",
+          "displayName": {
+            "running": "Previewing sheets",
+            "complete": "Previewed sheets"
+          }
+        }
+      ]
+    },
+    {
+      "id": "powerpoint_presentation_tools",
+      "name": "PPT Presentations",
+      "description": "Create, modify, and manage PPT presentations (12 tools)",
+      "category": "code_execution_tools",
+      "icon": "",
+      "enabled": true,
+      "isDynamic": true,
+      "tags": ["presentation", "business", "report", "pitch"],
+      "tools": [
+        {
+          "id": "get_slide_design_reference",
+          "name": "Get Design Reference",
+          "description": "Get design guidelines, color palettes, typography rules, and layout patterns for creating presentations",
+          "displayName": {
+            "running": "Getting design reference",
+            "complete": "Got design reference"
+          }
+        },
+        {
+          "id": "list_my_powerpoint_presentations",
+          "name": "List Presentations",
+          "description": "List all PowerPoint presentations in workspace",
+          "displayName": {
+            "running": "Listing presentations",
+            "complete": "Listed presentations"
+          }
+        },
+        {
+          "id": "get_presentation_layouts",
+          "name": "Get Layouts",
+          "description": "Get all available slide layouts from presentation",
+          "displayName": {
+            "running": "Getting layouts",
+            "complete": "Got layouts"
+          }
+        },
+        {
+          "id": "analyze_presentation",
+          "name": "Analyze Presentation",
+          "description": "Analyze presentation structure with detailed element IDs for editing",
+          "displayName": {
+            "running": "Analyzing presentation",
+            "complete": "Analyzed presentation"
+          }
+        },
+        {
+          "id": "create_presentation",
+          "name": "Create Presentation",
+          "description": "Create presentation from outline or blank (outline=None for blank)",
+          "displayName": {
+            "running": "Creating presentation",
+            "complete": "Created presentation"
+          }
+        },
+        {
+          "id": "update_slide_content",
+          "name": "Update Slides",
+          "description": "Edit one or more slides in a single call using operations (set_text, replace_text, replace_image)",
+          "displayName": {
+            "running": "Updating slides",
+            "complete": "Updated slides"
+          }
+        },
+        {
+          "id": "add_slide",
+          "name": "Add Slide",
+          "description": "Add new slide at specified position with chosen layout",
+          "displayName": {
+            "running": "Adding slide",
+            "complete": "Added slide"
+          }
+        },
+        {
+          "id": "delete_slides",
+          "name": "Delete Slides",
+          "description": "Delete one or more slides by indices",
+          "displayName": {
+            "running": "Deleting slides",
+            "complete": "Deleted slides"
+          }
+        },
+        {
+          "id": "move_slide",
+          "name": "Move Slide",
+          "description": "Move slide from one position to another",
+          "displayName": {
+            "running": "Moving slide",
+            "complete": "Moved slide"
+          }
+        },
+        {
+          "id": "duplicate_slide",
+          "name": "Duplicate Slide",
+          "description": "Copy slide to specified position",
+          "displayName": {
+            "running": "Duplicating slide",
+            "complete": "Duplicated slide"
+          }
+        },
+        {
+          "id": "update_slide_notes",
+          "name": "Update Notes",
+          "description": "Update speaker notes for a specific slide",
+          "displayName": {
+            "running": "Updating notes",
+            "complete": "Updated notes"
+          }
+        },
+        {
+          "id": "preview_presentation_slides",
+          "name": "Preview Slides",
+          "description": "Get slide screenshots for visual inspection before editing",
+          "displayName": {
+            "running": "Previewing slides",
+            "complete": "Previewed slides"
+          }
+        }
+      ]
+    },
+    {
+      "id": "code_interpreter_tools",
+      "name": "Code Interpreter",
+      "description": "Execute code (Python/JS/TS), run shell commands, and manage files in a sandboxed environment with 200+ pre-installed libraries (3 tools)",
+      "category": "code_execution_tools",
+      "icon": "",
+      "enabled": true,
+      "isDynamic": true,
+      "tags": ["code", "python", "data", "analysis", "ml", "visualization"],
+      "tools": [
+        {
+          "id": "execute_code",
+          "name": "Execute Code",
+          "description": "Execute Python, JavaScript, or TypeScript code in a sandboxed environment",
+          "displayName": {
+            "running": "Executing code",
+            "complete": "Executed code"
+          }
+        },
+        {
+          "id": "execute_command",
+          "name": "Execute Command",
+          "description": "Execute shell commands (pip install, ls, curl, etc.)",
+          "displayName": {
+            "running": "Executing command",
+            "complete": "Executed command"
+          }
+        },
+        {
+          "id": "file_operations",
+          "name": "File Operations",
+          "description": "Read, write, list, or remove files in the sandbox",
+          "displayName": {
+            "running": "Managing files",
+            "complete": "Managed files"
+          }
+        },
+        {
+          "id": "ci_push_to_workspace",
+          "name": "Push to Workspace",
+          "description": "Save sandbox files to the shared workspace (S3)",
+          "displayName": {
+            "running": "Saving to workspace",
+            "complete": "Saved to workspace"
+          }
+        },
+        {
+          "id": "ci_pull_from_workspace",
+          "name": "Pull from Workspace",
+          "description": "Load workspace files into the sandbox",
+          "displayName": {
+            "running": "Loading from workspace",
+            "complete": "Loaded from workspace"
+          }
+        }
+      ]
+    }
+  ],
+  "browser_automation": [
+    {
+      "id": "browser_automation",
+      "name": "Nova Act Browser Control",
+      "description": "Web browser automation powered by Nova Act AI (4 tools)",
+      "category": "browser_automation_agents",
+      "icon": "",
+      "enabled": true,
+      "isDynamic": true,
+      "tags": ["shopping", "automation", "scraping", "research"],
+      "tools": [
+        {
+          "id": "browser_act",
+          "name": "Browser Action",
+          "description": "Execute browser actions using natural language (click, type, scroll, select). Optional starting_url to navigate first.",
+          "displayName": {
+            "running": "Performing browser action",
+            "complete": "Performed browser action"
+          }
+        },
+        {
+          "id": "browser_get_page_info",
+          "name": "Get Page Info",
+          "description": "Get page structure and DOM data (fast, no AI). Optional url to navigate first; text/tables/links for content extraction.",
+          "displayName": {
+            "running": "Getting page info",
+            "complete": "Got page info"
+          }
+        },
+        {
+          "id": "browser_manage_tabs",
+          "name": "Manage Tabs",
+          "description": "Switch, close, or create browser tabs (use get_page_info to view tabs)",
+          "displayName": {
+            "running": "Managing tabs",
+            "complete": "Managed tabs"
+          }
+        },
+        {
+          "id": "browser_save_screenshot",
+          "name": "Save Screenshot",
+          "description": "Save current page screenshot to workspace for document use",
+          "displayName": {
+            "running": "Saving screenshot",
+            "complete": "Saved screenshot"
+          }
+        }
+      ]
+    }
+  ],
+  "gateway_targets": [
+    {
+      "id": "gateway_weather",
+      "name": "Weather",
+      "description": "Current weather and forecasts worldwide",
+      "category": "utilities",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": true,
+      "tags": ["weather", "forecast", "travel", "planning", "outdoor"],
+      "tools": [
+        {
+          "id": "gateway_get_today_weather",
+          "name": "Today's Weather",
+          "description": "Get current weather and today's hourly forecast",
+          "displayName": {
+            "running": "Checking weather",
+            "complete": "Checked weather"
+          }
+        },
+        {
+          "id": "gateway_get_weather_forecast",
+          "name": "Weather Forecast",
+          "description": "Get multi-day weather forecast (up to 16 days)",
+          "displayName": {
+            "running": "Getting forecast",
+            "complete": "Got forecast"
+          }
+        }
+      ]
+    },
+    {
+      "id": "gateway_financial-news",
+      "name": "Financial Market",
+      "description": "Stock quotes, history, news and analysis",
+      "category": "finance",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": true,
+      "tags": ["stock", "finance", "trading", "investment", "business"],
+      "tools": [
+        {
+          "id": "gateway_stock_quote",
+          "name": "Stock Quote",
+          "description": "Get current stock quote with key metrics",
+          "displayName": {
+            "running": "Getting stock quote",
+            "complete": "Got stock quote"
+          }
+        },
+        {
+          "id": "gateway_stock_history",
+          "name": "Stock History",
+          "description": "Get historical stock price data",
+          "displayName": {
+            "running": "Getting stock history",
+            "complete": "Got stock history"
+          }
+        },
+        {
+          "id": "gateway_financial_news",
+          "name": "Financial News",
+          "description": "Get latest financial news articles",
+          "displayName": {
+            "running": "Getting financial news",
+            "complete": "Got financial news"
+          }
+        },
+        {
+          "id": "gateway_stock_analysis",
+          "name": "Stock Analysis",
+          "description": "Get comprehensive stock analysis",
+          "displayName": {
+            "running": "Analyzing stock",
+            "complete": "Analyzed stock"
+          }
+        }
+      ]
+    },
+    {
+      "id": "gateway_arxiv-search",
+      "name": "ArXiv",
+      "description": "Scientific paper search and retrieval",
+      "category": "research",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": true,
+      "usesCitation": true,
+      "tags": ["research", "academic", "science", "paper", "study"],
+      "tools": [
+        {
+          "id": "gateway_arxiv_search",
+          "name": "Search Papers",
+          "description": "Search scientific papers on ArXiv",
+          "displayName": {
+            "running": "Searching ArXiv",
+            "complete": "Searched ArXiv"
+          }
+        },
+        {
+          "id": "gateway_arxiv_get_paper",
+          "name": "Get Paper",
+          "description": "Get full paper content from ArXiv by paper ID",
+          "displayName": {
+            "running": "Getting paper",
+            "complete": "Got paper"
+          }
+        }
+      ]
+    },
+    {
+      "id": "gateway_web-search",
+      "name": "Web Search (Nova Grounding)",
+      "description": "Nova Web Grounding (with DuckDuckGo fallback) and URL content fetching",
+      "category": "search",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": true,
+      "usesCitation": true,
+      "tags": ["research", "information", "learning", "knowledge", "scraping"],
+      "tools": [
+        {
+          "id": "gateway_web_search",
+          "name": "Web Search",
+          "description": "Search the web with Nova Grounding (DuckDuckGo fallback)",
+          "displayName": {
+            "running": "Searching the web",
+            "complete": "Searched the web"
+          }
+        },
+        {
+          "id": "gateway_fetch",
+          "name": "URL Fetcher",
+          "description": "Fetch and extract content from web URLs",
+          "displayName": {
+            "running": "Fetching URL",
+            "complete": "Fetched URL"
+          }
+        }
+      ]
+    },
+    {
+      "id": "gateway_snowflake",
+      "name": "Snowflake",
+      "description": "Query Snowflake with Cortex Analyst (NL → SQL) or read-only SQL",
+      "category": "data",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": true,
+      "usesCitation": true,
+      "tags": ["data", "analytics", "sql", "cortex", "snowflake"],
+      "tools": [
+        {
+          "id": "gateway_revenue-analyst",
+          "name": "Revenue Analyst",
+          "description": "Natural-language query over REVENUE_VIEW (Cortex Analyst)",
+          "displayName": {
+            "running": "Asking Cortex Analyst",
+            "complete": "Got Cortex Analyst answer"
+          }
+        },
+        {
+          "id": "gateway_sql-executor",
+          "name": "SQL Executor",
+          "description": "Execute a read-only SQL query on Snowflake",
+          "displayName": {
+            "running": "Running SQL",
+            "complete": "Ran SQL"
+          }
+        }
+      ]
+    },
+    {
+      "id": "gateway_semantic-layer",
+      "name": "Semantic Layer",
+      "description": "Natural-language queries over the semantic-layer ontologies (VKG → SPARQL/SQL, Semantic-RAG → retrieval)",
+      "category": "data",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": true,
+      "usesCitation": true,
+      "tags": ["data", "ontology", "semantic-layer", "sparql", "sql", "rag"],
+      "tools": [
+        {
+          "id": "gateway_ListOntologies",
+          "name": "List Ontologies",
+          "description": "Discover available semantic layers and each one's mode (call first)",
+          "displayName": {
+            "running": "Listing ontologies",
+            "complete": "Listed ontologies"
+          }
+        },
+        {
+          "id": "gateway_OntologyQuery",
+          "name": "Ontology Query",
+          "description": "VKG query — natural language → SPARQL/SQL with lineage",
+          "displayName": {
+            "running": "Querying ontology",
+            "complete": "Got ontology answer"
+          }
+        },
+        {
+          "id": "gateway_MetadataQuery",
+          "name": "Metadata Query",
+          "description": "Semantic-RAG query — natural language → answer with retrieved chunks",
+          "displayName": {
+            "running": "Querying metadata",
+            "complete": "Got metadata answer"
+          }
+        },
+        {
+          "id": "gateway_QuerySuggestions",
+          "name": "Query Suggestions",
+          "description": "Suggested questions for an ontology",
+          "displayName": {
+            "running": "Getting suggestions",
+            "complete": "Got suggestions"
+          }
+        }
+      ]
+    },
+    {
+      "id": "gateway_google-maps",
+      "name": "Google Maps",
+      "description": "Place search, directions, and geocoding",
+      "category": "maps",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": true,
+      "tags": ["travel", "navigation", "planning", "directions", "location"],
+      "tools": [
+        {
+          "id": "gateway_search_places",
+          "name": "Search Places",
+          "description": "Search for places using text query (e.g., 'restaurants in New York')",
+          "displayName": {
+            "running": "Searching places",
+            "complete": "Found places"
+          }
+        },
+        {
+          "id": "gateway_search_nearby_places",
+          "name": "Nearby Places",
+          "description": "Search for places near a specific location",
+          "displayName": {
+            "running": "Searching nearby",
+            "complete": "Found nearby places"
+          }
+        },
+        {
+          "id": "gateway_get_place_details",
+          "name": "Place Details",
+          "description": "Get detailed information about a place including reviews",
+          "displayName": {
+            "running": "Getting place details",
+            "complete": "Got place details"
+          }
+        },
+        {
+          "id": "gateway_get_directions",
+          "name": "Get Directions",
+          "description": "Get directions between two locations with step-by-step instructions",
+          "displayName": {
+            "running": "Getting directions",
+            "complete": "Got directions"
+          }
+        },
+        {
+          "id": "gateway_geocode_address",
+          "name": "Geocode Address",
+          "description": "Convert address to geographic coordinates",
+          "displayName": {
+            "running": "Geocoding address",
+            "complete": "Geocoded address"
+          }
+        },
+        {
+          "id": "gateway_reverse_geocode",
+          "name": "Reverse Geocode",
+          "description": "Convert geographic coordinates to address",
+          "displayName": {
+            "running": "Reverse geocoding",
+            "complete": "Reverse geocoded"
+          }
+        },
+        {
+          "id": "gateway_show_on_map",
+          "name": "Show on Map",
+          "description": "Display locations and routes on interactive Google Map",
+          "displayName": {
+            "running": "Showing on map",
+            "complete": "Showed on map"
+          }
+        }
+      ]
+    },
+    {
+      "id": "gateway_wikipedia-search",
+      "name": "Wikipedia",
+      "description": "Wikipedia article search and retrieval (English only)",
+      "category": "knowledge",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": true,
+      "usesCitation": true,
+      "tags": ["research", "knowledge", "learning", "education", "information"],
+      "tools": [
+        {
+          "id": "gateway_wikipedia_search",
+          "name": "Search Articles",
+          "description": "Search Wikipedia for articles",
+          "displayName": {
+            "running": "Searching Wikipedia",
+            "complete": "Searched Wikipedia"
+          }
+        },
+        {
+          "id": "gateway_wikipedia_get_article",
+          "name": "Get Article",
+          "description": "Get full content of a Wikipedia article",
+          "displayName": {
+            "running": "Getting article",
+            "complete": "Got article"
+          }
+        }
+      ]
+    },
+    {
+      "id": "gateway_tavily-search",
+      "name": "Tavily AI",
+      "description": "AI-powered web search and content extraction",
+      "category": "search",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": true,
+      "usesCitation": true,
+      "tags": ["research", "information", "learning", "analysis"],
+      "tools": [
+        {
+          "id": "gateway_tavily_search",
+          "name": "Web Search (Tavily)",
+          "description": "AI-powered web search using Tavily",
+          "displayName": {
+            "running": "Searching the web",
+            "complete": "Searched the web"
+          }
+        },
+        {
+          "id": "gateway_tavily_extract",
+          "name": "Content Extract",
+          "description": "Extract clean content from web URLs",
+          "displayName": {
+            "running": "Extracting content",
+            "complete": "Extracted content"
+          }
+        }
+      ]
+    },
+    {
+      "id": "gateway_bluesky",
+      "name": "Bluesky",
+      "description": "Search public Bluesky posts and fetch threads via AT Protocol",
+      "category": "social",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": true,
+      "tags": ["bluesky", "social", "atproto", "search"],
+      "tools": [
+        {
+          "id": "gateway_search_posts",
+          "name": "search_posts",
+          "description": "Search public Bluesky posts by free-text query",
+          "displayName": {
+            "running": "Searching Bluesky",
+            "complete": "Searched Bluesky"
+          }
+        },
+        {
+          "id": "gateway_get_post",
+          "name": "get_post",
+          "description": "Fetch a Bluesky post and (optionally) its surrounding thread by AT URI",
+          "displayName": {
+            "running": "Reading post",
+            "complete": "Read post"
+          }
+        }
+      ]
+    },
+    {
+      "id": "gateway_youtube_transcripts",
+      "name": "YouTube Transcripts",
+      "description": "Fetch YouTube transcripts and list available transcript languages",
+      "category": "research",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": true,
+      "tags": ["youtube", "video", "transcript", "research", "captions"],
+      "tools": [
+        {
+          "id": "gateway_get_youtube_transcript",
+          "name": "get_youtube_transcript",
+          "description": "Fetch the transcript for a YouTube video (with optional translation)",
+          "displayName": {
+            "running": "Fetching transcript",
+            "complete": "Fetched transcript"
+          }
+        },
+        {
+          "id": "gateway_list_youtube_transcripts",
+          "name": "list_youtube_transcripts",
+          "description": "List every transcript available on a YouTube video",
+          "displayName": {
+            "running": "Listing transcripts",
+            "complete": "Listed transcripts"
+          }
+        }
+      ]
+    },
+    {
+      "id": "workspace_tools",
+      "name": "Workspace",
+      "description": "Read and write files across the shared session workspace (code-agent outputs, office docs, images)",
+      "category": "utilities",
+      "icon": "/tool-icons/s3.svg",
+      "enabled": true,
+      "isDynamic": true,
+      "tags": ["files", "storage", "code-agent", "documents"],
+      "tools": [
+        {
+          "id": "workspace_list",
+          "name": "List Files",
+          "description": "List all files in the session workspace, optionally filtered by path prefix",
+          "displayName": {
+            "running": "Listing workspace files",
+            "complete": "Listed workspace files"
+          }
+        },
+        {
+          "id": "workspace_read",
+          "name": "Read File",
+          "description": "Read a file from the session workspace (text or base64 for binary)",
+          "displayName": {
+            "running": "Reading file",
+            "complete": "Read file"
+          }
+        },
+        {
+          "id": "workspace_write",
+          "name": "Write File",
+          "description": "Write a file to the session workspace",
+          "displayName": {
+            "running": "Writing file",
+            "complete": "Written file"
+          }
+        }
+      ]
+    }
+  ],
+  "agentcore_runtime_a2a": [
+    {
+      "id": "agentcore_research-agent",
+      "name": "Research Agent",
+      "description": "Web research and markdown report generation via A2A",
+      "category": "research",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": false,
+      "displayName": {
+        "running": "Researching",
+        "complete": "Researched"
+      }
+    },
+    {
+      "id": "agentcore_code-agent",
+      "name": "Code Agent",
+      "description": "Autonomous coding agent — implements features, fixes bugs, refactors code, and runs tests in an isolated workspace",
+      "category": "development",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": false,
+      "displayName": {
+        "running": "Coding autonomously",
+        "complete": "Coding complete"
+      }
+    }
+  ],
+  "agentcore_runtime_gateway": [
+    {
+      "id": "gateway_gmail",
+      "name": "Gmail",
+      "description": "Full Gmail functionality: read, send, draft, delete, and organize emails via Google OAuth (3LO)",
+      "category": "productivity",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": true,
+      "tags": ["email", "productivity", "gmail", "google"],
+      "tools": [
+        {
+          "id": "gateway_list_labels",
+          "name": "List Labels",
+          "description": "List all Gmail labels (INBOX, SENT, custom labels, etc.)",
+          "displayName": {
+            "running": "Listing labels",
+            "complete": "Listed labels"
+          }
+        },
+        {
+          "id": "gateway_list_emails",
+          "name": "List Emails",
+          "description": "List emails by label (INBOX, SENT, DRAFT, TRASH, etc.)",
+          "displayName": {
+            "running": "Listing emails",
+            "complete": "Listed emails"
+          }
+        },
+        {
+          "id": "gateway_search_emails",
+          "name": "Search Emails",
+          "description": "Search Gmail using query syntax (from:, to:, subject:, is:unread, etc.)",
+          "displayName": {
+            "running": "Searching emails",
+            "complete": "Searched emails"
+          }
+        },
+        {
+          "id": "gateway_read_email",
+          "name": "Read Email",
+          "description": "Read a full email message by its ID",
+          "displayName": {
+            "running": "Reading email",
+            "complete": "Read email"
+          }
+        },
+        {
+          "id": "gateway_send_email",
+          "name": "Send Email",
+          "description": "Send an email with optional CC, BCC, and HTML body",
+          "displayName": {
+            "running": "Sending email",
+            "complete": "Sent email"
+          }
+        },
+        {
+          "id": "gateway_draft_email",
+          "name": "Draft Email",
+          "description": "Create an email draft for later editing or sending",
+          "displayName": {
+            "running": "Creating draft",
+            "complete": "Created draft"
+          }
+        },
+        {
+          "id": "gateway_delete_email",
+          "name": "Delete Email",
+          "description": "Delete an email (move to trash or permanent delete)",
+          "displayName": {
+            "running": "Deleting email",
+            "complete": "Deleted email"
+          }
+        },
+        {
+          "id": "gateway_bulk_delete_emails",
+          "name": "Bulk Delete Emails",
+          "description": "Permanently delete multiple emails by Gmail query (requires user approval)",
+          "displayName": {
+            "running": "Deleting emails",
+            "complete": "Deleted emails"
+          }
+        },
+        {
+          "id": "gateway_modify_email",
+          "name": "Modify Email",
+          "description": "Add/remove labels (mark read/unread, star, archive, etc.)",
+          "displayName": {
+            "running": "Modifying email",
+            "complete": "Modified email"
+          }
+        },
+        {
+          "id": "gateway_get_email_thread",
+          "name": "Get Thread",
+          "description": "Get all messages in an email thread/conversation",
+          "displayName": {
+            "running": "Getting thread",
+            "complete": "Got thread"
+          }
+        }
+      ]
+    },
+    {
+      "id": "gateway_calendar",
+      "name": "Google Calendar",
+      "description": "Calendar management: view, create, update, delete events and check availability via Google OAuth (3LO)",
+      "category": "productivity",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": true,
+      "tags": ["calendar", "productivity", "schedule", "google", "meetings"],
+      "tools": [
+        {
+          "id": "gateway_list_calendars",
+          "name": "List Calendars",
+          "description": "List all user's calendars (primary, shared, subscribed)",
+          "displayName": {
+            "running": "Listing calendars",
+            "complete": "Listed calendars"
+          }
+        },
+        {
+          "id": "gateway_list_events",
+          "name": "List Events",
+          "description": "List calendar events with date range and search filters",
+          "displayName": {
+            "running": "Listing events",
+            "complete": "Listed events"
+          }
+        },
+        {
+          "id": "gateway_get_event",
+          "name": "Get Event",
+          "description": "Get detailed information about a specific event",
+          "displayName": {
+            "running": "Getting event",
+            "complete": "Got event"
+          }
+        },
+        {
+          "id": "gateway_create_event",
+          "name": "Create Event",
+          "description": "Create a new calendar event with attendees and reminders",
+          "displayName": {
+            "running": "Creating event",
+            "complete": "Created event"
+          }
+        },
+        {
+          "id": "gateway_update_event",
+          "name": "Update Event",
+          "description": "Update an existing calendar event",
+          "displayName": {
+            "running": "Updating event",
+            "complete": "Updated event"
+          }
+        },
+        {
+          "id": "gateway_delete_event",
+          "name": "Delete Event",
+          "description": "Delete a calendar event with optional attendee notification",
+          "displayName": {
+            "running": "Deleting event",
+            "complete": "Deleted event"
+          }
+        },
+        {
+          "id": "gateway_quick_add_event",
+          "name": "Quick Add Event",
+          "description": "Create event from natural language text (e.g., 'Meeting tomorrow at 3pm')",
+          "displayName": {
+            "running": "Adding event",
+            "complete": "Added event"
+          }
+        },
+        {
+          "id": "gateway_check_availability",
+          "name": "Check Availability",
+          "description": "Check free/busy status for scheduling meetings",
+          "displayName": {
+            "running": "Checking availability",
+            "complete": "Checked availability"
+          }
+        }
+      ]
+    },
+    {
+      "id": "gateway_github",
+      "name": "GitHub",
+      "description": "Search repositories, browse code, manage issues/PRs, and create branches and pull requests via GitHub OAuth (3LO)",
+      "category": "development",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": true,
+      "tags": ["github", "git", "code", "repository", "pull-request", "issues"],
+      "tools": [
+        {
+          "id": "gateway_github_search_repos",
+          "name": "Search Repos",
+          "description": "Search GitHub repositories by keyword",
+          "displayName": {
+            "running": "Searching repos",
+            "complete": "Searched repos"
+          }
+        },
+        {
+          "id": "gateway_github_get_repo",
+          "name": "Get Repo",
+          "description": "Get repository details (description, stars, language, topics)",
+          "displayName": {
+            "running": "Getting repo",
+            "complete": "Got repo"
+          }
+        },
+        {
+          "id": "gateway_github_list_issues",
+          "name": "List Issues",
+          "description": "List issues in a repository (filter by state and labels)",
+          "displayName": {
+            "running": "Listing issues",
+            "complete": "Listed issues"
+          }
+        },
+        {
+          "id": "gateway_github_get_issue",
+          "name": "Get Issue",
+          "description": "Get a single issue with all comments",
+          "displayName": {
+            "running": "Getting issue",
+            "complete": "Got issue"
+          }
+        },
+        {
+          "id": "gateway_github_list_pulls",
+          "name": "List PRs",
+          "description": "List pull requests in a repository",
+          "displayName": {
+            "running": "Listing PRs",
+            "complete": "Listed PRs"
+          }
+        },
+        {
+          "id": "gateway_github_get_pull",
+          "name": "Get PR",
+          "description": "Get a single pull request with diff summary",
+          "displayName": {
+            "running": "Getting PR",
+            "complete": "Got PR"
+          }
+        },
+        {
+          "id": "gateway_github_get_file",
+          "name": "Get File",
+          "description": "Get file contents from a repository",
+          "displayName": {
+            "running": "Reading file",
+            "complete": "Read file"
+          }
+        },
+        {
+          "id": "gateway_github_search_code",
+          "name": "Search Code",
+          "description": "Search code across GitHub repositories",
+          "displayName": {
+            "running": "Searching code",
+            "complete": "Searched code"
+          }
+        },
+        {
+          "id": "gateway_github_create_branch",
+          "name": "Create Branch",
+          "description": "Create a new branch in a repository (requires approval)",
+          "displayName": {
+            "running": "Creating branch",
+            "complete": "Created branch"
+          }
+        },
+        {
+          "id": "gateway_github_push_files",
+          "name": "Push Files",
+          "description": "Create or update files on a branch (requires approval)",
+          "displayName": {
+            "running": "Pushing files",
+            "complete": "Pushed files"
+          }
+        },
+        {
+          "id": "gateway_github_create_pull_request",
+          "name": "Create PR",
+          "description": "Open a pull request (requires approval)",
+          "displayName": {
+            "running": "Creating PR",
+            "complete": "Created PR"
+          }
+        }
+      ]
+    },
+    {
+      "id": "gateway_notion",
+      "name": "Notion",
+      "description": "Notion workspace management: search, read, create, and update pages and databases via OAuth (3LO)",
+      "category": "productivity",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": true,
+      "tags": [
+        "notion",
+        "productivity",
+        "notes",
+        "database",
+        "wiki",
+        "knowledge"
+      ],
+      "tools": [
+        {
+          "id": "gateway_notion_search",
+          "name": "Search Notion",
+          "description": "Search across all accessible Notion pages and databases",
+          "displayName": {
+            "running": "Searching Notion",
+            "complete": "Searched Notion"
+          }
+        },
+        {
+          "id": "gateway_notion_fetch",
+          "name": "Fetch Page",
+          "description": "Fetch a Notion page with full content as readable markdown",
+          "displayName": {
+            "running": "Reading page",
+            "complete": "Read page"
+          }
+        },
+        {
+          "id": "gateway_notion_create_page",
+          "name": "Create Page",
+          "description": "Create a new page in a database or as child of another page",
+          "displayName": {
+            "running": "Creating page",
+            "complete": "Created page"
+          }
+        },
+        {
+          "id": "gateway_notion_update_page",
+          "name": "Update Page",
+          "description": "Update Notion page properties (metadata and database fields)",
+          "displayName": {
+            "running": "Updating page",
+            "complete": "Updated page"
+          }
+        },
+        {
+          "id": "gateway_notion_update_block",
+          "name": "Update Block",
+          "description": "Replace the content of a specific block in a Notion page",
+          "displayName": {
+            "running": "Updating block",
+            "complete": "Updated block"
+          }
+        },
+        {
+          "id": "gateway_notion_append_blocks",
+          "name": "Append Content",
+          "description": "Append markdown content blocks to an existing Notion page",
+          "displayName": {
+            "running": "Adding content",
+            "complete": "Added content"
+          }
+        }
+      ]
+    },
+    {
+      "id": "gateway_outlook_mail",
+      "name": "Outlook Mail",
+      "description": "Email management: search and read Outlook email via Microsoft Graph (3LO via microsoft-oauth-provider)",
+      "category": "communication",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": true,
+      "tags": ["outlook", "email", "microsoft", "communication", "mail"],
+      "tools": [
+        {
+          "id": "gateway_search_mail",
+          "name": "search_mail",
+          "description": "Search Outlook mailbox using KQL (from:, subject:, received:, hasAttachment:true/false)",
+          "displayName": {
+            "running": "Searching mail",
+            "complete": "Searched mail"
+          }
+        },
+        {
+          "id": "gateway_read_mail_message",
+          "name": "read_mail_message",
+          "description": "Read a full Outlook email message with body and attachments metadata",
+          "displayName": {
+            "running": "Reading email",
+            "complete": "Read email"
+          }
+        }
+      ]
+    },
+    {
+      "id": "gateway_ms_teams",
+      "name": "Microsoft Teams",
+      "description": "Team collaboration: list teams and channels, search messages, and read conversations via Microsoft Graph (3LO via microsoft-oauth-provider)",
+      "category": "communication",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": true,
+      "tags": ["teams", "microsoft", "communication", "collaboration", "chat"],
+      "tools": [
+        {
+          "id": "gateway_list_teams",
+          "name": "list_teams",
+          "description": "List all teams the signed-in user has joined",
+          "displayName": {
+            "running": "Listing teams",
+            "complete": "Listed teams"
+          }
+        },
+        {
+          "id": "gateway_list_channels",
+          "name": "list_channels",
+          "description": "List all channels in a team",
+          "displayName": {
+            "running": "Listing channels",
+            "complete": "Listed channels"
+          }
+        },
+        {
+          "id": "gateway_search_teams_messages",
+          "name": "search_teams_messages",
+          "description": "Search Teams chat and channel messages via Microsoft Search API",
+          "displayName": {
+            "running": "Searching messages",
+            "complete": "Searched messages"
+          }
+        },
+        {
+          "id": "gateway_read_channel_message",
+          "name": "read_channel_message",
+          "description": "Read a specific Teams channel message with all replies",
+          "displayName": {
+            "running": "Reading message",
+            "complete": "Read message"
+          }
+        }
+      ]
+    },
+    {
+      "id": "gateway_onedrive",
+      "name": "OneDrive",
+      "description": "Cloud storage: search files and download text content from OneDrive via Microsoft Graph (3LO via microsoft-oauth-provider)",
+      "category": "productivity",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": true,
+      "tags": ["onedrive", "microsoft", "storage", "files", "cloud"],
+      "tools": [
+        {
+          "id": "gateway_search_onedrive",
+          "name": "search_onedrive",
+          "description": "Search OneDrive files via Microsoft Search API (filetype:pdf, created>=date, etc.)",
+          "displayName": {
+            "running": "Searching OneDrive",
+            "complete": "Searched OneDrive"
+          }
+        },
+        {
+          "id": "gateway_download_onedrive_file_text",
+          "name": "download_onedrive_file_text",
+          "description": "Download text content from a OneDrive file (max 10 MB)",
+          "displayName": {
+            "running": "Downloading file",
+            "complete": "Downloaded file"
+          }
+        }
+      ]
+    },
+    {
+      "id": "gateway_sharepoint",
+      "name": "SharePoint",
+      "description": "Document management: search sites and documents, read pages, and list document libraries via Microsoft Graph (3LO via microsoft-oauth-provider)",
+      "category": "productivity",
+      "icon": "",
+      "enabled": false,
+      "isDynamic": true,
+      "tags": [
+        "sharepoint",
+        "microsoft",
+        "documents",
+        "collaboration",
+        "sites"
+      ],
+      "tools": [
+        {
+          "id": "gateway_search_sharepoint",
+          "name": "search_sharepoint",
+          "description": "Search SharePoint sites and documents via Microsoft Search API",
+          "displayName": {
+            "running": "Searching SharePoint",
+            "complete": "Searched SharePoint"
+          }
+        },
+        {
+          "id": "gateway_read_sharepoint_page",
+          "name": "read_sharepoint_page",
+          "description": "Read a specific SharePoint site page with content and metadata",
+          "displayName": {
+            "running": "Reading page",
+            "complete": "Read page"
+          }
+        },
+        {
+          "id": "gateway_list_site_drives",
+          "name": "list_site_drives",
+          "description": "List all document libraries (drives) in a SharePoint site",
+          "displayName": {
+            "running": "Listing drives",
+            "complete": "Listed drives"
+          }
+        }
+      ]
+    }
+  ]
+}

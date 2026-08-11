@@ -1,0 +1,94 @@
+{
+  "gateway_tools": [
+    {
+      "id": "gateway_wikipedia-search___wikipedia_search",
+      "name": "Wikipedia Search",
+      "description": "Search Wikipedia for articles",
+      "category": "knowledge",
+      "icon": "📚",
+      "enabled": false,
+      "isDynamic": true
+    },
+    {
+      "id": "gateway_wikipedia-get-article___wikipedia_get_article",
+      "name": "Wikipedia Get Article",
+      "description": "Get full content of a Wikipedia article",
+      "category": "knowledge",
+      "icon": "📖",
+      "enabled": false,
+      "isDynamic": true
+    },
+    {
+      "id": "gateway_arxiv-search___arxiv_search",
+      "name": "ArXiv Paper Search",
+      "description": "Search scientific papers on ArXiv",
+      "category": "research",
+      "icon": "🔬",
+      "enabled": false,
+      "isDynamic": true
+    },
+    {
+      "id": "gateway_arxiv-get-paper___arxiv_get_paper",
+      "name": "ArXiv Get Paper",
+      "description": "Get full paper content from ArXiv by paper ID",
+      "category": "research",
+      "icon": "📄",
+      "enabled": false,
+      "isDynamic": true
+    },
+    {
+      "id": "gateway_tavily-search___tavily_search",
+      "name": "Tavily AI Search",
+      "description": "AI-powered web search using Tavily",
+      "category": "search",
+      "icon": "🤖",
+      "enabled": false,
+      "isDynamic": true
+    },
+    {
+      "id": "gateway_tavily-extract___tavily_extract",
+      "name": "Tavily Content Extract",
+      "description": "Extract clean content from web URLs",
+      "category": "search",
+      "icon": "📝",
+      "enabled": false,
+      "isDynamic": true
+    },
+    {
+      "id": "gateway_stock-quote___stock_quote",
+      "name": "Stock Quote",
+      "description": "Get current stock quote with key metrics",
+      "category": "finance",
+      "icon": "📈",
+      "enabled": false,
+      "isDynamic": true
+    },
+    {
+      "id": "gateway_stock-history___stock_history",
+      "name": "Stock History",
+      "description": "Get historical stock price data",
+      "category": "finance",
+      "icon": "📊",
+      "enabled": false,
+      "isDynamic": true
+    },
+    {
+      "id": "gateway_financial-news___financial_news",
+      "name": "Financial News",
+      "description": "Get latest financial news articles",
+      "category": "finance",
+      "icon": "📰",
+      "enabled": false,
+      "isDynamic": true
+    },
+    {
+      "id": "gateway_stock-analysis___stock_analysis",
+      "name": "Stock Analysis",
+      "description": "Get comprehensive stock analysis",
+      "category": "finance",
+      "icon": "💹",
+      "enabled": false,
+      "isDynamic": true
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+name: ms-teams
+description: "List joined Teams and recent chats via Microsoft Graph (OBO)"
+skill_md_path: ms-teams/SKILL.md
+source: gateway
+sourceRecord: microsoft-graph
+tools:
+  - listMyTeams
+  - listMyChats

@@ -1,0 +1,8 @@
+name: outlook-mail
+description: "Search and read Outlook email via Microsoft Graph (OBO)"
+skill_md_path: outlook-mail/SKILL.md
+source: gateway
+sourceRecord: microsoft-graph
+tools:
+  - getMyProfile
+  - listUserMails

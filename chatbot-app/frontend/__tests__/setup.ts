@@ -1,0 +1,120 @@
+import "@testing-library/jest-dom";
+import { vi } from "vitest";
+
+// setupFiles applies to EVERY test file, including ones that opt into the node environment with
+// a `// @vitest-environment node` docblock (server-side code such as the BFF authorization
+// middleware). None of the browser globals below exist there, and touching them threw
+// "HTMLCanvasElement is not defined" before the suite could even collect, so install the DOM
+// mocks only when there is actually a DOM.
+if (typeof window !== "undefined") {
+  installBrowserMocks();
+}
+
+function installBrowserMocks() {
+  // Mock canvas for lottie-web (lottie requires canvas context at module load time)
+  HTMLCanvasElement.prototype.getContext = vi.fn(() => ({
+    fillStyle: "",
+    fillRect: vi.fn(),
+    clearRect: vi.fn(),
+    getImageData: vi.fn(() => ({ data: [] })),
+    putImageData: vi.fn(),
+    createImageData: vi.fn(() => ({})),
+    setTransform: vi.fn(),
+    drawImage: vi.fn(),
+    save: vi.fn(),
+    restore: vi.fn(),
+    beginPath: vi.fn(),
+    moveTo: vi.fn(),
+    lineTo: vi.fn(),
+    closePath: vi.fn(),
+    stroke: vi.fn(),
+    fill: vi.fn(),
+    translate: vi.fn(),
+    scale: vi.fn(),
+    rotate: vi.fn(),
+    arc: vi.fn(),
+    clip: vi.fn(),
+    transform: vi.fn(),
+    measureText: vi.fn(() => ({ width: 0 })),
+    createLinearGradient: vi.fn(() => ({ addColorStop: vi.fn() })),
+    createRadialGradient: vi.fn(() => ({ addColorStop: vi.fn() })),
+    createPattern: vi.fn(),
+    bezierCurveTo: vi.fn(),
+    quadraticCurveTo: vi.fn(),
+    rect: vi.fn(),
+    strokeRect: vi.fn(),
+    strokeText: vi.fn(),
+    fillText: vi.fn(),
+    canvas: { width: 100, height: 100 },
+  })) as any;
+
+  // Mock window.matchMedia for components that use media queries
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    value: vi.fn().mockImplementation((query) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+
+  // Mock ResizeObserver
+  global.ResizeObserver = vi.fn().mockImplementation(() => ({
+    observe: vi.fn(),
+    unobserve: vi.fn(),
+    disconnect: vi.fn(),
+  }));
+
+  // Mock IntersectionObserver
+  global.IntersectionObserver = vi.fn().mockImplementation(() => ({
+    observe: vi.fn(),
+    unobserve: vi.fn(),
+    disconnect: vi.fn(),
+  }));
+
+  // Mock sessionStorage
+  const sessionStorageMock = {
+    getItem: vi.fn(),
+    setItem: vi.fn(),
+    removeItem: vi.fn(),
+    clear: vi.fn(),
+  };
+  Object.defineProperty(window, "sessionStorage", {
+    value: sessionStorageMock,
+  });
+
+  // Mock localStorage
+  const localStorageMock = {
+    getItem: vi.fn(),
+    setItem: vi.fn(),
+    removeItem: vi.fn(),
+    clear: vi.fn(),
+  };
+  Object.defineProperty(window, "localStorage", { value: localStorageMock });
+
+  // Mock fetch
+  global.fetch = vi.fn();
+
+  // Mock scrollIntoView (not available in jsdom)
+  Element.prototype.scrollIntoView = vi.fn();
+
+  // Mock scrollTo (not available in jsdom)
+  Element.prototype.scrollTo = vi.fn();
+
+  // Mock btoa for base64 encoding (used in imageExtractor)
+  if (typeof global.btoa === "undefined") {
+    global.btoa = (str: string) =>
+      Buffer.from(str, "binary").toString("base64");
+  }
+
+  // Mock atob for base64 decoding
+  if (typeof global.atob === "undefined") {
+    global.atob = (str: string) =>
+      Buffer.from(str, "base64").toString("binary");
+  }
+}

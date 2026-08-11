@@ -1,0 +1,95 @@
+# Copy to terraform.tfvars and adjust. terraform.tfvars is gitignored.
+#
+# MAINTENANCE: this example is the only committed record of which variables an
+# environment is expected to set — keep it in sync. Whenever you add a variable
+# to variables.tf or set a new value in your local terraform.tfvars, add a
+# placeholder entry (never a real credential) here in the same change.
+region                 = "us-east-1"
+name_prefix            = "recon-dev"
+hosted_ui_prefix       = "recon-dev-login-CHANGEME" # must be globally unique
+idp_gateway_target_url = ""                         # set to the deployed IDP endpoint to enable the IDP tool
+# recon_domain         = "cash"                     # domain the IDP hook stamps on ingested items
+
+# AWS's own public publisher account for the AWSOpenTelemetryDistroPython Lambda layer.
+# NOT a secret and NOT one of our accounts — AWS publishes this ID in its public per-region
+# layer ARN table, and there is no SSM parameter that resolves it. It lives in tfvars only
+# because the repo's pre-push guard rejects any 12-digit run in a committed file.
+# Look up the current value in AWS's docs (search "AWSOpenTelemetryDistroPython layer ARN")
+# and paste the 12-digit account segment of the ARN here. Required whenever
+# enable_worker_tracing = true (the default); variables.tf declares no default, so Terraform
+# will stop and name this variable rather than build a bad ARN.
+otel_layer_account = "<12-digit-account-id>"
+
+# IDP MCP client-credentials, JSON: {token_url, client_id, client_secret, scope}.
+# Values come from the IDP team. Empty disables the document-extraction target.
+# idp_mcp_secret_json = "{\"token_url\":\"\",\"client_id\":\"\",\"client_secret\":\"\",\"scope\":\"\"}"
+
+# Microsoft Graph gateway target ("microsoft-graph") — app-only (client_credentials).
+# The recon gateway's inbound auth is Cognito JWT, so OBO (delegated, 3LO) cannot work —
+# main.tf pins auth_mode = "client_credentials" for this env. Requires an Entra app
+# registration granted APPLICATION permissions (Mail.Read, Mail.Send, User.Read.All,
+# Sites.Read.All) with admin consent, and a current (non-expired) client secret — Entra
+# app registration/consent is a manual step outside Terraform/AWS.
+# graph_enabled     = true
+# entra_tenant_id   = ""
+# entra_client_id   = ""
+# entra_client_secret = ""   # plaintext in terraform.tfvars is OK: that file is gitignored, never committed
+
+# Okta frontend login — switches the UI from the default 'entra' provider to Okta OIDC.
+# Browser PKCE redirect flow: only issuer + client id are needed (no client secret).
+# okta_issuer is the auth-server base URL (e.g. https://<org>.okta.com/oauth2/default),
+# NOT the .well-known metadata URL. The Okta app must be SPA/PKCE-enabled and allowlist
+# https://<frontend-domain>/login/callback as a sign-in redirect URI. Changing these
+# requires a frontend image rebuild (values are baked in as NEXT_PUBLIC_* build args).
+# auth_provider  = "okta"
+# okta_issuer    = ""
+# okta_client_id = ""
+
+# REQUIRED. The shared mailbox every Graph message is sent FROM and read through. variables.tf
+# declares no default on purpose — a mailbox address identifies a real tenant, so it belongs here
+# in the gitignored file and not in committed code. Set it to "" to deploy without the email step.
+graph_mailbox = "shared@<your-tenant>.onmicrosoft.com"
+
+# Resolution-notification recipient (human approve + auto-resolve). Sent FROM graph_mailbox above
+# via the egress gateway's microsoft-graph sendSharedMailboxMail tool. Requires graph_enabled +
+# Entra creds. Empty (the default) disables the email step. Pointing it at the shared mailbox
+# itself is a reasonable single-tenant dev setup.
+# notify_email = "shared@<your-tenant>.onmicrosoft.com"
+
+# Counterparty-email recipient allowlist: the domains an analyst may address a draft to. Leaving
+# this unset allows NO counterparty email — the notification path above is unaffected. Domains are
+# matched exactly (no suffix match), so list every subdomain you actually write to.
+# counterparty_email_domains = ["<your-tenant>.onmicrosoft.com"]
+
+# Gateway REQUEST interceptor (provenance + transition guard at the gateway). Deploy in
+# "log" first, verify the e2e matrix in the interceptor's CloudWatch logs, then flip to
+# "enforce" (a Lambda env-only change).
+# interceptor_mode = "log"
+
+# Agent backend selector — 'runtime' (container AgentCore Runtime, default) or 'harness'
+# (managed AgentCore Harness). Instant A/B; flip back to roll back.
+# agent_backend    = "runtime"
+# harness_model_id = "us.anthropic.claude-sonnet-5"   # model the managed harness invokes
+
+# AgentCore Policy mode on the egress tools gateway. ENFORCE (default) blocks
+# below-threshold autonomous writes via the Cedar confidence gate; LOG_ONLY only observes.
+# policy_enforcement_mode = "ENFORCE"
+
+# Version of AWS's public AWSOpenTelemetryDistroPython layer. Pinned, not 'latest' (AWS
+# publishes no such alias), so an upstream release cannot silently change the worker.
+# otel_layer_version = 30
+
+# Max re-process attempts before a case is aged out.
+# reprocess_cap = 3
+
+# PRIVATE-VPC MODE — one flag switches the whole topology: internal ALB on private subnets,
+# Fargate with no public IP, NO CloudFront, plus the interface VPC endpoints. It does NOT
+# remove the NAT gateway (that stays a manual follow-up edit to infra/modules/network).
+# private_ingress_cidrs is your VPN/corporate range; empty allows the VPC CIDR only.
+# See the README "Private VPC deployment" section before enabling.
+# private_vpc           = true
+# private_ingress_cidrs = ["10.0.0.0/8"]
+
+# Deprecated, retained for compatibility only — Graph mail now goes through the
+# microsoft-graph gateway target, which owns its own Entra credentials.
+# graph_secret_json = ""

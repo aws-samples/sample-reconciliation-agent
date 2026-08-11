@@ -1,0 +1,17 @@
+version: 0.2
+
+# Builds the arm64 recon-agent container, pushes it to ECR, and publishes the SKILL.md
+# classification-type catalog (skills-catalog.json) to the assets bucket so the config UI
+# stays in lockstep with the deployed skills. Source is injected by Terraform (the agent
+# directory is uploaded to CodeBuild; NO_SOURCE build with an inline context is also viable).
+phases:
+  pre_build:
+    commands:
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin "${IMAGE_URI%/*}"
+  build:
+    commands:
+      - docker build --platform linux/arm64 -t "$IMAGE_URI" .
+      - docker push "$IMAGE_URI"
+      # Publish the classification-type catalog from the deployed SKILL.md files.
+      - python3 -c "import json,sys; sys.path.insert(0,'.'); from skills_loader import catalog; from pathlib import Path; print(json.dumps(catalog(Path('skills'))))" > skills-catalog.json
+      - aws s3 cp skills-catalog.json "s3://$ASSETS_BUCKET/skills-catalog.json"

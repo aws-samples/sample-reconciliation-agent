@@ -1,0 +1,30 @@
+name: web-search
+description: Nova Web Grounding (with DuckDuckGo fallback) + URL content fetcher
+tools:
+  - name: web_search
+    description: Search the web with Amazon Nova Web Grounding (grounded, cited responses). Falls back to DuckDuckGo on failure.
+    input_type: object
+    input_description: Search parameters
+    properties:
+      - {
+          name: query,
+          type: string,
+          description: Search query string,
+          required: true,
+        }
+  - name: fetch
+    description: Fetch a URL and return readable text content. Strips HTML, extracts embedded JSON (Next.js __NEXT_DATA__, JSON-LD, Nuxt, Apollo, Remix).
+    input_type: object
+    input_description: URL fetch parameters
+    properties:
+      - {
+          name: url,
+          type: string,
+          description: "URL to fetch (http:// or https://)",
+          required: true,
+        }
+      - {
+          name: max_length,
+          type: integer,
+          description: "Maximum extracted text length (default: 20000)",
+        }

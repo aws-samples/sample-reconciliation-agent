@@ -1,0 +1,23 @@
+[project]
+name = "recon-backend"
+version = "0.1.0"
+description = "Agentic reconciliation platform backend (intake, Tier-1, case store, BFF)."
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic==2.13.0",
+    "boto3==1.43.48",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.0.3",
+    "moto==5.2.2",
+    "ruff==0.15.20",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+pythonpath = [".."]

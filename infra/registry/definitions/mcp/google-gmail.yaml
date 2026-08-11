@@ -1,0 +1,4 @@
+name: google-gmail
+description: Google Gmail MCP server
+display_name: Gmail
+tools: [] # Populated by synchronize-gateway-targets after first user consent (Path B)

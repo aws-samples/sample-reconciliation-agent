@@ -1,0 +1,4 @@
+# Use AWS Public ECR (not Docker Hub) to avoid rate limits and satisfy image-provenance scans.
+FROM public.ecr.aws/nginx/nginx:alpine
+COPY . /usr/share/nginx/html
+EXPOSE 80

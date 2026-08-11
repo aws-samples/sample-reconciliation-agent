@@ -1,0 +1,249 @@
+variable "name_prefix" {
+  description = "Prefix applied to all resource names."
+  type        = string
+}
+
+variable "lambda_zip" {
+  description = "Path to the shared backend Lambda deployment zip (from the lambda-package module)."
+  type        = string
+}
+variable "lambda_source_hash" {
+  description = "Base64 SHA-256 of the shared Lambda zip (from the lambda-package module)."
+  type        = string
+}
+
+variable "items_stream_arn" {
+  description = "DynamoDB stream ARN of the recon-items table (Tier-1 trigger)."
+  type        = string
+}
+
+variable "items_table_arn" {
+  description = "ARN of the recon-items table (read access for Tier-1)."
+  type        = string
+}
+
+variable "cases_table" {
+  description = "Name of the recon-cases table."
+  type        = string
+}
+
+variable "cases_table_arn" {
+  description = "ARN of the recon-cases table."
+  type        = string
+}
+
+variable "audit_table" {
+  description = "Name of the recon-audit table."
+  type        = string
+}
+
+variable "audit_table_arn" {
+  description = "ARN of the recon-audit table."
+  type        = string
+}
+
+variable "agent_runtime_arn" {
+  description = "ARN of the recon-agent AgentCore runtime (from the recon-agent module). Empty on first apply."
+  type        = string
+  default     = ""
+}
+
+variable "tier1_enabled_param" {
+  description = "Name of the SSM parameter toggling the deterministic Tier-1 route."
+  type        = string
+}
+
+variable "tier1_enabled_param_arn" {
+  description = "ARN of the Tier-1 toggle SSM parameter (for read IAM)."
+  type        = string
+}
+
+variable "ingress_gateway_url" {
+  description = "Ingress AgentCore gateway base URL fronting the agent runtime. When set with use_ingress_gateway, the worker invokes the agent through the gateway (SigV4) instead of a direct InvokeAgentRuntime."
+  type        = string
+  default     = ""
+}
+
+variable "ingress_gateway_arn" {
+  description = "Ingress gateway ARN — the worker role is granted bedrock-agentcore:InvokeGateway on it."
+  type        = string
+  default     = ""
+}
+
+variable "use_ingress_gateway" {
+  description = "Route agent invocations through the ingress gateway (true) or via direct InvokeAgentRuntime (false). The worker falls back to direct on any ingress failure regardless."
+  type        = bool
+  default     = false
+}
+
+variable "ingress_target_name" {
+  description = "Ingress gateway target name fronting the runtime (invocation path {gateway}/{target}/invocations)."
+  type        = string
+  default     = "recon-agent"
+}
+
+variable "gl_query_function_name" {
+  description = "gl-query Lambda name for the deterministic GL lookup ('' disables)."
+  type        = string
+  default     = ""
+}
+
+variable "gl_query_function_arn" {
+  type    = string
+  default = ""
+}
+
+variable "vpc_subnet_ids" {
+  description = "Private subnets to attach the Lambda(s) to ([] = no VPC)."
+  type        = list(string)
+  default     = []
+}
+
+variable "vpc_security_group_ids" {
+  type    = list(string)
+  default = []
+}
+
+# --- Harness backend (AGENT_BACKEND="harness") ---
+variable "agent_backend" {
+  description = "Agent invocation backend: 'runtime' or 'harness'."
+  type        = string
+  default     = "runtime"
+}
+
+variable "harness_arn" {
+  description = "AgentCore Harness ARN (used when agent_backend='harness'). Empty when unused."
+  type        = string
+  default     = ""
+}
+
+variable "harness_model_id" {
+  description = "Bedrock model id/inference profile for the harness."
+  type        = string
+  default     = "us.anthropic.claude-sonnet-5"
+}
+
+variable "system_prompt_key" {
+  description = "S3 key of the SHARED system-prompt core, read by both Tier-2 backends."
+  type        = string
+  default     = "system-prompt.md"
+}
+
+variable "harness_system_prompt_key" {
+  description = "S3 key of the harness-only calling contract, appended after the shared core."
+  type        = string
+  default     = "system-prompt-harness.md"
+}
+
+variable "assets_bucket" {
+  description = "Assets bucket (harness worker reads the skills catalog + system prompt)."
+  type        = string
+  default     = ""
+}
+
+variable "assets_bucket_arn" {
+  type    = string
+  default = ""
+}
+
+variable "skills_prefix" {
+  description = "S3 prefix for skills."
+  type        = string
+  default     = "skills/"
+}
+
+variable "lessons_table" {
+  description = "recon-lessons table name (AUTO_RESOLVED lessons + recall)."
+  type        = string
+  default     = ""
+}
+
+variable "lessons_table_arn" {
+  type    = string
+  default = ""
+}
+
+variable "memory_id" {
+  description = "AgentCore Memory id for worker-side lesson recall ('' disables)."
+  type        = string
+  default     = ""
+}
+
+variable "memory_arn" {
+  type    = string
+  default = ""
+}
+
+variable "auto_resolve_param" {
+  description = "SSM parameter name of the auto-resolve threshold (harness worker reads it)."
+  type        = string
+  default     = ""
+}
+
+variable "harness_config_version_param" {
+  description = "SSM parameter name of the active harness config version pointer."
+  type        = string
+  default     = ""
+}
+
+variable "agent_backend_param" {
+  description = "SSM parameter name of the runtime agent-backend selector (runtime|harness)."
+  type        = string
+  default     = ""
+}
+
+variable "egress_gateway_arn" {
+  description = "Egress tools gateway ARN — the harness-backend worker executes the Policy-gated set_draw_status write through it ('' skips the grant)."
+  type        = string
+  default     = ""
+}
+
+variable "egress_gateway_url" {
+  description = "Egress tools gateway URL for the worker's gateway write + resolution email (RECON_GATEWAY_URL)."
+  type        = string
+  default     = ""
+}
+
+variable "graph_mailbox" {
+  description = "Shared mailbox the worker's resolution email is sent FROM (empty disables the email step)."
+  type        = string
+  default     = ""
+}
+
+variable "notify_email" {
+  description = "Recipient for auto-resolve notification emails (empty disables)."
+  type        = string
+  default     = ""
+}
+
+variable "email_confirmation_token" {
+  description = "Shared secret for the auto-resolve email send (gateway interceptor human-confirmation gate)."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+# ---------------------------------------------------------------------------------
+# Client-side OTel tracing for the agent-worker Lambda
+# ---------------------------------------------------------------------------------
+
+variable "otel_layer_arn" {
+  description = <<-EOT
+    ADOT Lambda layer ARN (AWSOpenTelemetryDistroPython) for the agent-worker. This layer is the
+    ONLY source of the opentelemetry packages — they are not vendored into the shared Lambda zip.
+    Empty = tracing fully off: no layer, no OTel env, PassThrough X-Ray, and the
+    backend/recon_core/otel_client helpers stay inert.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "otel_baggage_span_attribute_keys" {
+  description = <<-EOT
+    Allow-list of W3C baggage keys promoted to span attributes. Must match the harness module's
+    variable of the same name — the keys are set on this side and consumed on the other, so a
+    mismatch silently drops attributes from the agent's spans.
+  EOT
+  type        = string
+  default     = "harness.id,harness.endpoint.qualifier,session.id,recon.item_id,recon.domain,recon.backend"
+}

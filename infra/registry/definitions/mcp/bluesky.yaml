@@ -1,0 +1,46 @@
+name: bluesky
+description: Bluesky AT Protocol post search and thread retrieval
+tools:
+  - name: search_posts
+    description: Search public Bluesky posts by free-text query, sorted by relevance ('top') or recency ('latest').
+    input_type: object
+    input_description: Search parameters
+    properties:
+      - {
+          name: query,
+          type: string,
+          description: Free-text search query,
+          required: true,
+        }
+      - {
+          name: limit,
+          type: integer,
+          description: "Number of posts to return (1-100, default 25)",
+        }
+      - { name: sort, type: string, description: "'top' (default) or 'latest'" }
+      - {
+          name: author,
+          type: string,
+          description: "Optional handle or DID to scope results to one author",
+        }
+  - name: get_post
+    description: Fetch a single Bluesky post (optionally with its surrounding thread) by AT URI.
+    input_type: object
+    input_description: Post retrieval parameters
+    properties:
+      - {
+          name: uri,
+          type: string,
+          description: "Bluesky AT URI (e.g. at://did:plc:xxx/app.bsky.feed.post/yyy)",
+          required: true,
+        }
+      - {
+          name: depth,
+          type: integer,
+          description: "Reply depth to include (default 0)",
+        }
+      - {
+          name: parent_height,
+          type: integer,
+          description: "Ancestor depth to include (default 0)",
+        }

@@ -1,0 +1,386 @@
+{
+  "openapi": "3.0.1",
+  "info": {
+    "title": "Microsoft Graph (OBO)",
+    "version": "1.0",
+    "description": "Microsoft Graph endpoints exposed via AgentCore Gateway with OBO token exchange. Covers profile, Outlook mail, Outlook calendar, OneDrive, SharePoint, and Teams."
+  },
+  "servers": [
+    {
+      "url": "https://graph.microsoft.com/v1.0"
+    }
+  ],
+  "paths": {
+    "/me": {
+      "get": {
+        "operationId": "getMyProfile",
+        "summary": "Get the signed-in user's profile",
+        "description": "Returns the Microsoft 365 profile (display name, email, UPN) of the authenticated user.",
+        "responses": {
+          "200": {
+            "description": "User profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/messages": {
+      "get": {
+        "operationId": "listUserMails",
+        "summary": "List the user's most recent Outlook emails",
+        "description": "Returns emails from the user's mailbox. Use 'top' to control how many to return.",
+        "parameters": [
+          {
+            "name": "top",
+            "in": "query",
+            "description": "Maximum number of messages to return (default 10).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 10
+            }
+          },
+          {
+            "name": "select",
+            "in": "query",
+            "description": "Comma-separated list of fields to include (e.g. 'subject,from,receivedDateTime').",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Mail collection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/calendarview": {
+      "get": {
+        "operationId": "listCalendarEvents",
+        "summary": "List the user's calendar events in a date window",
+        "description": "Returns calendar events between startDateTime and endDateTime (ISO-8601).",
+        "parameters": [
+          {
+            "name": "startDateTime",
+            "in": "query",
+            "description": "ISO-8601 start time (e.g. 2026-05-27T00:00:00Z).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endDateTime",
+            "in": "query",
+            "description": "ISO-8601 end time.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "top",
+            "in": "query",
+            "description": "Maximum events to return (default 25).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 25
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Calendar events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/drive/recent": {
+      "get": {
+        "operationId": "listMyRecentFiles",
+        "summary": "List recently accessed OneDrive files",
+        "description": "Returns the files the signed-in user has worked on most recently in OneDrive.",
+        "parameters": [
+          {
+            "name": "top",
+            "in": "query",
+            "description": "Maximum number of recent items to return (default 25).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 25
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent OneDrive items",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/drive/root/children": {
+      "get": {
+        "operationId": "listMyOneDriveRoot",
+        "summary": "List items in the root of the user's OneDrive",
+        "description": "Returns folders and files at the root level of the user's OneDrive.",
+        "parameters": [
+          {
+            "name": "top",
+            "in": "query",
+            "description": "Maximum number of items to return (default 25).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 25
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OneDrive root items",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sites": {
+      "get": {
+        "operationId": "searchSharePointSites",
+        "summary": "Search SharePoint sites by name",
+        "description": "Searches SharePoint sites the user has access to. Requires Sites.Read.All admin consent.",
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Search query for SharePoint site name (e.g. 'engineering').",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching SharePoint sites",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/joinedTeams": {
+      "get": {
+        "operationId": "listMyTeams",
+        "summary": "List the Microsoft Teams the user is a member of",
+        "description": "Returns all Teams the signed-in user has joined.",
+        "responses": {
+          "200": {
+            "description": "Joined Teams",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/chats": {
+      "get": {
+        "operationId": "listMyChats",
+        "summary": "List the user's recent Teams chats",
+        "description": "Returns the user's Teams chat conversations (1:1, group, and meeting chats).",
+        "parameters": [
+          {
+            "name": "top",
+            "in": "query",
+            "description": "Maximum number of chats to return (default 20).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Teams chats",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/users/{mailboxAddress}/messages": {
+      "get": {
+        "operationId": "listSharedMailboxMessages",
+        "summary": "List messages in a shared mailbox inbox (read the shared email inbox)",
+        "description": "Reads the most recent messages of the shared mailbox the signed-in user has access to (Mail.Read.Shared).",
+        "parameters": [
+          {
+            "name": "mailboxAddress",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Shared mailbox SMTP address, e.g. loan.ops@example.com"
+          },
+          {
+            "name": "$top",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 10
+            },
+            "description": "Max messages"
+          },
+          {
+            "name": "$search",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Free-text search, e.g. \"CASCADE paydown\""
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Messages list"
+          }
+        }
+      }
+    },
+    "/users/{mailboxAddress}/sendMail": {
+      "post": {
+        "operationId": "sendSharedMailboxMail",
+        "summary": "Send an email from the shared mailbox (Mail.Send.Shared)",
+        "description": "Sends a message as the shared mailbox, e.g. an outbound counterparty request drafted by the agent and approved by an analyst.",
+        "parameters": [
+          {
+            "name": "mailboxAddress",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Shared mailbox SMTP address the message is sent from"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "message": {
+                    "type": "object",
+                    "properties": {
+                      "subject": {
+                        "type": "string"
+                      },
+                      "body": {
+                        "type": "object",
+                        "properties": {
+                          "contentType": {
+                            "type": "string",
+                            "enum": [
+                              "Text",
+                              "HTML"
+                            ]
+                          },
+                          "content": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "toRecipients": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "emailAddress": {
+                              "type": "object",
+                              "properties": {
+                                "address": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "saveToSentItems": {
+                    "type": "boolean",
+                    "default": true
+                  }
+                },
+                "required": [
+                  "message"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted"
+          }
+        }
+      }
+    }
+  }
+}

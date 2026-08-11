@@ -1,0 +1,4 @@
+name: mcp-3lo
+description: Google Calendar, Notion, and GitHub via AgentCore Runtime behind Gateway
+display_name: 3LO Apps
+tools: [] # Populated by synchronize-gateway-targets after first user consent (Path B)

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- Recon·Ops mark: cyan rounded square on the near-black console background -->
+  <rect width="32" height="32" rx="6" fill="#0a0b0d"/>
+  <rect x="9" y="9" width="14" height="14" rx="3" fill="#3ad6c5"/>
+</svg>

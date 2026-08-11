@@ -1,0 +1,52 @@
+# .semgrepignore — scoped noise suppression for the reconciliation-workflow-agent scan.
+#
+# This file suppresses findings by PATH ONLY (gitignore syntax); semgrep reads it
+# automatically. It CANNOT filter by rule ID — for that, pass the noise rule IDs below to
+# `semgrep --exclude-rule <id>` (or the scanner's equivalent). Both halves were triaged from
+# ProbeScanExport-b6ca1602 (2026-07-26): 3 genuine issues fixed (commit 92e9ae1); everything
+# listed here is style/i18n/vendored noise, NOT a security finding.
+#
+# ---------------------------------------------------------------------------------------------
+# NOISE RULE IDs (suppress via --exclude-rule; NOT effective in this file):
+#   jsx-not-internationalized          # 279 — app has no i18n requirement (internal tooling UI)
+#   react-props-spreading              #  99 — team style choice, not a vulnerability
+#   missing-template-string-indicator  #  28 — false positives in test literals (swarmParser.test)
+#   no-stringify-keys                  #  22 — style/perf micro-lint
+#   react-props-in-state               #   1 — style
+#   useless-assignment                 #   2 — dead-code lint (not security)
+#   useless-ternary                    #   1 — style
+#   prefer-json-notation               #   1 — style
+#   code-after-unconditional-return    #   1 — dead-code lint
+#
+# Example invocation:
+#   semgrep --config auto \
+#     --exclude-rule jsx-not-internationalized \
+#     --exclude-rule react-props-spreading \
+#     --exclude-rule missing-template-string-indicator \
+#     --exclude-rule no-stringify-keys \
+#     --exclude-rule react-props-in-state \
+#     --exclude-rule useless-assignment \
+#     --exclude-rule useless-ternary \
+#     --exclude-rule prefer-json-notation \
+#     --exclude-rule code-after-unconditional-return
+#
+# Deliberately NOT suppressed (real security signal — keep scanning): detect-non-literal-fs-filename,
+# path-join-resolve-traversal, no-iam-data-exfiltration, unsafe-formatstring, secret-in-build-arg,
+# aws-access-token, detected-jwt-token, generic-api-key, insecure-innerhtml, *postmessage*,
+# unsafe-dynamic-method, detect-insecure-websocket, aws-lambda-permission-unrestricted-source-arn,
+# and all aws-*-unencrypted / hardening rules.
+# ---------------------------------------------------------------------------------------------
+
+# --- Vendored third-party SDK (Amazon DCV web client) — not our source, do not lint ---
+chatbot-app/frontend/public/dcv-sdk/
+
+# --- Other generated / non-source static assets under public/ ---
+chatbot-app/frontend/public/embed-example.js
+chatbot-app/frontend/public/animations/
+
+# --- Build output / dependencies / IaC synth artifacts ---
+chatbot-app/frontend/.next/
+node_modules/
+cdk.out/
+**/__pycache__/
+.venv/

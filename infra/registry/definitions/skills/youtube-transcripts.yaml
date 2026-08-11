@@ -1,0 +1,8 @@
+name: youtube-transcripts
+description: "Fetch YouTube transcripts (with optional translation) and list available languages"
+skill_md_path: youtube-transcripts/SKILL.md
+source: gateway
+sourceRecord: gateway-lambda
+tools:
+  - get_youtube_transcript
+  - list_youtube_transcripts

@@ -1,0 +1,8 @@
+name: onedrive
+description: "List recent OneDrive files and root contents via Microsoft Graph (OBO)"
+skill_md_path: onedrive/SKILL.md
+source: gateway
+sourceRecord: microsoft-graph
+tools:
+  - listMyRecentFiles
+  - listMyOneDriveRoot

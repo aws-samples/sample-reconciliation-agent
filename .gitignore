@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+# Also match a bare `.venv` with no trailing slash: a worktree shares the repo-root interpreter
+# via a `.venv -> ../../.venv` SYMLINK, which `.venv/` does not match and which was accidentally
+# committed once (510e4ed).
+.venv
+venv/
+.deploy-venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+chatbot-app/agentcore
+
+# Node / frontend
+node_modules/
+.next/
+dist/
+build/
+*.local
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfvars
+!*.tfvars.example
+# Backend partial config: holds the state bucket name, which embeds the AWS account ID.
+# A backend block cannot read variables, so this cannot live in terraform.tfvars.
+backend.hcl
+!backend.hcl.example
+
+# Lambda build artifacts
+.build/
+
+# Worktrees
+.worktrees/
+
+# OS
+.DS_Store
+
+# TS build info
+*.tsbuildinfo
+*.tfplan
+
+data/input/sample-classes/
+
+# Design records, implementation plans and security-audit reports are kept local-only —
+# they are working notes, not part of the published sample, and are deliberately untracked.
+docs/

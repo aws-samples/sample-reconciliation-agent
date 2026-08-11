@@ -1,0 +1,14 @@
+# Copy to backend.hcl and fill in. backend.hcl is gitignored.
+#
+# Supplies the one backend setting that cannot be committed: the S3 state bucket name, which
+# embeds our AWS account ID (S3 bucket names are globally unique). A backend block cannot use
+# variables or interpolation, so this value cannot come from terraform.tfvars — Terraform's
+# -backend-config file is the supported mechanism.
+#
+# Usage (the deploy script does this for you):
+#   terraform init -backend-config=backend.hcl
+#
+# The bucket is created once out-of-band; see the README's remote-state section. Convention is
+# recon-dev-tfstate-<account_id>, where <account_id> is the 12-digit ID of the account you are
+# deploying into (`aws sts get-caller-identity --profile <profile> --query Account --output text`).
+bucket = "recon-dev-tfstate-<account-id>"

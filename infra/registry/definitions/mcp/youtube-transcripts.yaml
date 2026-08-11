@@ -1,0 +1,40 @@
+name: youtube-transcripts
+description: YouTube video transcript retrieval and language listing
+tools:
+  - name: get_youtube_transcript
+    description: Fetch the transcript for a YouTube video. Supports language preference and translation. Tries Supadata API first; falls back to youtube-transcript-api.
+    input_type: object
+    input_description: Transcript retrieval parameters
+    properties:
+      - {
+          name: video,
+          type: string,
+          description: "YouTube URL or 11-character video ID",
+          required: true,
+        }
+      - {
+          name: languages,
+          type: array,
+          description: "Preferred ISO 639-1 codes (default ['en'])",
+        }
+      - {
+          name: translate_to,
+          type: string,
+          description: "Translate transcript into this ISO 639-1 code",
+        }
+      - {
+          name: preserve_formatting,
+          type: boolean,
+          description: "Keep HTML formatting (default false)",
+        }
+  - name: list_youtube_transcripts
+    description: List every transcript available on a YouTube video (language codes, manual vs auto-generated, available translations).
+    input_type: object
+    input_description: Listing parameters
+    properties:
+      - {
+          name: video,
+          type: string,
+          description: "YouTube URL or 11-character video ID",
+          required: true,
+        }

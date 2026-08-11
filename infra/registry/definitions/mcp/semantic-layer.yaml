@@ -1,0 +1,74 @@
+name: semantic-layer
+description: Natural-language query over the semantic-layer ontologies (VKG / Semantic-RAG) via the remote AgentCore Gateway.
+display_name: Semantic Layer
+# NOTE: This YAML is canonical documentation only. The Gateway does NOT inline
+# mcpToolSchema for mcp_server targets — the four tools below are discovered at
+# runtime via `synchronize-gateway-target` after the first user OAuth consent.
+# Tool names are PascalCase upstream; the gateway_<name> ids in tools-config.json
+# must match exactly what the sync reports.
+tools:
+  - name: ListOntologies
+    description: List available semantic layers and read each one's mode (VKG → use OntologyQuery; SemanticRAG → use MetadataQuery). Call this FIRST before any query tool.
+    input_type: object
+    input_description: Optional status filter
+    properties:
+      - {
+          name: status,
+          type: string,
+          description: "Filter to ontologies in a build status (e.g. 'completed'); omit for all",
+        }
+  - name: OntologyQuery
+    description: VKG path — answer a natural-language question against an ontology. Returns answer, rows, the generated sparql and sql, and lineage. Use when the ontology's mode is VKG.
+    input_type: object
+    input_description: Ontology query parameters
+    properties:
+      - {
+          name: ontologyId,
+          type: string,
+          description: "Ontology id from ListOntologies",
+          required: true,
+        }
+      - {
+          name: question,
+          type: string,
+          description: "Natural-language question",
+          required: true,
+        }
+      - {
+          name: rowLimit,
+          type: integer,
+          description: "Max rows to return (default 10, max 100)",
+        }
+  - name: MetadataQuery
+    description: Semantic-RAG path — answer a natural-language question against an ontology. Same shape as OntologyQuery but returns retrievedChunks instead of lineage. Use when the ontology's mode is SemanticRAG.
+    input_type: object
+    input_description: Metadata (Semantic-RAG) query parameters
+    properties:
+      - {
+          name: ontologyId,
+          type: string,
+          description: "Ontology id from ListOntologies",
+          required: true,
+        }
+      - {
+          name: question,
+          type: string,
+          description: "Natural-language question",
+          required: true,
+        }
+      - {
+          name: rowLimit,
+          type: integer,
+          description: "Max rows to return (default 10, max 100)",
+        }
+  - name: QuerySuggestions
+    description: Get suggested questions for an ontology, grouped by category. Use to answer "what can I ask about this layer?".
+    input_type: object
+    input_description: Suggestion parameters
+    properties:
+      - {
+          name: ontologyId,
+          type: string,
+          description: "Ontology id from ListOntologies",
+          required: true,
+        }

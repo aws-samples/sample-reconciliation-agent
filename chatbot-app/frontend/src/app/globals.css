@@ -1,0 +1,506 @@
+@import "@excalidraw/excalidraw/index.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Skills dialog scrollbar */
+.skills-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+.skills-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.skills-scrollbar::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 3px;
+}
+.skills-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.4);
+}
+
+/* Prevent FOUC - Initial loading screen with smooth transition */
+@layer base {
+  body {
+    @apply bg-white dark:bg-black;
+  }
+
+  /* Hide content until React hydrates */
+  #__next:empty {
+    @apply min-h-screen flex items-center justify-center;
+  }
+
+  #__next:empty::after {
+    content: "";
+    @apply block h-16 w-16 rounded-full border-4 border-gray-200 dark:border-gray-700 border-t-blue-500 animate-spin;
+  }
+}
+
+/* Hide Next.js development mode indicator */
+#__next-build-watcher {
+  display: none !important;
+}
+
+/* Alternative selector for Next.js dev tools */
+[data-nextjs-scroll-focus-boundary] + div[style*="position: fixed"][style*="top: 0"][style*="right: 0"] {
+  display: none !important;
+}
+
+/* Hide Next.js dev overlay button */
+button[data-nextjs-toast-errors-parent] {
+  display: none !important;
+}
+
+/* Hide any fixed positioned elements in top-right that might be Next.js dev tools */
+div[style*="position: fixed"][style*="top: 0"][style*="right: 0"][style*="z-index"] {
+  display: none !important;
+}
+
+/* Chart Renderer Styles */
+.chart-data-summary {
+  @apply mt-4 p-3 bg-gray-50 dark:bg-gray-800/80 border border-gray-100 dark:border-gray-700 rounded-md;
+  font-size: var(--font-chart-header);
+}
+
+.chart-data-summary-header {
+  @apply font-medium text-gray-700 dark:text-gray-200 cursor-pointer flex items-center;
+  font-size: var(--font-chart-header);
+}
+
+.chart-data-summary-content {
+  @apply mt-2 overflow-x-auto max-h-[400px];
+}
+
+.chart-data-table {
+  @apply min-w-full border-collapse;
+  font-size: var(--font-chart-cell);
+}
+
+.chart-data-table-header {
+  @apply bg-gray-100 dark:bg-gray-700 sticky top-0;
+}
+
+.chart-data-table-header-cell {
+  @apply px-2 py-1.5 text-left font-medium text-gray-700 dark:text-gray-200 border-b dark:border-gray-600;
+  font-size: var(--font-chart-cell);
+  padding: 0.75rem 1rem;
+}
+
+.chart-data-table-row-even {
+  @apply bg-white dark:bg-gray-800/50;
+}
+
+.chart-data-table-row-odd {
+  @apply bg-gray-50 dark:bg-gray-800/80;
+}
+
+.chart-data-table-cell {
+  @apply px-2 py-1.5 border-b border-gray-100 dark:border-gray-700 tabular-nums;
+  font-size: var(--font-chart-cell);
+  padding: 0.75rem 1rem;
+}
+
+.chart-data-count {
+  @apply mr-1.5 tabular-nums;
+  font-size: var(--font-chart-header);
+}
+
+.details-icon {
+  width: 12px;
+  height: 12px;
+  fill: currentColor;
+}
+
+@layer base {
+  :root {
+    /* Base font size - change this to scale all fonts */
+    --font-base: 14px;
+
+    /* Font sizes - centralized management */
+    /* All values relative to --font-base via rem */
+    --font-caption: 0.75rem;      /* 10.5px - timestamps, meta info */
+    --font-label: 0.875rem;       /* 12.25px - labels, secondary text */
+    --font-body: 1rem;            /* 14px - default body text */
+    --font-body-lg: 1.071rem;     /* 15px - slightly larger body */
+    --font-input: 1.285rem;       /* 18px - chat input */
+    --font-title: 1.143rem;       /* 16px - small titles */
+    --font-heading: 1.285rem;     /* 18px - headings */
+    --font-heading-lg: 1.428rem;  /* 20px - large headings */
+    --font-display: 1.714rem;     /* 24px - display text */
+
+    /* Special purpose font sizes */
+    --font-ai-message: 1.071rem;  /* 15px - AI message text */
+    --font-chart-header: 0.75rem; /* 10.5px - chart headers */
+    --font-chart-cell: 0.95rem;   /* 13.3px - chart table cells */
+    --font-citation: 0.785rem;    /* 11px - citation links */
+
+    --background: 0 0% 100%;
+    --foreground: 220 13% 29%;
+    --card: 220 14% 98%;
+    --card-foreground: 220 13% 29%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 13% 29%;
+    --primary: 188 91% 35%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 214 95% 56%;
+    --secondary-foreground: 0 0% 100%;
+    --muted: 220 14% 98%;
+    --muted-foreground: 220 13% 29%;
+    --accent: 214 95% 56%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 220 13% 91%;
+    --input: 0 0% 100%;
+    --ring: 188 91% 35%;
+    --radius: 0.5rem;
+    --chart-1: 214 95% 56%;
+    --chart-2: 159 64% 42%;
+    --chart-3: 347 77% 50%;
+    --chart-4: 280 87% 65%;
+    --chart-5: 25 95% 53%;
+    --sidebar-background: 226 38% 94%;
+    --sidebar-foreground: 220 13% 29%;
+    --sidebar-primary: 0 0% 100%;
+    --sidebar-primary-foreground: 220 13% 29%;
+    --sidebar-accent: 214 95% 56%;
+    --sidebar-accent-foreground: 0 0% 100%;
+    --sidebar-border: 220 13% 88%;
+    --sidebar-ring: 214 95% 56%;
+  }
+
+  .dark {
+    --background: 0 0% 0%;
+    --foreground: 220 14% 96%;
+    --card: 0 0% 0%;
+    --card-foreground: 220 14% 96%;
+    --popover: 0 0% 7%;
+    --popover-foreground: 220 14% 96%;
+    --primary: 188 91% 35%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 214 95% 56%;
+    --secondary-foreground: 0 0% 100%;
+    --muted: 0 0% 13%;
+    --muted-foreground: 220 9% 64%;
+    --accent: 214 95% 56%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 63% 31%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 20%;
+    --input: 0 0% 13%;
+    --ring: 188 91% 35%;
+    --sidebar-background: 0 0% 13%;
+    --sidebar-foreground: 220 14% 96%;
+    --sidebar-primary: 214 95% 56%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 0 0% 20%;
+    --sidebar-accent-foreground: 220 14% 96%;
+    --sidebar-border: 0 0% 20%;
+    --sidebar-ring: 214 95% 56%;
+    --chart-1: 220 70% 80%;
+    --chart-2: 160 60% 75%;
+    --chart-3: 30 80% 85%;
+    --chart-4: 280 65% 85%;
+    --chart-5: 340 75% 80%;
+  }
+}
+
+@layer base {
+  body {
+    @apply bg-background text-foreground;
+  }
+  
+  /* Base font size for rem calculations */
+  html {
+    font-size: var(--font-base);
+  }
+}
+
+@layer utilities {
+  .chat-input-container {
+    transition: box-shadow 0.3s ease, border-color 0.3s ease;
+  }
+
+  .chat-input-container:focus-within {
+    border-color: hsl(var(--primary) / 0.5);
+    box-shadow:
+      0 0 0 1px hsl(var(--primary) / 0.25),
+      0 4px 24px -4px hsl(var(--primary) / 0.2),
+      0 0 40px -8px hsl(var(--primary) / 0.1);
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .animate-fade-in {
+    animation: fadeIn 0.8s ease-out forwards;
+    opacity: 0;
+    transform: translateY(20px);
+  }
+
+  .animate-fade-in-delay {
+    animation: fadeIn 0.8s ease-out 0.2s forwards;
+    opacity: 0;
+    transform: translateY(20px);
+  }
+
+  .animate-fade-in-delay-2 {
+    animation: fadeIn 0.8s ease-out 0.4s forwards;
+    opacity: 0;
+    transform: translateY(20px);
+  }
+
+  /* Enhanced gradient utilities with better dark mode support */
+  .gradient-primary {
+    background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(var(--secondary)) 100%);
+  }
+
+  .gradient-subtle {
+    background: linear-gradient(135deg, 
+      hsl(var(--background)) 0%, 
+      hsl(var(--primary) / 0.06) 25%, 
+      hsl(var(--card)) 50%, 
+      hsl(var(--secondary) / 0.06) 75%, 
+      hsl(var(--muted)) 100%);
+  }
+
+  .gradient-card {
+    background: linear-gradient(135deg, hsl(var(--card)) 0%, hsl(var(--muted)) 100%);
+  }
+
+  .gradient-accent {
+    background: linear-gradient(135deg, hsl(var(--accent)) 0%, hsl(var(--primary)) 100%);
+  }
+
+  .gradient-border {
+    background: linear-gradient(135deg, hsl(var(--border)) 0%, hsl(var(--accent) / 0.3) 100%);
+  }
+
+  .gradient-text {
+    background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(var(--secondary)) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .gradient-hover {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .gradient-hover::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, hsl(var(--primary) / 0.1), transparent);
+    transition: left 0.5s ease;
+  }
+
+  .gradient-hover:hover::before {
+    left: 100%;
+  }
+
+  /* Enhanced dark mode gradient adjustments for better visual consistency */
+  .dark .gradient-primary {
+    background: linear-gradient(135deg, hsl(var(--primary) / 0.8) 0%, hsl(var(--secondary) / 0.6) 100%);
+  }
+
+  .dark .gradient-subtle {
+    background: linear-gradient(135deg, 
+      hsl(var(--background)) 0%, 
+      hsl(var(--primary) / 0.08) 25%, 
+      hsl(var(--card)) 50%, 
+      hsl(var(--secondary) / 0.08) 75%, 
+      hsl(var(--muted) / 0.2) 100%);
+  }
+
+  .dark .gradient-card {
+    background: linear-gradient(135deg, hsl(var(--card)) 0%, hsl(var(--muted) / 0.3) 100%);
+  }
+
+  .dark .gradient-border {
+    background: linear-gradient(135deg, hsl(var(--border)) 0%, hsl(var(--accent) / 0.2) 100%);
+  }
+
+  .dark .gradient-text {
+    background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(var(--secondary)) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  /* Added smooth theme transition for better UX */
+  * {
+    transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
+  }
+
+  /* Dark mode specific enhancements */
+  .dark .gradient-hover::before {
+    background: linear-gradient(90deg, transparent, hsl(var(--primary) / 0.15), transparent);
+  }
+
+}
+
+@keyframes fadeIn {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Rainbow gradient animation for voice mode */
+@keyframes gradient-x {
+  0%, 100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+.animate-gradient-x {
+  background-size: 200% 200%;
+  animation: gradient-x 3s ease infinite;
+}
+
+/* Tool activation glow effect */
+.tool-activated-glow {
+  position: relative;
+}
+
+.tool-activated-glow::before {
+  content: "";
+  position: absolute;
+  inset: -1.5px;
+  border-radius: inherit;
+  background: linear-gradient(
+    135deg,
+    hsl(var(--primary)),
+    hsl(var(--secondary)),
+    hsl(var(--accent)),
+    hsl(var(--primary))
+  );
+  background-size: 300% 300%;
+  animation: glow-blink 0.8s ease forwards;
+  opacity: 0;
+  z-index: -1;
+}
+
+@keyframes glow-blink {
+  0%   { opacity: 0; }
+  15%  { opacity: 0.7; }
+  35%  { opacity: 0; }
+  55%  { opacity: 0.5; }
+  75%  { opacity: 0; }
+  100% { opacity: 0; }
+}
+
+/* Content Areas - Clean Tailwind + Prose Integration */
+
+/* Chat Chart Content - Tailwind-first approach */
+.chat-chart-content {
+  @apply text-base leading-relaxed-plus;
+}
+
+.chat-chart-content table {
+  @apply w-full border-collapse border border-gray-200 dark:border-gray-700;
+}
+
+.chat-chart-content table th {
+  @apply text-lg font-semibold px-4 py-3 bg-gray-50 dark:bg-gray-800 text-left border-b border-gray-200 dark:border-gray-700;
+}
+
+.chat-chart-content table td {
+  @apply text-base px-4 py-3 border-b border-gray-100 dark:border-gray-600;
+}
+
+.chat-chart-content h1 {
+  @apply text-2xl font-bold mb-4;
+}
+
+.chat-chart-content h2 {
+  @apply text-xl font-semibold mb-3;
+}
+
+.chat-chart-content h3 {
+  @apply text-lg font-medium mb-2;
+}
+
+.chat-chart-content p {
+  @apply text-base mb-4;
+}
+
+/* AI Message Typography - uses centralized font variable */
+.ai-message-text {
+  font-size: var(--font-ai-message);
+  line-height: 1.8;
+}
+
+.ai-message-text p,
+.ai-message-text li,
+.ai-message-text strong,
+.ai-message-text em,
+.ai-message-text span,
+.ai-message-text ul,
+.ai-message-text ol {
+  font-size: var(--font-ai-message);
+  line-height: 1.8;
+}
+
+/* Citation styling */
+.ai-message-text .citation-inline a {
+  font-size: var(--font-citation);
+  line-height: 1.3;
+}
+
+.ai-message-text .citation-inline a span {
+  font-size: var(--font-citation);
+  line-height: 1.3;
+}
+
+.ai-message-text .citation-inline a svg {
+  width: 10px !important;
+  height: 10px !important;
+}
+
+/* Dark mode text color for AI messages */
+.dark .ai-message-text,
+.dark .ai-message-text p,
+.dark .ai-message-text li,
+.dark .ai-message-text strong,
+.dark .ai-message-text em,
+.dark .ai-message-text span {
+  color: #E0E0E0;
+}
+
+/* Custom horizontal scrollbar for image gallery */
+.overflow-x-auto::-webkit-scrollbar {
+  height: 8px;
+}
+
+.overflow-x-auto::-webkit-scrollbar-track {
+  background: transparent;
+  border-radius: 10px;
+}
+
+.overflow-x-auto::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 10px;
+  transition: background-color 0.2s ease;
+}
+
+.overflow-x-auto::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.4);
+}
+
+.dark .overflow-x-auto::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+}
+
+.dark .overflow-x-auto::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.5);
+}

@@ -1,0 +1,30 @@
+name: arxiv
+description: ArXiv paper search and retrieval
+tools:
+  - name: arxiv_search
+    description: Search for scientific papers on ArXiv sorted by relevance. Default 5 results, capped at 50.
+    input_type: object
+    input_description: Search parameters
+    properties:
+      - {
+          name: query,
+          type: string,
+          description: Search query for ArXiv papers,
+          required: true,
+        }
+      - {
+          name: max_results,
+          type: integer,
+          description: "Number of results to return (1-50, default 5)",
+        }
+  - name: arxiv_get_paper
+    description: Get full paper content from ArXiv by paper ID. Supports batch retrieval with comma-separated IDs.
+    input_type: object
+    input_description: Paper retrieval parameters
+    properties:
+      - {
+          name: paper_ids,
+          type: string,
+          description: "ArXiv paper ID or comma-separated IDs (e.g., '2308.08155' or '2308.08155,2401.12345')",
+          required: true,
+        }

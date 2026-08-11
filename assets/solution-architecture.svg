@@ -1,0 +1,517 @@
+<svg viewBox="0 0 1200 650" xmlns="http://www.w3.org/2000/svg">
+<style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #fafbfc;
+        padding: 32px;
+        color: #1a1a2e;
+      }
+      h1 {
+        font-size: 20px;
+        font-weight: 700;
+        color: #232f3e;
+        margin-bottom: 4px;
+      }
+      .subtitle {
+        font-size: 13px;
+        color: #5f6b7a;
+        margin-bottom: 24px;
+      }
+      .diagram {
+        width: 100%;
+        overflow-x: auto;
+      }
+      svg {
+        width: 100%;
+        height: auto;
+        min-width: 1100px;
+      }
+      /* Region boxes */
+      .region-box {
+        fill: none;
+        stroke: #232f3e;
+        stroke-width: 2;
+        stroke-dasharray: 6 3;
+        rx: 12;
+      }
+      .region-primary {
+        stroke: #147eba;
+      }
+      .region-secondary {
+        stroke: #d45b07;
+      }
+      .region-label {
+        font-size: 13px;
+        font-weight: 700;
+        fill: #fff;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .region-label-bg-primary {
+        fill: #147eba;
+        rx: 4;
+      }
+      .region-label-bg-secondary {
+        fill: #d45b07;
+        rx: 4;
+      }
+
+      /* Section boxes */
+      .section-box {
+        fill: #ffffff;
+        stroke: #d5dbdb;
+        stroke-width: 1.5;
+        rx: 8;
+      }
+      .section-label {
+        font-size: 11px;
+        font-weight: 600;
+        fill: #232f3e;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      /* Service boxes */
+      .service-box {
+        fill: #f7f8fa;
+        stroke: #d5dbdb;
+        stroke-width: 1;
+        rx: 6;
+      }
+      .service-text {
+        font-size: 10px;
+        fill: #333;
+        text-anchor: middle;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .service-text-bold {
+        font-size: 10px;
+        fill: #232f3e;
+        font-weight: 600;
+        text-anchor: middle;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      /* Arrows */
+      .arrow {
+        stroke: #5f6b7a;
+        stroke-width: 1.5;
+        fill: none;
+        marker-end: url(#arrowhead);
+      }
+      .arrow-replication {
+        stroke: #8b5cf6;
+        stroke-width: 2;
+        stroke-dasharray: 5 3;
+        fill: none;
+        marker-end: url(#arrowhead-purple);
+      }
+      .arrow-failover {
+        stroke: #d45b07;
+        stroke-width: 2;
+        stroke-dasharray: 4 2;
+        fill: none;
+        marker-end: url(#arrowhead-orange);
+      }
+      .arrow-global {
+        stroke: #147eba;
+        stroke-width: 2;
+        fill: none;
+        marker-end: url(#arrowhead-blue);
+      }
+
+      /* Flow steps */
+      .flow-step {
+        fill: #ffffff;
+        stroke: #d5dbdb;
+        stroke-width: 1.5;
+        rx: 4;
+      }
+      .flow-text {
+        font-size: 9px;
+        fill: #333;
+        text-anchor: middle;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      /* Global layer */
+      .global-box {
+        fill: #eef6ff;
+        stroke: #147eba;
+        stroke-width: 2;
+        rx: 10;
+      }
+
+      /* Cross-region box */
+      .cross-region-box {
+        fill: #f3f0ff;
+        stroke: #8b5cf6;
+        stroke-width: 1.5;
+        stroke-dasharray: 4 2;
+        rx: 8;
+      }
+
+      /* Legend */
+      .legend-text {
+        font-size: 10px;
+        fill: #5f6b7a;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      /* AWS service icon colors */
+      .aws-orange {
+        fill: #d45b07;
+      }
+      .aws-blue {
+        fill: #147eba;
+      }
+      .aws-green {
+        fill: #1b660f;
+      }
+      .aws-purple {
+        fill: #8b5cf6;
+      }
+    </style>
+        <!-- ========== EMAIL INGESTION ========== -->
+        <rect
+          class="service-box"
+          x="40"
+          y="52"
+          width="170"
+          height="55"
+          style="fill: #f3e8ff; stroke: #8b5cf6"
+        ></rect>
+        <text x="125" y="73" class="service-text-bold">Email Arrives</text>
+        <text x="125" y="87" class="service-text">Outlook Shared Inbox</text>
+
+        <path class="arrow" d="M210,79 L244,79"></path>
+
+        <!-- ========== IDP PIPELINE ========== -->
+        <rect
+          class="section-box"
+          x="250"
+          y="20"
+          width="930"
+          height="210"
+        ></rect>
+        <text x="265" y="38" class="section-label">IDP Pipeline</text>
+
+        <rect class="flow-step" x="268" y="50" width="160" height="58"></rect>
+        <text x="348" y="67" class="flow-text">Generate unique Event ID</text>
+        <text x="348" y="79" class="flow-text">Store raw email +</text>
+        <text x="348" y="91" class="flow-text">attachments in S3</text>
+
+        <path class="arrow" d="M430,79 L446,79"></path>
+
+        <rect class="flow-step" x="450" y="50" width="160" height="58"></rect>
+        <text x="530" y="67" class="flow-text">Classify</text>
+        <text x="530" y="79" class="flow-text">Event type, Mandatory/</text>
+        <text x="530" y="91" class="flow-text">Voluntary, Custodian</text>
+
+        <path class="arrow" d="M612,79 L628,79"></path>
+
+        <rect class="flow-step" x="632" y="50" width="160" height="58"></rect>
+        <text x="712" y="73" class="flow-text">Extract Fields</text>
+        <text x="712" y="85" class="flow-text">via Bedrock LLM</text>
+
+        <path class="arrow" d="M794,79 L810,79"></path>
+
+        <rect class="flow-step" x="814" y="50" width="160" height="58"></rect>
+        <text x="894" y="67" class="flow-text">Validate against Schema</text>
+        <text x="894" y="79" class="flow-text">
+          Required fields, date &amp;
+        </text>
+        <text x="894" y="91" class="flow-text">identifier formats</text>
+
+        <path class="arrow" d="M976,79 L992,79"></path>
+
+        <rect class="flow-step" x="996" y="50" width="160" height="58"></rect>
+        <text x="1076" y="73" class="flow-text">Confidence Score</text>
+        <text x="1076" y="85" class="flow-text">Per field</text>
+
+        <!-- Services under IDP -->
+        <rect
+          class="service-box"
+          x="480"
+          y="150"
+          width="140"
+          height="45"
+        ></rect>
+        <text x="550" y="176" class="service-text-bold">λ AWS Lambda</text>
+        <rect
+          class="service-box"
+          x="650"
+          y="150"
+          width="140"
+          height="45"
+        ></rect>
+        <text x="720" y="176" class="service-text-bold">Amazon S3</text>
+        <rect
+          class="service-box"
+          x="820"
+          y="150"
+          width="140"
+          height="45"
+        ></rect>
+        <text x="890" y="176" class="service-text-bold">DynamoDB</text>
+
+        <!-- IDP to AgentCore Runtime -->
+        <path class="arrow" d="M715,230 L715,284"></path>
+
+        <!-- ========== USER ACCESS FLOW ========== -->
+        <rect class="service-box" x="30" y="352" width="70" height="45"></rect>
+        <text x="65" y="378" class="service-text-bold">User</text>
+
+        <path class="arrow" d="M100,374 L114,374"></path>
+
+        <rect
+          class="service-box"
+          x="120"
+          y="352"
+          width="110"
+          height="45"
+        ></rect>
+        <text x="175" y="371" class="service-text-bold">Okta SSO</text>
+        <text x="175" y="384" class="service-text">Login</text>
+
+        <path class="arrow" d="M230,374 L252,374 L252,348 L274,348"></path>
+
+        <!-- ========== APPLICATION FRONTEND ========== -->
+        <rect
+          class="section-box"
+          x="280"
+          y="290"
+          width="260"
+          height="300"
+        ></rect>
+        <text x="295" y="308" class="section-label">Application Frontend</text>
+        <text
+          x="295"
+          y="322"
+          class="service-text"
+          style="fill: #5f6b7a; text-anchor: start"
+        >
+          Human-in-the-loop review
+        </text>
+
+        <rect
+          class="service-box"
+          x="295"
+          y="330"
+          width="230"
+          height="36"
+        ></rect>
+        <text x="410" y="352" class="service-text-bold">
+          Amazon CloudFront (CDN)
+        </text>
+
+        <rect
+          class="service-box"
+          x="295"
+          y="376"
+          width="110"
+          height="45"
+        ></rect>
+        <text x="350" y="402" class="service-text-bold">Frontend</text>
+
+        <rect
+          class="service-box"
+          x="415"
+          y="376"
+          width="110"
+          height="45"
+        ></rect>
+        <text x="470" y="402" class="service-text-bold">ALB</text>
+
+        <rect
+          class="service-box"
+          x="295"
+          y="431"
+          width="110"
+          height="45"
+        ></rect>
+        <text x="350" y="456" class="service-text-bold">Backend API</text>
+
+        <rect
+          class="service-box"
+          x="415"
+          y="431"
+          width="110"
+          height="45"
+        ></rect>
+        <text x="470" y="449" class="service-text-bold">Secrets Mgr</text>
+        <text x="470" y="462" class="service-text">IDP / Graph creds</text>
+
+        <rect
+          class="service-box"
+          x="295"
+          y="486"
+          width="230"
+          height="36"
+        ></rect>
+        <text x="410" y="508" class="service-text">
+          Config map for env variables
+        </text>
+
+        <rect
+          class="service-box"
+          x="295"
+          y="532"
+          width="230"
+          height="40"
+        ></rect>
+        <text x="410" y="556" class="service-text-bold">
+          App Database — Amazon DynamoDB
+        </text>
+
+        <!-- Frontend to AgentCore Runtime -->
+        <path class="arrow" d="M540,453 L584,453"></path>
+
+        <!-- ========== AGENTCORE RUNTIME ========== -->
+        <rect
+          class="section-box"
+          x="590"
+          y="290"
+          width="250"
+          height="200"
+        ></rect>
+        <text x="605" y="308" class="section-label">AgentCore Runtime</text>
+
+        <rect
+          class="service-box"
+          x="615"
+          y="330"
+          width="200"
+          height="50"
+          style="fill: #f0f4ff; stroke: #7b61ff"
+        ></rect>
+        <text x="715" y="360" class="service-text-bold">Reconciliation Agent</text>
+
+        <!-- Runtime to Shared Services -->
+        <path class="arrow" d="M840,390 L874,390"></path>
+
+        <!-- ========== SHARED SERVICES ACCOUNT ========== -->
+        <rect
+          class="section-box"
+          x="880"
+          y="270"
+          width="300"
+          height="350"
+        ></rect>
+        <text x="895" y="288" class="section-label">Shared Services</text>
+
+        <rect
+          class="service-box"
+          x="895"
+          y="300"
+          width="270"
+          height="36"
+        ></rect>
+        <text x="1030" y="322" class="service-text-bold">
+          AgentCore Gateway
+        </text>
+
+        <rect
+          class="service-box"
+          x="895"
+          y="346"
+          width="270"
+          height="70"
+          style="fill: #fffbeb; stroke: #d97706"
+        ></rect>
+        <text
+          x="905"
+          y="360"
+          style="
+            font-size: 9px;
+            fill: #b45309;
+            font-weight: 600;
+            font-family: -apple-system, sans-serif;
+          "
+        >
+          Tools
+        </text>
+        <text x="1030" y="380" class="service-text">General Ledger</text>
+        <text x="1030" y="394" class="service-text">
+          (Mock with Amazon S3 + Athena)
+        </text>
+
+        <rect
+          class="service-box"
+          x="895"
+          y="430"
+          width="130"
+          height="36"
+        ></rect>
+        <text x="960" y="452" class="service-text-bold">
+          AgentCore Registry
+        </text>
+
+        <rect
+          class="service-box"
+          x="1035"
+          y="430"
+          width="130"
+          height="36"
+        ></rect>
+        <text x="1100" y="446" class="service-text-bold">AgentCore Memory</text>
+        <text x="1100" y="459" class="service-text">STM/LTM</text>
+
+        <rect
+          class="service-box"
+          x="895"
+          y="476"
+          width="130"
+          height="36"
+        ></rect>
+        <text x="960" y="498" class="service-text-bold">
+          AgentCore Identity
+        </text>
+
+        <rect
+          class="service-box"
+          x="1035"
+          y="476"
+          width="130"
+          height="36"
+        ></rect>
+        <text x="1100" y="498" class="service-text-bold">AgentCore Policy</text>
+
+        <rect
+          class="service-box"
+          x="895"
+          y="522"
+          width="130"
+          height="36"
+        ></rect>
+        <text x="960" y="544" class="service-text-bold">
+          AgentCore Observability
+        </text>
+
+        <rect
+          class="service-box"
+          x="1035"
+          y="522"
+          width="130"
+          height="36"
+        ></rect>
+        <text x="1100" y="544" class="service-text-bold">
+          AgentCore Evaluation
+        </text>
+
+        <rect
+          class="service-box"
+          x="895"
+          y="568"
+          width="270"
+          height="36"
+        ></rect>
+        <text x="1030" y="590" class="service-text-bold">
+          Bedrock LLMs (Foundation Models)
+        </text>
+      </svg>

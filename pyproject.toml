@@ -1,0 +1,13 @@
+[tool.pytest.ini_options]
+# Only collect this project's tests — never the vendored sample repos or the
+# copied chatbot-app / agent-blueprint sample tests.
+testpaths = ["tests"]
+pythonpath = [".", "agent-blueprint/recon-agent", "agent-blueprint/recon-agent-harness"]
+# importlib mode lets same-named test modules (e.g. multiple test_handler.py) coexist
+# without requiring __init__.py packages under tests/.
+addopts = "-p no:cacheprovider --import-mode=importlib"
+consider_namespace_packages = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

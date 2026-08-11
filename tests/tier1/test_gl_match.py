@@ -1,0 +1,121 @@
+"""Tests for the Tier-1 deterministic general-ledger match (auto-clear path).
+
+The deterministic match keys on the cash item's economic identity — borrower (account name),
+entry type (CREDIT/DEBIT derived from the document class), and amount within tolerance — and
+NEVER on the document filename/reference. It auto-clears only on a unique surviving GL row.
+"""
+
+from backend.recon_core.schema import ReconItem
+from backend.tier1.gl_match import (
+    _derive_entry_type,
+    extract_candidate_amounts,
+    gl_lookup,
+)
+
+
+def _item(*, idp_class="InterestPaymentNotice", borrower="CASCADE LOGISTICS HOLDINGS INC."):
+    """Build an IDP-sourced item with a borrower + amounts + document class."""
+    return ReconItem(
+        item_id="idp-Paydown_and_Interest_Notice.pdf",
+        domain="cash",
+        sides=[],
+        source_refs=["idp:documentId=Paydown_and_Interest_Notice.pdf"],
+        attributes={
+            "idp_class": idp_class,
+            "idp_attributes": {
+                "BorrowerName": borrower,
+                "InterestPayments": [
+                    {"Description": "Term SOFR Term", "TotalPaymentAmount": "2052425.7"}
+                ],
+                "RepaymentOutstandings": [{"GlobalAmount": 400000.0}],
+                "NoticeDate": "26-Dec-2026",  # non-amount: must be ignored
+            },
+        },
+    )
+
+
+ITEM = _item()
+
+
+def _row(entry_id, amount, *, borrower="CASCADE LOGISTICS HOLDINGS INC.", entry_type="CREDIT"):
+    """A GL row as the gl-query Lambda would return it (all-string values)."""
+    return {
+        "entry_id": entry_id,
+        "borrower": borrower,
+        "entry_type": entry_type,
+        "amount": str(amount),
+    }
+
+
+class _FakeInvoker:
+    """Stands in for the gl-query Lambda invocation."""
+
+    def __init__(self, rows):
+        self._rows = rows
+        self.requests = []
+
+    def __call__(self, payload: dict) -> dict:
+        self.requests.append(payload)
+        return {"rows": self._rows, "count": len(self._rows)}
+
+
+def test_extract_candidate_amounts_finds_numeric_amountish_leaves():
+    amounts = extract_candidate_amounts(ITEM)
+    assert 2052425.7 in amounts
+    assert 400000.0 in amounts
+    # No date-derived garbage.
+    assert all(a > 0 for a in amounts)
+
+
+def test_derive_entry_type_from_class():
+    assert _derive_entry_type(_item(idp_class="InterestPaymentNotice")) == "CREDIT"
+    assert _derive_entry_type(_item(idp_class="OptionalPaydownNotice")) == "CREDIT"
+    assert _derive_entry_type(_item(idp_class="LoanDrawCancellationNotice")) == "DEBIT"
+    # Absent or unrecognised class -> underivable (escalates).
+    assert _derive_entry_type(_item(idp_class=None)) is None
+    assert _derive_entry_type(_item(idp_class="SomethingElse")) is None
+
+
+def test_gl_lookup_matches_on_borrower_entry_type_and_amount():
+    fake = _FakeInvoker([_row("GL-1", "2052425.70")])
+    matched = gl_lookup(ITEM, invoker=fake)
+    assert matched is not None
+    assert matched["entry_id"] == "GL-1"
+    # Looked up by the borrower (account name), NOT the document reference.
+    assert fake.requests[0] == {"borrower": "CASCADE LOGISTICS HOLDINGS INC."}
+    assert "reference" not in fake.requests[0]
+
+
+def test_gl_lookup_entry_type_mismatch_refutes_even_when_amount_matches():
+    # Right amount + right borrower but wrong direction (DEBIT vs the item's CREDIT) -> no match.
+    fake = _FakeInvoker([_row("GL-1", "2052425.70", entry_type="DEBIT")])
+    assert gl_lookup(ITEM, invoker=fake) is None
+
+
+def test_gl_lookup_ambiguous_multiple_rows_escalates():
+    # Two GL rows both match borrower + CREDIT + an item amount -> ambiguous -> escalate (None).
+    rows = [_row("GL-1", "2052425.70"), _row("GL-2", "400000.00")]
+    assert gl_lookup(ITEM, invoker=_FakeInvoker(rows)) is None
+
+
+def test_gl_lookup_no_amount_match_returns_none():
+    assert gl_lookup(ITEM, invoker=_FakeInvoker([_row("GL-9", "999.99")])) is None
+    assert gl_lookup(ITEM, invoker=_FakeInvoker([])) is None
+
+
+def test_gl_lookup_missing_borrower_returns_none():
+    item = _item()
+    item.attributes["idp_attributes"].pop("BorrowerName")
+    assert gl_lookup(item, invoker=_FakeInvoker([_row("GL-1", "2052425.70")])) is None
+
+
+def test_gl_lookup_underivable_entry_type_returns_none():
+    item = _item(idp_class=None)
+    assert gl_lookup(item, invoker=_FakeInvoker([_row("GL-1", "2052425.70")])) is None
+
+
+def test_gl_lookup_fail_soft_on_invoker_error():
+    def boom(_payload):
+        raise RuntimeError("athena down")
+
+    assert gl_lookup(ITEM, invoker=boom) is None  # never blocks the pipeline

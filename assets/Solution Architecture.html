@@ -1,0 +1,1722 @@
+<!doctype html>
+<html>
+  <head>
+    <style id="qw-theme">
+      :root {
+        --color-bg: #f2f1f4;
+        --color-text: #352f3d;
+        --color-navbar-bg: #eae8ed;
+        --color-bg-chat-view: #fcfcfd;
+        --color-bg-secondary: #ffffff;
+        --color-bg-tertiary: #eae8ed;
+        --color-bg-hover: #dcdadf;
+        --color-surface: #eae8ed;
+        --color-surface-hover: #dcdadf;
+        --color-surface-active: #c1bec6;
+        --color-border: #c1bec6;
+        --color-border-light: #dcdadf;
+        --color-border-strong: #c1bec6;
+        --color-primary: #4200db;
+        --color-primary-dark: #35009e;
+        --color-primary-light: #8575ff;
+        --color-primary-bg: #e8e6ff;
+        --color-primary-hover-border: #35009e;
+        --color-nav-icon-active: #4200db;
+        --color-nav-hover-border: #4200db;
+        --color-primary-alpha-3: color-mix(in srgb, #4200db 3%, transparent);
+        --color-primary-alpha-5: color-mix(in srgb, #4200db 5%, transparent);
+        --color-primary-alpha-8: color-mix(in srgb, #4200db 8%, transparent);
+        --color-primary-alpha-12: color-mix(in srgb, #4200db 12%, transparent);
+        --color-primary-alpha-15: color-mix(in srgb, #4200db 15%, transparent);
+        --color-primary-alpha-20: color-mix(in srgb, #4200db 20%, transparent);
+        --color-primary-alpha-25: color-mix(in srgb, #4200db 25%, transparent);
+        --color-primary-alpha-30: color-mix(in srgb, #4200db 30%, transparent);
+        --color-primary-alpha-40: color-mix(in srgb, #4200db 40%, transparent);
+        --color-primary-alpha-50: color-mix(in srgb, #4200db 50%, transparent);
+        --color-primary-alpha-60: color-mix(in srgb, #4200db 60%, transparent);
+        --color-primary-subtle: color-mix(in srgb, #4200db 18%, transparent);
+        --color-primary-border: #8575ff;
+        --color-focus-ring: color-mix(in srgb, #4200db 50%, transparent);
+        --color-sidebar-hover: color-mix(in srgb, #4200db 12%, transparent);
+        --color-accent: #4200db;
+        --color-accent-foreground: #4200db;
+        --color-accent-dark: #35009e;
+        --color-accent-light: #e8e6ff;
+        --color-accent-inverse: #ffffff;
+        --color-link: #4200db;
+        --color-primary-gradient-end: #e8e6ff;
+        --color-primary-bg-solid: #eae8ed;
+        --color-user-bubble: #f3f3f7;
+        --color-user-bubble-text: #352f3d;
+        --color-text-secondary: #5e5966;
+        --color-text-tertiary: #7a7582;
+        --color-text-muted: #938f9b;
+        --color-text-on-primary: #f2f1f4;
+        --color-success: #00802f;
+        --color-success-dark: #00471e;
+        --color-success-light: #d9ffd6;
+        --color-success-hover: #005c26;
+        --color-success-bg: #e6f4eb;
+        --color-success-border: #c4dccb;
+        --color-success-foreground: #00802f;
+        --color-success-dark-foreground: #00471e;
+        --color-success-text: #00471e;
+        --color-error: #db0000;
+        --color-error-dark: #700000;
+        --color-error-light: #ffe0e0;
+        --color-error-hover: #ffe0e0;
+        --color-error-bg: #fbe9ea;
+        --color-error-border: #eecbcd;
+        --color-error-active-border: #db0000;
+        --color-error-foreground: #db0000;
+        --color-error-dark-foreground: #700000;
+        --color-error-inverse: #ffffff;
+        --color-error-text: #700000;
+        --color-warning: #f2b100;
+        --color-warning-dark: #573a00;
+        --color-warning-light: #fffbbd;
+        --color-warning-hover: #db9200;
+        --color-warning-bg: #fdf6e4;
+        --color-warning-border: #f5dda6;
+        --color-warning-foreground: #f2b100;
+        --color-warning-dark-foreground: #573a00;
+        --color-warning-inverse: #573a00;
+        --color-surface-warning: #fffbbd;
+        --color-text-warning: #573a00;
+        --color-info: #006ce0;
+        --color-info-dark: #002a66;
+        --color-info-light: #d1f1ff;
+        --color-info-hover: #003b8f;
+        --color-info-bg: #e6f0fb;
+        --color-info-border: #c0d5ec;
+        --color-info-foreground: #006ce0;
+        --color-info-dark-foreground: #002a66;
+        --color-info-inverse: #ffffff;
+        --color-overlay: #dcdadf80;
+        --color-shadow: #352f3d40;
+        --color-hover: #352f3d0d;
+        --color-tooltip-bg: #eae8ed;
+        --color-tooltip-text: #352f3d;
+        --color-voice-purple: #8575ff;
+        --color-voice-purple-dark: #4200db;
+        --color-voice-purple-light: #8575ff;
+        --color-voice-red: #db0000;
+        --color-voice-red-dark: #700000;
+        --color-voice-amber: #f2b100;
+        --color-voice-purple-glow: rgba(66, 0, 219, 0.4);
+        --color-voice-red-glow: rgba(219, 0, 0, 0.4);
+        --font-sans:
+          "Amazon Ember", "Helvetica Neue", "Segoe UI", Roboto, Helvetica,
+          Arial, sans-serif;
+        --font-mono: "SF Mono", "Monaco", "Menlo", "Consolas", monospace;
+        --text-2xs: 0.5625rem;
+        --text-xs: 0.625rem;
+        --text-sm: 0.6875rem;
+        --text-base: 0.75rem;
+        --text-md: 0.8125rem;
+        --text-lg: 0.875rem;
+        --text-xl: 1rem;
+        --text-2xl: 1.125rem;
+        --text-3xl: 1.25rem;
+        --text-4xl: 1.5rem;
+        --text-5xl: 2rem;
+        --spacing-1: calc(0.25rem * 1);
+        --spacing-1-5: calc(0.25rem * 1.5);
+        --spacing-2: calc(0.25rem * 2);
+        --spacing-3: calc(0.25rem * 3);
+        --spacing-4: calc(0.25rem * 4);
+        --spacing-5: calc(0.25rem * 5);
+        --spacing-6: calc(0.25rem * 6);
+        --spacing-7: calc(0.25rem * 7);
+        --spacing-8: calc(0.25rem * 8);
+        --spacing-9: calc(0.25rem * 9);
+        --spacing-10: calc(0.25rem * 10);
+        --radius-sm: 6px;
+        --radius-md: 10px;
+        --radius-card: 12px;
+        --radius-lg: 16px;
+        --radius-pill: 8px;
+        --shadow-sm: 0 1px 2px rgba(53, 47, 61, 0.06);
+        --shadow-md: 0 4px 12px rgba(53, 47, 61, 0.1);
+        --color-success-bg-solid: #d9ffd6;
+        --color-error-bg-solid: #ffe0e0;
+        --color-error-border-solid: #ffe0e0;
+        --color-warning-bg-solid: #fffbbd;
+        --color-warning-text: #573a00;
+        --color-info-bg-solid: #d1f1ff;
+        --color-info-bg-solid-alt: #d1f1ff;
+        --color-info-text: #002a66;
+        --color-info-text-alt: #002a66;
+        --color-emerald: #367c53;
+        --color-teal: #0c9aa7;
+        --color-code-bg: #eae8ed;
+        --color-code-header-bg: #dcdadf;
+        --color-code-text: #352f3d;
+        --color-code-border: #c1bec6;
+        --color-code-muted: #5e5966;
+        --color-inline-code-bg: #eae8ed;
+        --color-inline-code-text: #352f3d;
+        --color-inline-code-border: #c1bec6;
+        --color-scrollbar-thumb: #c1bec6;
+        --color-scrollbar-track: transparent;
+        --color-graph-node-text: #352f3d;
+        --color-graph-node-text-dim: #938f9b;
+        --color-graph-edge-default: #938f9b;
+        --color-graph-edge-cross: #d08025;
+        --color-graph-edge-text: #5e5966;
+        --color-graph-edge-stroke: #f2f1f4;
+        --color-graph-highlight-bg: #ff6b6b;
+        --color-graph-highlight-border: #e74c3c;
+        --color-graph-search-bg: #ffd700;
+        --color-graph-search-border: #ffa500;
+        --color-graph-focus-border: #c0392b;
+        --color-graph-external-border: #938f9b;
+        --color-graph-cat-file: #3878b0;
+        --color-graph-cat-folder: #5e5966;
+        --color-graph-cat-file-aggregate: #2d6a9f;
+        --color-graph-cat-class: #7138cc;
+        --color-graph-cat-function: #367c53;
+        --color-graph-cat-method: #0c9aa7;
+        --color-graph-cat-variable: #d08025;
+        --color-graph-cat-import: #b06a1a;
+        --color-graph-cat-module: #5e35a8;
+        --color-graph-cat-concept: #993333;
+        --color-graph-cat-person: #c44d4d;
+        --color-graph-cat-org: #0c9aa7;
+        --color-graph-cat-organization: #0c9aa7;
+        --color-graph-cat-product: #8e47ff;
+        --color-graph-cat-metric: #c44d78;
+        --color-graph-cat-location: #34495e;
+        --color-graph-cat-date: #b34d8a;
+        --color-graph-cat-code: #3878b0;
+        --color-graph-cat-doc: #5e5966;
+        --color-graph-cat-url: #367c53;
+        --color-graph-cat-email: #5e35a8;
+        --color-graph-cat-unknown: #938f9b;
+        --color-graph-rel-contains: #938f9b;
+        --color-graph-rel-extends: #7138cc;
+        --color-graph-rel-implements: #3878b0;
+        --color-graph-rel-imports: #d08025;
+        --color-graph-rel-uses: #367c53;
+        --color-graph-rel-calls: #367c53;
+        --color-graph-rel-references: #d08025;
+        --color-graph-rel-related-to: #938f9b;
+        --color-graph-rel-works-on: #993333;
+        --color-graph-rel-owns: #0c9aa7;
+        --color-graph-rel-depends-on: #b06a1a;
+        --color-graph-rel-parent-of: #938f9b;
+        --qs-content: #fff;
+        --qs-main: #fff;
+        --qs-primary-foreground: #131920;
+        --qs-secondary-foreground: #656871;
+        --qs-tertiary-foreground: #938f9b;
+        --qs-placeholder-foreground: #8c8c94;
+        --qs-divider: #dedee3;
+        --qs-default-border: #8c8c94;
+        --qs-neutral-soft: #b4b4bb;
+        --qs-neutral-gray-50: #eae8ed;
+        --qs-tertiary-background: #eae8ed;
+        --qs-action-hover: #f3f3f7;
+        --qs-primary-default: #4200db;
+        --qs-primary-dark: #35009e;
+        --qs-primary-light: #e8e6ff;
+        --qs-success-default: #00802f;
+        --qs-error-default: #db0000;
+        --qs-font-sans:
+          "Amazon Ember", "Helvetica Neue", "Segoe UI", Helvetica, Arial,
+          sans-serif;
+        --qs-font-family:
+          "Amazon Ember", "Helvetica Neue", "Segoe UI", Helvetica, Arial,
+          sans-serif;
+        --qs-font-base-letter-spacing: 0.15px;
+        --qs-shadow-sm: 0 0 2px 0 #00000029, 0 0 4px 0 #00000029;
+        --qs-shadow-md: 0 0 2px 0 #00000029, 0 2px 8px 1px #00000029;
+        --qs-shadow-lg: 0 4px 16px 4px #00000029, 0 2px 6px 1px #00000029;
+        --qs-shadow-xl: 0 4px 8px 2px #00000029, 0 6px 20px 4px #00000029;
+        --qs-width-modal-sm: 384px;
+        --qs-width-modal-md: 600px;
+        --qs-width-modal-lg: 1136px;
+        --qs-grid-gap: 16px;
+        --qs-grid-gap-xl: 24px;
+        --qs-primary-medium: #8575ff;
+        --qs-primary-inverse: #fff;
+        --qs-neutral-lightest: #f9f9fb;
+        --qs-neutral-light: #f3f3f7;
+        --qs-neutral-default: #dedee3;
+        --qs-neutral-medium: #8c8c94;
+        --qs-neutral-deep: #656871;
+        --qs-neutral-dark: #333843;
+        --qs-neutral-strong: #131920;
+        --qs-neutral-white: #fff;
+        --qs-neutral-black: #000;
+        --qs-success-medium: #005c26;
+        --qs-success-dark: #00471e;
+        --qs-success-light: #d9ffd6;
+        --qs-success-inverse: #fff;
+        --qs-info-default: #006ce0;
+        --qs-info-medium: #003b8f;
+        --qs-info-dark: #002a66;
+        --qs-info-light: #d1f1ff;
+        --qs-info-inverse: #fff;
+        --qs-warning-default: #f2b100;
+        --qs-warning-medium: #db9200;
+        --qs-warning-dark: #573a00;
+        --qs-warning-light: #fffbbd;
+        --qs-warning-inverse: #573a00;
+        --qs-warning-experimental: #f2b100;
+        --qs-warning-experimental-light: #fffbbd;
+        --qs-warning-experimental-light-foreground: #fffbbd;
+        --qs-error-medium: #900;
+        --qs-error-dark: #700000;
+        --qs-error-light: #ffe0e0;
+        --qs-error-inverse: #fff;
+        --qs-connection-default: #db3300;
+        --qs-connection-soft: #ff997a;
+        --qs-connection-light: #ffe0d6;
+        --qs-connection-dark: #661800;
+        --qs-automation-default: #b3008f;
+        --qs-automation-medium: #d600ba;
+        --qs-automation-soft: #ff94f1;
+        --qs-automation-light: #ffe0fb;
+        --qs-automation-dark: #660052;
+        --qs-insight-default: #a000b8;
+        --qs-insight-soft: #f299ff;
+        --qs-insight-light: #fce6ff;
+        --qs-insight-dark: #590066;
+        --qs-visualization-default: #7300e5;
+        --qs-visualization-soft: #d4a8ff;
+        --qs-visualization-light: #f2e5ff;
+        --qs-visualization-dark: #45008a;
+        --qs-spice: #ff9800;
+        --qs-coachmark: #006ce0;
+        --qs-brand: #fff;
+        --qs-brand-foreground: #131920;
+        --qs-brand-navbar: #131920;
+        --qs-brand-navbar-foreground: #fff;
+        --qs-brand-navbar-light: #dedee3;
+        --qs-brand-navbar-dark: #000;
+        --qs-application-navbar: #4200db;
+        --qs-application-navbar-foreground: #fff;
+        --qs-application-navbar-light: #e8e6ff;
+        --qs-application-navbar-dark: #35009e;
+        --qs-dimension: #4200db;
+        --qs-dimension-foreground: #fff;
+        --qs-dimension-experimental: #4200db;
+        --qs-dimension-experimental-foreground: #4200db;
+        --qs-measure: #00802f;
+        --qs-measure-foreground: #fff;
+        --qs-measure-experimental: #f2b100;
+        --qs-measure-experimental-foreground: #f2b100;
+        --qs-content-inverse: #333843;
+        --qs-content-inverse-active: #131920;
+        --qs-secondary: #dedee3;
+        --qs-disabled: #8c8c94;
+        --qs-divider-light: #f3f3f7;
+        --qs-hover-border: #333843;
+        --qs-active-border: #4200db;
+        --qs-disabled-border: #dedee3;
+        --qs-error-border: #ffe0e0;
+        --qs-error-active-border: #db0000;
+        --qs-disabled-foreground: #b4b4bb;
+        --qs-primary-inverse-foreground: #fff;
+        --qs-error-foreground: #db0000;
+        --qs-contrast-foreground: #131920;
+        --qs-main-foreground: #131920;
+        --qs-main-secondary-foreground: #656871;
+        --qs-action-disabled: #f3f3f7;
+        --qs-action-active: #e8e6ff;
+        --qs-default-badge: #dedee3;
+        --qs-tag-default: #dedee3;
+        --qs-tag-soft-border: #b4b4bb;
+        --qs-focus-offset: 1px;
+        --qs-toggle-tile-sm: calc(0.25rem * 8);
+        --qs-toggle-tile-md: calc(0.25rem * 12);
+        --qs-toggle-tile-lg: calc(0.25rem * 15);
+        --qs-shadow-pin-right: inset 4px 0 4px -4px #00000029;
+        --qs-shadow-pin-left: inset -4px 0 4px -4px #00000029;
+        --react-pdf-text-layer: 1;
+        --highlight-bg-color: rgba(180, 0, 170, 1);
+        --highlight-selected-bg-color: rgba(0, 100, 0, 1);
+        --react-pdf-annotation-layer: 1;
+        --annotation-unfocused-field-background: url("data:image/svg+xml;charset=UTF-8,<svg width='1px' height='1px' xmlns='http://www.w3.org/2000/svg'><rect width='100%' height='100%' style='fill:rgba(0, 54, 255, 0.13);'/></svg>");
+        --input-focus-border-color: Highlight;
+        --input-focus-outline: 1px solid Canvas;
+        --input-unfocused-border-color: transparent;
+        --input-disabled-border-color: transparent;
+        --input-hover-border-color: black;
+        --link-outline: none;
+        color-scheme: light;
+      }
+      body {
+        background: var(--color-bg);
+        color: var(--color-text);
+      }
+      a {
+        color: var(--color-link, var(--color-primary));
+      }
+    </style>
+    <meta charset="UTF-8" />
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #fafbfc;
+        padding: 32px;
+        color: #1a1a2e;
+      }
+      h1 {
+        font-size: 20px;
+        font-weight: 700;
+        color: #232f3e;
+        margin-bottom: 4px;
+      }
+      .subtitle {
+        font-size: 13px;
+        color: #5f6b7a;
+        margin-bottom: 24px;
+      }
+      .diagram {
+        width: 100%;
+        overflow-x: auto;
+      }
+      svg {
+        width: 100%;
+        height: auto;
+        min-width: 1100px;
+      }
+      /* Region boxes */
+      .region-box {
+        fill: none;
+        stroke: #232f3e;
+        stroke-width: 2;
+        stroke-dasharray: 6 3;
+        rx: 12;
+      }
+      .region-primary {
+        stroke: #147eba;
+      }
+      .region-secondary {
+        stroke: #d45b07;
+      }
+      .region-label {
+        font-size: 13px;
+        font-weight: 700;
+        fill: #fff;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .region-label-bg-primary {
+        fill: #147eba;
+        rx: 4;
+      }
+      .region-label-bg-secondary {
+        fill: #d45b07;
+        rx: 4;
+      }
+
+      /* Section boxes */
+      .section-box {
+        fill: #ffffff;
+        stroke: #d5dbdb;
+        stroke-width: 1.5;
+        rx: 8;
+      }
+      .section-label {
+        font-size: 11px;
+        font-weight: 600;
+        fill: #232f3e;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      /* Service boxes */
+      .service-box {
+        fill: #f7f8fa;
+        stroke: #d5dbdb;
+        stroke-width: 1;
+        rx: 6;
+      }
+      .service-text {
+        font-size: 10px;
+        fill: #333;
+        text-anchor: middle;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .service-text-bold {
+        font-size: 10px;
+        fill: #232f3e;
+        font-weight: 600;
+        text-anchor: middle;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      /* Arrows */
+      .arrow {
+        stroke: #5f6b7a;
+        stroke-width: 1.5;
+        fill: none;
+        marker-end: url(#arrowhead);
+      }
+      .arrow-replication {
+        stroke: #8b5cf6;
+        stroke-width: 2;
+        stroke-dasharray: 5 3;
+        fill: none;
+        marker-end: url(#arrowhead-purple);
+      }
+      .arrow-failover {
+        stroke: #d45b07;
+        stroke-width: 2;
+        stroke-dasharray: 4 2;
+        fill: none;
+        marker-end: url(#arrowhead-orange);
+      }
+      .arrow-global {
+        stroke: #147eba;
+        stroke-width: 2;
+        fill: none;
+        marker-end: url(#arrowhead-blue);
+      }
+
+      /* Flow steps */
+      .flow-step {
+        fill: #ffffff;
+        stroke: #d5dbdb;
+        stroke-width: 1.5;
+        rx: 4;
+      }
+      .flow-text {
+        font-size: 9px;
+        fill: #333;
+        text-anchor: middle;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      /* Global layer */
+      .global-box {
+        fill: #eef6ff;
+        stroke: #147eba;
+        stroke-width: 2;
+        rx: 10;
+      }
+
+      /* Cross-region box */
+      .cross-region-box {
+        fill: #f3f0ff;
+        stroke: #8b5cf6;
+        stroke-width: 1.5;
+        stroke-dasharray: 4 2;
+        rx: 8;
+      }
+
+      /* Legend */
+      .legend-text {
+        font-size: 10px;
+        fill: #5f6b7a;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      /* AWS service icon colors */
+      .aws-orange {
+        fill: #d45b07;
+      }
+      .aws-blue {
+        fill: #147eba;
+      }
+      .aws-green {
+        fill: #1b660f;
+      }
+      .aws-purple {
+        fill: #8b5cf6;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Solution Architecture</h1>
+    <p class="subtitle">
+      Single-region logical view • Email ingestion → IDP → Agent → Shared
+      services
+    </p>
+
+    <div class="diagram">
+      <svg viewBox="0 0 1200 650" xmlns="http://www.w3.org/2000/svg">
+        <!-- ========== EMAIL INGESTION ========== -->
+        <rect
+          class="service-box"
+          x="40"
+          y="52"
+          width="170"
+          height="55"
+          style="fill: #f3e8ff; stroke: #8b5cf6"
+        ></rect>
+        <text x="125" y="73" class="service-text-bold">Email Arrives</text>
+        <text x="125" y="87" class="service-text">Outlook Shared Inbox</text>
+
+        <path class="arrow" d="M210,79 L244,79"></path>
+
+        <!-- ========== IDP PIPELINE ========== -->
+        <rect
+          class="section-box"
+          x="250"
+          y="20"
+          width="930"
+          height="210"
+        ></rect>
+        <text x="265" y="38" class="section-label">IDP Pipeline</text>
+
+        <rect class="flow-step" x="268" y="50" width="160" height="58"></rect>
+        <text x="348" y="67" class="flow-text">Generate unique Event ID</text>
+        <text x="348" y="79" class="flow-text">Store raw email +</text>
+        <text x="348" y="91" class="flow-text">attachments in S3</text>
+
+        <path class="arrow" d="M430,79 L446,79"></path>
+
+        <rect class="flow-step" x="450" y="50" width="160" height="58"></rect>
+        <text x="530" y="67" class="flow-text">Classify</text>
+        <text x="530" y="79" class="flow-text">Event type, Mandatory/</text>
+        <text x="530" y="91" class="flow-text">Voluntary, Custodian</text>
+
+        <path class="arrow" d="M612,79 L628,79"></path>
+
+        <rect class="flow-step" x="632" y="50" width="160" height="58"></rect>
+        <text x="712" y="73" class="flow-text">Extract Fields</text>
+        <text x="712" y="85" class="flow-text">via Bedrock LLM</text>
+
+        <path class="arrow" d="M794,79 L810,79"></path>
+
+        <rect class="flow-step" x="814" y="50" width="160" height="58"></rect>
+        <text x="894" y="67" class="flow-text">Validate against Schema</text>
+        <text x="894" y="79" class="flow-text">
+          Required fields, date &amp;
+        </text>
+        <text x="894" y="91" class="flow-text">identifier formats</text>
+
+        <path class="arrow" d="M976,79 L992,79"></path>
+
+        <rect class="flow-step" x="996" y="50" width="160" height="58"></rect>
+        <text x="1076" y="73" class="flow-text">Confidence Score</text>
+        <text x="1076" y="85" class="flow-text">Per field</text>
+
+        <!-- Services under IDP -->
+        <rect
+          class="service-box"
+          x="480"
+          y="150"
+          width="140"
+          height="45"
+        ></rect>
+        <text x="550" y="176" class="service-text-bold">λ AWS Lambda</text>
+        <rect
+          class="service-box"
+          x="650"
+          y="150"
+          width="140"
+          height="45"
+        ></rect>
+        <text x="720" y="176" class="service-text-bold">Amazon S3</text>
+        <rect
+          class="service-box"
+          x="820"
+          y="150"
+          width="140"
+          height="45"
+        ></rect>
+        <text x="890" y="176" class="service-text-bold">DynamoDB</text>
+
+        <!-- IDP to AgentCore Runtime -->
+        <path class="arrow" d="M715,230 L715,284"></path>
+
+        <!-- ========== USER ACCESS FLOW ========== -->
+        <rect class="service-box" x="30" y="352" width="70" height="45"></rect>
+        <text x="65" y="378" class="service-text-bold">User</text>
+
+        <path class="arrow" d="M100,374 L114,374"></path>
+
+        <rect
+          class="service-box"
+          x="120"
+          y="352"
+          width="110"
+          height="45"
+        ></rect>
+        <text x="175" y="371" class="service-text-bold">Okta SSO</text>
+        <text x="175" y="384" class="service-text">Login</text>
+
+        <path class="arrow" d="M230,374 L252,374 L252,348 L274,348"></path>
+
+        <!-- ========== APPLICATION FRONTEND ========== -->
+        <rect
+          class="section-box"
+          x="280"
+          y="290"
+          width="260"
+          height="300"
+        ></rect>
+        <text x="295" y="308" class="section-label">Application Frontend</text>
+        <text
+          x="295"
+          y="322"
+          class="service-text"
+          style="fill: #5f6b7a; text-anchor: start"
+        >
+          Human-in-the-loop review
+        </text>
+
+        <rect
+          class="service-box"
+          x="295"
+          y="330"
+          width="230"
+          height="36"
+        ></rect>
+        <text x="410" y="352" class="service-text-bold">
+          Amazon CloudFront (CDN)
+        </text>
+
+        <rect
+          class="service-box"
+          x="295"
+          y="376"
+          width="110"
+          height="45"
+        ></rect>
+        <text x="350" y="402" class="service-text-bold">Frontend</text>
+
+        <rect
+          class="service-box"
+          x="415"
+          y="376"
+          width="110"
+          height="45"
+        ></rect>
+        <text x="470" y="402" class="service-text-bold">ALB</text>
+
+        <rect
+          class="service-box"
+          x="295"
+          y="431"
+          width="110"
+          height="45"
+        ></rect>
+        <text x="350" y="456" class="service-text-bold">Backend API</text>
+
+        <rect
+          class="service-box"
+          x="415"
+          y="431"
+          width="110"
+          height="45"
+        ></rect>
+        <text x="470" y="449" class="service-text-bold">Secrets Mgr</text>
+        <text x="470" y="462" class="service-text">Keys/Conn Strings</text>
+
+        <rect
+          class="service-box"
+          x="295"
+          y="486"
+          width="230"
+          height="36"
+        ></rect>
+        <text x="410" y="508" class="service-text">
+          Config map for env variables
+        </text>
+
+        <rect
+          class="service-box"
+          x="295"
+          y="532"
+          width="230"
+          height="40"
+        ></rect>
+        <text x="410" y="556" class="service-text-bold">
+          App Database — Amazon DynamoDB
+        </text>
+
+        <!-- Frontend to AgentCore Runtime -->
+        <path class="arrow" d="M540,453 L584,453"></path>
+
+        <!-- ========== AGENTCORE RUNTIME ========== -->
+        <rect
+          class="section-box"
+          x="590"
+          y="290"
+          width="250"
+          height="200"
+        ></rect>
+        <text x="605" y="308" class="section-label">AgentCore Runtime</text>
+
+        <rect
+          class="service-box"
+          x="615"
+          y="330"
+          width="200"
+          height="50"
+          style="fill: #f0f4ff; stroke: #7b61ff"
+        ></rect>
+        <text x="715" y="360" class="service-text-bold">
+          Reconciliation Agent
+        </text>
+
+        <!-- Runtime to Shared Services -->
+        <path class="arrow" d="M840,390 L874,390"></path>
+
+        <!-- ========== SHARED SERVICES ACCOUNT ========== -->
+        <rect
+          class="section-box"
+          x="880"
+          y="270"
+          width="300"
+          height="350"
+        ></rect>
+        <text x="895" y="288" class="section-label">Shared Services</text>
+
+        <rect
+          class="service-box"
+          x="895"
+          y="300"
+          width="270"
+          height="36"
+        ></rect>
+        <text x="1030" y="322" class="service-text-bold">
+          AgentCore Gateway
+        </text>
+
+        <rect
+          class="service-box"
+          x="895"
+          y="346"
+          width="270"
+          height="70"
+          style="fill: #fffbeb; stroke: #d97706"
+        ></rect>
+        <text
+          x="905"
+          y="360"
+          style="
+            font-size: 9px;
+            fill: #b45309;
+            font-weight: 600;
+            font-family: -apple-system, sans-serif;
+          "
+        >
+          Tools
+        </text>
+        <text x="1030" y="380" class="service-text">General Ledger</text>
+        <text x="1030" y="394" class="service-text">
+          (Mock with Amazon S3 + Athena)
+        </text>
+
+        <rect
+          class="service-box"
+          x="895"
+          y="430"
+          width="130"
+          height="36"
+        ></rect>
+        <text x="960" y="452" class="service-text-bold">
+          AgentCore Registry
+        </text>
+
+        <rect
+          class="service-box"
+          x="1035"
+          y="430"
+          width="130"
+          height="36"
+        ></rect>
+        <text x="1100" y="446" class="service-text-bold">AgentCore Memory</text>
+        <text x="1100" y="459" class="service-text">STM/LTM</text>
+
+        <rect
+          class="service-box"
+          x="895"
+          y="476"
+          width="130"
+          height="36"
+        ></rect>
+        <text x="960" y="498" class="service-text-bold">
+          AgentCore Identity
+        </text>
+
+        <rect
+          class="service-box"
+          x="1035"
+          y="476"
+          width="130"
+          height="36"
+        ></rect>
+        <text x="1100" y="498" class="service-text-bold">AgentCore Policy</text>
+
+        <rect
+          class="service-box"
+          x="895"
+          y="522"
+          width="130"
+          height="36"
+        ></rect>
+        <text x="960" y="544" class="service-text-bold">
+          AgentCore Observability
+        </text>
+
+        <rect
+          class="service-box"
+          x="1035"
+          y="522"
+          width="130"
+          height="36"
+        ></rect>
+        <text x="1100" y="544" class="service-text-bold">
+          AgentCore Evaluation
+        </text>
+
+        <rect
+          class="service-box"
+          x="895"
+          y="568"
+          width="270"
+          height="36"
+        ></rect>
+        <text x="1030" y="590" class="service-text-bold">
+          Bedrock LLMs (Foundation Models)
+        </text>
+      </svg>
+    </div>
+
+    <h1 style="margin-top: 40px">Multi-Region Active/Active Architecture</h1>
+    <p class="subtitle">Multi-region active-active logical view</p>
+
+    <div class="diagram">
+      <svg viewBox="0 0 1200 1180" xmlns="http://www.w3.org/2000/svg">
+        <!-- Defs -->
+        <defs>
+          <marker
+            id="arrowhead"
+            markerWidth="8"
+            markerHeight="6"
+            refX="7"
+            refY="3"
+            orient="auto"
+          >
+            <polygon points="0 0, 8 3, 0 6" fill="#5f6b7a"></polygon>
+          </marker>
+          <marker
+            id="arrowhead-purple"
+            markerWidth="8"
+            markerHeight="6"
+            refX="7"
+            refY="3"
+            orient="auto"
+          >
+            <polygon points="0 0, 8 3, 0 6" fill="#8b5cf6"></polygon>
+          </marker>
+          <marker
+            id="arrowhead-orange"
+            markerWidth="8"
+            markerHeight="6"
+            refX="7"
+            refY="3"
+            orient="auto"
+          >
+            <polygon points="0 0, 8 3, 0 6" fill="#d45b07"></polygon>
+          </marker>
+          <marker
+            id="arrowhead-blue"
+            markerWidth="8"
+            markerHeight="6"
+            refX="7"
+            refY="3"
+            orient="auto"
+          >
+            <polygon points="0 0, 8 3, 0 6" fill="#147eba"></polygon>
+          </marker>
+        </defs>
+
+        <!-- ========== GLOBAL LAYER (top) ========== -->
+        <rect class="global-box" x="20" y="12" width="1160" height="100"></rect>
+        <text x="40" y="32" class="section-label" fill="#147eba">
+          Global Services Layer
+        </text>
+        <rect
+          class="service-box"
+          x="40"
+          y="42"
+          width="180"
+          height="55"
+          style="fill: #eef6ff"
+        ></rect>
+        <text x="130" y="60" class="service-text-bold">Amazon Route 53</text>
+        <text x="130" y="73" class="service-text">Latency-based routing</text>
+        <text x="130" y="85" class="service-text">+ Health Checks</text>
+
+        <rect
+          class="service-box"
+          x="265"
+          y="42"
+          width="180"
+          height="55"
+          style="fill: #eef6ff"
+        ></rect>
+        <text x="355" y="60" class="service-text-bold">Amazon CloudFront</text>
+        <text x="355" y="73" class="service-text">CDN</text>
+        <text x="355" y="85" class="service-text">
+          (ALB origins per region)
+        </text>
+
+        <rect
+          class="service-box"
+          x="490"
+          y="42"
+          width="180"
+          height="55"
+          style="fill: #eef6ff"
+        ></rect>
+        <text x="580" y="60" class="service-text-bold">CloudWatch</text>
+        <text x="580" y="73" class="service-text">Cross-Region Alarms</text>
+        <text x="580" y="85" class="service-text">&amp; Dashboards</text>
+
+        <rect
+          class="service-box"
+          x="715"
+          y="42"
+          width="180"
+          height="55"
+          style="fill: #eef6ff"
+        ></rect>
+        <text x="805" y="60" class="service-text-bold">Okta SSO</text>
+        <text x="805" y="73" class="service-text">Global IdP</text>
+        <text x="805" y="85" class="service-text">(External)</text>
+
+        <rect
+          class="service-box"
+          x="940"
+          y="42"
+          width="180"
+          height="55"
+          style="fill: #eef6ff"
+        ></rect>
+        <text x="1030" y="60" class="service-text-bold">
+          Outlook Shared Inbox ⚠
+        </text>
+        <text x="1030" y="73" class="service-text">Email ingestion</text>
+        <text x="1030" y="85" class="service-text">
+          (polled from both regions)
+        </text>
+
+        <!-- ========== REGION: us-east-2 ========== -->
+        <rect
+          class="region-box region-primary"
+          x="20"
+          y="130"
+          width="570"
+          height="930"
+        ></rect>
+        <rect
+          class="region-label-bg-primary"
+          x="30"
+          y="120"
+          width="300"
+          height="24"
+          rx="6"
+        ></rect>
+        <text x="180" y="137" class="region-label">us-east-2</text>
+
+        <!-- IDP Pipeline - Primary -->
+        <rect
+          class="section-box"
+          x="35"
+          y="150"
+          width="540"
+          height="155"
+        ></rect>
+        <text x="50" y="168" class="section-label">IDP Pipeline</text>
+
+        <rect class="flow-step" x="50" y="178" width="95" height="50"></rect>
+        <text x="98" y="195" class="flow-text">Generate Event ID</text>
+        <text x="98" y="207" class="flow-text">Store in S3</text>
+        <text x="98" y="219" class="flow-text">(+ attachments)</text>
+
+        <path class="arrow" d="M148,203 L158,203"></path>
+
+        <rect class="flow-step" x="162" y="178" width="85" height="50"></rect>
+        <text x="205" y="195" class="flow-text">Classify</text>
+        <text x="205" y="207" class="flow-text">Event Type</text>
+        <text x="205" y="219" class="flow-text">M/V/Custodian</text>
+
+        <path class="arrow" d="M250,203 L260,203"></path>
+
+        <rect class="flow-step" x="264" y="178" width="85" height="50"></rect>
+        <text x="307" y="195" class="flow-text">Extract Fields</text>
+        <text x="307" y="207" class="flow-text">via Bedrock</text>
+        <text x="307" y="219" class="flow-text">LLM</text>
+
+        <path class="arrow" d="M352,203 L362,203"></path>
+
+        <rect class="flow-step" x="366" y="178" width="85" height="50"></rect>
+        <text x="409" y="195" class="flow-text">Validate</text>
+        <text x="409" y="207" class="flow-text">Schema</text>
+        <text x="409" y="219" class="flow-text">Fields/Formats</text>
+
+        <path class="arrow" d="M454,203 L464,203"></path>
+
+        <rect class="flow-step" x="468" y="178" width="85" height="50"></rect>
+        <text x="511" y="195" class="flow-text">Confidence</text>
+        <text x="511" y="207" class="flow-text">Score</text>
+        <text x="511" y="219" class="flow-text">Per Field</text>
+
+        <!-- Services under IDP -->
+        <text x="100" y="260" class="service-text-bold">λ Lambda</text>
+        <text x="220" y="260" class="service-text-bold">S3</text>
+        <text x="340" y="260" class="service-text-bold">DynamoDB</text>
+        <text x="460" y="260" class="service-text-bold">Step Functions</text>
+        <text x="100" y="278" class="service-text">(multi-AZ)</text>
+        <text x="220" y="278" class="service-text">(3-AZ repl.)</text>
+        <text x="340" y="278" class="service-text">(Global Tables)</text>
+        <text x="220" y="292" class="service-text" style="fill: #1b660f">
+          ✓ CRR
+        </text>
+        <text x="340" y="292" class="service-text" style="fill: #1b660f">
+          ✓ Global Tables
+        </text>
+        <!-- Application Frontend - Primary -->
+        <rect
+          class="section-box"
+          x="35"
+          y="315"
+          width="250"
+          height="190"
+        ></rect>
+        <text x="50" y="333" class="section-label">Application Frontend</text>
+
+        <rect class="service-box" x="50" y="342" width="100" height="45"></rect>
+        <text x="100" y="367" class="service-text-bold">Frontend</text>
+        <rect
+          class="service-box"
+          x="165"
+          y="342"
+          width="100"
+          height="35"
+        ></rect>
+        <text x="215" y="357" class="service-text-bold">ALB</text>
+
+        <rect class="service-box" x="50" y="390" width="100" height="35"></rect>
+        <text x="100" y="405" class="service-text-bold">Backend API</text>
+        <text x="100" y="417" class="service-text">ECS / Lambda</text>
+
+        <rect
+          class="service-box"
+          x="165"
+          y="390"
+          width="100"
+          height="35"
+        ></rect>
+        <text x="215" y="405" class="service-text-bold">Secrets Mgr</text>
+        <text x="215" y="417" class="service-text">IDP / Graph creds</text>
+
+        <rect class="service-box" x="50" y="438" width="215" height="50"></rect>
+        <text x="158" y="453" class="service-text-bold">Amazon DynamoDB</text>
+        <text x="158" y="467" class="service-text">
+          App data (items · cases · audit · lessons)
+        </text>
+        <text x="158" y="481" class="service-text" style="fill: #1b660f">
+          ✓ Global Tables (multi-writer A/A)
+        </text>
+
+        <!-- AgentCore - Primary -->
+        <rect
+          class="section-box"
+          x="295"
+          y="315"
+          width="280"
+          height="230"
+        ></rect>
+        <text x="310" y="333" class="section-label">AgentCore</text>
+
+        <!-- AgentCore Runtime sub-box -->
+        <rect
+          class="service-box"
+          x="305"
+          y="340"
+          width="260"
+          height="60"
+          style="fill: #f0f4ff; stroke: #7b61ff"
+        ></rect>
+        <text
+          x="310"
+          y="352"
+          style="
+            font-size: 9px;
+            fill: #7b61ff;
+            font-weight: 600;
+            font-family: -apple-system, sans-serif;
+          "
+        >
+          AgentCore Runtime
+        </text>
+
+        <rect
+          class="service-box"
+          x="375"
+          y="358"
+          width="120"
+          height="36"
+        ></rect>
+        <text x="435" y="380" class="service-text-bold">
+          Reconciliation Agent
+        </text>
+
+        <!-- Gateway, Registry, Identity as separate boxes -->
+        <rect class="service-box" x="305" y="410" width="80" height="28"></rect>
+        <text x="345" y="428" class="service-text-bold">Gateway</text>
+        <rect class="service-box" x="392" y="410" width="80" height="28"></rect>
+        <text x="432" y="428" class="service-text-bold">Registry</text>
+        <rect class="service-box" x="479" y="410" width="80" height="28"></rect>
+        <text x="519" y="428" class="service-text-bold">Identity</text>
+
+        <!-- Memory, Observability, Policy, Evaluation as separate boxes -->
+        <rect class="service-box" x="305" y="445" width="80" height="28"></rect>
+        <text x="345" y="460" class="service-text-bold">Memory ⚠</text>
+        <text x="345" y="470" class="service-text">STM/LTM</text>
+        <rect class="service-box" x="392" y="445" width="80" height="28"></rect>
+        <text x="432" y="463" class="service-text-bold">Observability</text>
+        <rect class="service-box" x="305" y="480" width="80" height="28"></rect>
+        <text x="345" y="498" class="service-text-bold">Policy</text>
+        <rect class="service-box" x="392" y="480" width="80" height="28"></rect>
+        <text x="432" y="498" class="service-text-bold">Evaluation</text>
+        <!-- Shared Services - Primary -->
+        <rect
+          class="section-box"
+          x="35"
+          y="600"
+          width="540"
+          height="105"
+        ></rect>
+        <text x="50" y="618" class="section-label">Shared Backend Systems</text>
+
+        <rect class="service-box" x="50" y="628" width="402" height="28"></rect>
+        <text x="251" y="645" class="service-text">
+          General Ledger ⚠ (Mock with Amazon S3 + Athena)
+        </text>
+
+        <!-- Bedrock - Primary -->
+        <rect class="section-box" x="35" y="715" width="540" height="65"></rect>
+        <text x="305" y="750" class="service-text">
+          Foundation Models (inference) • Bedrock Knowledge Bases (vector index)
+          • Data Automation (BDA)
+        </text>
+        <!-- Data Replication Note -->
+        <rect class="section-box" x="35" y="790" width="540" height="55"></rect>
+        <text x="305" y="808" class="section-label" style="text-anchor: middle">
+          Data Replication (Active within this Region)
+        </text>
+        <text x="305" y="823" class="service-text" style="fill: #1b660f">
+          ✓ S3 CRR (bidirectional) • DynamoDB Global Tables (multi-writer)
+        </text>
+        <text x="305" y="837" class="service-text" style="fill: #1b660f">
+          • Elastic Container Registry (ECR) cross-region replication
+        </text>
+
+        <!-- SQS -->
+        <rect class="section-box" x="35" y="855" width="540" height="55"></rect>
+        <text x="305" y="873" class="section-label" style="text-anchor: middle">
+          Event Processing
+        </text>
+        <text x="305" y="893" class="service-text" style="text-anchor: middle">
+          SQS Queues • EventBridge • SNS fan-out to both regions for
+          deduplication
+        </text>
+        <!-- Monitoring -->
+        <rect
+          class="section-box"
+          x="35"
+          y="920"
+          width="540"
+          height="100"
+        ></rect>
+        <text x="50" y="938" class="section-label">Observability</text>
+        <rect class="service-box" x="50" y="948" width="120" height="28"></rect>
+        <text x="110" y="966" class="service-text">CloudWatch Alarms</text>
+        <rect
+          class="service-box"
+          x="180"
+          y="948"
+          width="100"
+          height="28"
+        ></rect>
+        <text x="230" y="966" class="service-text">X-Ray Tracing</text>
+        <rect
+          class="service-box"
+          x="290"
+          y="948"
+          width="130"
+          height="34"
+        ></rect>
+        <text x="355" y="961" class="service-text">CloudWatch Synthetics</text>
+        <text x="355" y="973" class="service-text">(Canaries)</text>
+        <!-- ========== REGION: us-east-1 ========== -->
+        <rect
+          class="region-box region-secondary"
+          x="610"
+          y="130"
+          width="570"
+          height="930"
+        ></rect>
+        <rect
+          class="region-label-bg-secondary"
+          x="620"
+          y="120"
+          width="320"
+          height="24"
+          rx="6"
+        ></rect>
+        <text x="780" y="137" class="region-label">us-east-1</text>
+
+        <!-- IDP Pipeline - Secondary -->
+        <rect
+          class="section-box"
+          x="625"
+          y="150"
+          width="540"
+          height="155"
+        ></rect>
+        <text x="640" y="168" class="section-label">
+          IDP Pipeline (Identical Deployment)
+        </text>
+
+        <rect class="flow-step" x="640" y="178" width="95" height="50"></rect>
+        <text x="688" y="195" class="flow-text">Generate Event ID</text>
+        <text x="688" y="207" class="flow-text">Store in S3</text>
+        <text x="688" y="219" class="flow-text">(+ attachments)</text>
+
+        <path class="arrow" d="M738,203 L748,203"></path>
+
+        <rect class="flow-step" x="752" y="178" width="85" height="50"></rect>
+        <text x="795" y="195" class="flow-text">Classify</text>
+        <text x="795" y="207" class="flow-text">Event Type</text>
+        <text x="795" y="219" class="flow-text">M/V/Custodian</text>
+
+        <path class="arrow" d="M840,203 L850,203"></path>
+
+        <rect class="flow-step" x="854" y="178" width="85" height="50"></rect>
+        <text x="897" y="195" class="flow-text">Extract Fields</text>
+        <text x="897" y="207" class="flow-text">via Bedrock</text>
+        <text x="897" y="219" class="flow-text">LLM</text>
+
+        <path class="arrow" d="M942,203 L952,203"></path>
+
+        <rect class="flow-step" x="956" y="178" width="85" height="50"></rect>
+        <text x="999" y="195" class="flow-text">Validate</text>
+        <text x="999" y="207" class="flow-text">Schema</text>
+        <text x="999" y="219" class="flow-text">Fields/Formats</text>
+
+        <path class="arrow" d="M1044,203 L1054,203"></path>
+
+        <rect class="flow-step" x="1058" y="178" width="85" height="50"></rect>
+        <text x="1101" y="195" class="flow-text">Confidence</text>
+        <text x="1101" y="207" class="flow-text">Score</text>
+        <text x="1101" y="219" class="flow-text">Per Field</text>
+
+        <!-- Services under IDP - Secondary -->
+        <text x="690" y="260" class="service-text-bold">λ Lambda</text>
+        <text x="810" y="260" class="service-text-bold">S3</text>
+        <text x="930" y="260" class="service-text-bold">DynamoDB</text>
+        <text x="1050" y="260" class="service-text-bold">Step Functions</text>
+        <text x="690" y="278" class="service-text">(multi-AZ)</text>
+        <text x="810" y="278" class="service-text">(3-AZ repl.)</text>
+        <text x="930" y="278" class="service-text">(Global Tables)</text>
+        <text x="810" y="292" class="service-text" style="fill: #1b660f">
+          ✓ CRR replica
+        </text>
+        <text x="930" y="292" class="service-text" style="fill: #1b660f">
+          ✓ Global Tables
+        </text>
+        <!-- Application Frontend - Secondary -->
+        <rect
+          class="section-box"
+          x="625"
+          y="315"
+          width="250"
+          height="190"
+        ></rect>
+        <text x="640" y="333" class="section-label">Application Frontend</text>
+
+        <rect
+          class="service-box"
+          x="640"
+          y="342"
+          width="100"
+          height="45"
+        ></rect>
+        <text x="690" y="367" class="service-text-bold">Frontend</text>
+        <rect
+          class="service-box"
+          x="755"
+          y="342"
+          width="100"
+          height="35"
+        ></rect>
+        <text x="805" y="357" class="service-text-bold">ALB</text>
+
+        <rect
+          class="service-box"
+          x="640"
+          y="390"
+          width="100"
+          height="35"
+        ></rect>
+        <text x="690" y="405" class="service-text-bold">Backend API</text>
+        <text x="690" y="417" class="service-text">ECS / Lambda</text>
+
+        <rect
+          class="service-box"
+          x="755"
+          y="390"
+          width="100"
+          height="35"
+        ></rect>
+        <text x="805" y="405" class="service-text-bold">Secrets Mgr</text>
+        <text x="805" y="417" class="service-text">IDP / Graph creds</text>
+
+        <rect
+          class="service-box"
+          x="640"
+          y="438"
+          width="215"
+          height="50"
+        ></rect>
+        <text x="748" y="453" class="service-text-bold">Amazon DynamoDB</text>
+        <text x="748" y="467" class="service-text">
+          Global Tables replica (multi-writer)
+        </text>
+        <text x="748" y="481" class="service-text" style="fill: #1b660f">
+          ✓ Active/active replication
+        </text>
+
+        <!-- AgentCore - Secondary -->
+        <rect
+          class="section-box"
+          x="885"
+          y="315"
+          width="280"
+          height="230"
+        ></rect>
+        <text x="900" y="333" class="section-label">AgentCore</text>
+
+        <!-- AgentCore Runtime sub-box -->
+        <rect
+          class="service-box"
+          x="895"
+          y="340"
+          width="260"
+          height="60"
+          style="fill: #f0f4ff; stroke: #7b61ff"
+        ></rect>
+        <text
+          x="900"
+          y="352"
+          style="
+            font-size: 9px;
+            fill: #7b61ff;
+            font-weight: 600;
+            font-family: -apple-system, sans-serif;
+          "
+        >
+          AgentCore Runtime
+        </text>
+
+        <rect
+          class="service-box"
+          x="965"
+          y="358"
+          width="120"
+          height="36"
+        ></rect>
+        <text x="1025" y="380" class="service-text-bold">
+          Reconciliation Agent
+        </text>
+
+        <!-- Gateway, Registry, Identity as separate boxes -->
+        <rect class="service-box" x="895" y="410" width="80" height="28"></rect>
+        <text x="935" y="428" class="service-text-bold">Gateway</text>
+        <rect class="service-box" x="982" y="410" width="80" height="28"></rect>
+        <text x="1022" y="428" class="service-text-bold">Registry</text>
+        <rect
+          class="service-box"
+          x="1069"
+          y="410"
+          width="80"
+          height="28"
+        ></rect>
+        <text x="1109" y="428" class="service-text-bold">Identity</text>
+
+        <!-- Memory, Observability, Policy, Evaluation as separate boxes -->
+        <rect class="service-box" x="895" y="445" width="80" height="28"></rect>
+        <text x="935" y="460" class="service-text-bold">Memory ⚠</text>
+        <text x="935" y="470" class="service-text">STM/LTM</text>
+        <rect class="service-box" x="982" y="445" width="80" height="28"></rect>
+        <text x="1022" y="463" class="service-text-bold">Observability</text>
+        <rect class="service-box" x="895" y="480" width="80" height="28"></rect>
+        <text x="935" y="498" class="service-text-bold">Policy</text>
+        <rect class="service-box" x="982" y="480" width="80" height="28"></rect>
+        <text x="1022" y="498" class="service-text-bold">Evaluation</text>
+        <!-- Shared Services - Secondary -->
+        <rect
+          class="section-box"
+          x="625"
+          y="600"
+          width="540"
+          height="105"
+        ></rect>
+        <text x="640" y="618" class="section-label">
+          Shared Backend Systems
+        </text>
+
+        <rect
+          class="service-box"
+          x="640"
+          y="628"
+          width="402"
+          height="28"
+        ></rect>
+        <text x="841" y="645" class="service-text">
+          General Ledger ⚠ (Mock with Amazon S3 + Athena)
+        </text>
+
+        <!-- Bedrock - Secondary -->
+        <rect
+          class="section-box"
+          x="625"
+          y="715"
+          width="540"
+          height="65"
+        ></rect>
+        <text x="895" y="750" class="service-text">
+          Foundation Models (inference) • Bedrock Knowledge Bases (vector index)
+          • Pipeline mode fallback
+        </text>
+        <text x="895" y="768" class="service-text" style="fill: #d45b07">
+          ⚠ BDA may not be available — use pipeline mode (Bedrock FMs directly)
+          as fallback
+        </text>
+
+        <!-- Data Replication - Secondary -->
+        <rect
+          class="section-box"
+          x="625"
+          y="790"
+          width="540"
+          height="55"
+        ></rect>
+        <text x="895" y="808" class="section-label" style="text-anchor: middle">
+          Data Replication (Active within this Region)
+        </text>
+        <text x="895" y="823" class="service-text" style="fill: #1b660f">
+          ✓ S3 CRR replica • DynamoDB Global Tables replica
+        </text>
+        <text x="895" y="837" class="service-text" style="fill: #1b660f">
+          • Elastic Container Registry (ECR) replica
+        </text>
+
+        <!-- SQS - Secondary -->
+        <rect
+          class="section-box"
+          x="625"
+          y="855"
+          width="540"
+          height="55"
+        ></rect>
+        <text x="895" y="873" class="section-label" style="text-anchor: middle">
+          Event Processing
+        </text>
+        <text x="895" y="893" class="service-text" style="text-anchor: middle">
+          SQS Queues • EventBridge • Receives SNS events for new documents
+        </text>
+        <!-- Monitoring - Secondary -->
+        <rect
+          class="section-box"
+          x="625"
+          y="920"
+          width="540"
+          height="100"
+        ></rect>
+        <text x="640" y="938" class="section-label">Observability</text>
+        <rect
+          class="service-box"
+          x="640"
+          y="948"
+          width="120"
+          height="28"
+        ></rect>
+        <text x="700" y="966" class="service-text">CloudWatch Alarms</text>
+        <rect
+          class="service-box"
+          x="770"
+          y="948"
+          width="100"
+          height="28"
+        ></rect>
+        <text x="820" y="966" class="service-text">X-Ray Tracing</text>
+        <rect
+          class="service-box"
+          x="880"
+          y="948"
+          width="130"
+          height="34"
+        ></rect>
+        <text x="945" y="961" class="service-text">CloudWatch Synthetics</text>
+        <text x="945" y="973" class="service-text">(Canaries)</text>
+        <!-- ========== CROSS-REGION REPLICATION ARROWS ========== -->
+
+        <!-- ========== LEGEND ========== -->
+        <rect x="20" y="1075" width="1160" height="25" fill="none"></rect>
+
+        <text
+          x="290"
+          y="1089"
+          class="legend-text"
+          style="fill: #1b660f; text-anchor: middle"
+        >
+          ✓ = native multi-AZ or CRR
+        </text>
+        <!-- ========== APPENDIX: OPEN ARCHITECTURE DECISIONS ========== -->
+        <rect
+          x="20"
+          y="1010"
+          width="1160"
+          height="158"
+          rx="8"
+          fill="#fffbeb"
+          stroke="#d97706"
+          stroke-width="1.5"
+        ></rect>
+        <text
+          x="40"
+          y="1032"
+          style="
+            font-size: 12px;
+            font-weight: 700;
+            fill: #92400e;
+            font-family:
+              -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;,
+              sans-serif;
+          "
+        >
+          ⚠ Open Architecture Decisions for Active/Active Multi-Region
+          Architecture
+        </text>
+
+        <text
+          x="40"
+          y="1054"
+          style="
+            font-size: 10px;
+            fill: #78350f;
+            font-family:
+              -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;,
+              sans-serif;
+          "
+        >
+          1. Email Dedup: Both regions polling same Outlook inbox = duplicates.
+          Need leader-election or DynamoDB conditional-write locking mechanism.
+          [Code change to IDP]
+        </text>
+
+        <text
+          x="40"
+          y="1072"
+          style="
+            font-size: 10px;
+            fill: #78350f;
+            font-family:
+              -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;,
+              sans-serif;
+          "
+        >
+          2. AgentCore Memory: Regional service — two agents learn independently
+          (split-brain). Accept or implement custom cross-region sync.
+        </text>
+
+        <text
+          x="40"
+          y="1090"
+          style="
+            font-size: 10px;
+            fill: #78350f;
+            font-family:
+              -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;,
+              sans-serif;
+          "
+        >
+          3. Database: App data uses DynamoDB Global Tables — natively
+          multi-writer / active-active (no relational DB), so there is no
+          single-writer bottleneck or write-forwarding latency.
+        </text>
+
+        <text
+          x="40"
+          y="1108"
+          style="
+            font-size: 10px;
+            fill: #78350f;
+            font-family:
+              -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;,
+              sans-serif;
+          "
+        >
+          4. AgentCore Runtime + Registry + Policy: Deploy independently to both
+          regions (same IaC, same config). No native cross-region replication.
+        </text>
+
+        <text
+          x="40"
+          y="1126"
+          style="
+            font-size: 10px;
+            fill: #78350f;
+            font-family:
+              -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;,
+              sans-serif;
+          "
+        >
+          5. Frontend Application (EKS): Deploy to both regions. Session
+          stickiness required (ALB cookie-based) to prevent mid-session region
+          hops.
+        </text>
+
+        <text
+          x="40"
+          y="1144"
+          style="
+            font-size: 10px;
+            fill: #78350f;
+            font-family:
+              -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;,
+              sans-serif;
+          "
+        >
+          6. S3 RTC: 99.9% replicated within 15 min (SLA-backed). Documents
+          process end-to-end in originating region — no mid-pipeline
+          cross-region handoff.
+        </text>
+
+        <text
+          x="40"
+          y="1162"
+          style="
+            font-size: 10px;
+            fill: #78350f;
+            font-family:
+              -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;,
+              sans-serif;
+          "
+        >
+          7. ⚠ Shared Backend Systems (General Ledger — Mock with Amazon S3 +
+          Athena): Is it actually active/active across regions?
+        </text>
+      </svg>
+    </div>
+  </body>
+</html>

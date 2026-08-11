@@ -1,0 +1,14 @@
+strands-agents==1.50.2
+bedrock-agentcore==1.18.1
+boto3==1.43.57
+pydantic==2.13.4
+# Gateway tool transport (gateway_mcp: streamablehttp_client + ClientSession); anyio is
+# transitive to mcp but pinned for reproducibility.
+mcp==1.28.1
+anyio==4.14.2
+# ADOT auto-instrumentation: the container must ship its own OTel (launched via
+# opentelemetry-instrument in the Dockerfile CMD) — the AgentCore platform does NOT inject
+# it into custom runtime images (only the managed harness has it built in). Without this,
+# aws/spans gets only the platform Invoke span and the online evaluators have no gen-ai
+# conversation spans to score.
+aws-opentelemetry-distro==0.19.0
