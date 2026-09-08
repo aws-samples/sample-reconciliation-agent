@@ -186,7 +186,7 @@ describe("useMetadataTracking", () => {
       expect(metrics!.e2e).toBe(1000);
     });
 
-    it("should include token usage in metadata", async () => {
+    it("should not persist token usage itself — the SDK does that", async () => {
       const { result } = renderHook(() => useMetadataTracking());
 
       act(() => {
@@ -220,17 +220,13 @@ describe("useMetadataTracking", () => {
       // Wait for async operations
       await vi.runAllTimersAsync();
 
-      // Check that fetch was called with token usage
-      expect(mockFetch).toHaveBeenCalled();
-      const fetchCalls = mockFetch.mock.calls;
-      const metadataCall = fetchCalls.find(
+      // saveMetadata deliberately early-returns unless `documents` is non-empty: token usage
+      // and latency reach DynamoDB through the SDK's message.metadata, so a turn carrying only
+      // tokenUsage must produce no metadata write of its own.
+      const metadataCalls = mockFetch.mock.calls.filter(
         (call) => call[0] === "/api/session/update-metadata",
       );
-
-      if (metadataCall) {
-        const body = JSON.parse(metadataCall[1].body);
-        expect(body.metadata.tokenUsage).toEqual(tokenUsage);
-      }
+      expect(metadataCalls).toHaveLength(0);
     });
 
     it("should include documents in metadata", async () => {
@@ -266,14 +262,19 @@ describe("useMetadataTracking", () => {
         (call) => call[0] === "/api/session/update-metadata",
       );
 
-      if (metadataCall) {
-        const body = JSON.parse(metadataCall[1].body);
-        expect(body.metadata.documents).toEqual(documents);
-      }
+      // Asserted rather than guarded with `if`: a guarded assertion passes silently when the
+      // write never fires, which is the one regression this test exists to catch.
+      expect(metadataCall).toBeDefined();
+      const body = JSON.parse(metadataCall![1].body);
+      expect(body.metadata.documents).toEqual(documents);
     });
 
     it("should only save metadata once", async () => {
       const { result } = renderHook(() => useMetadataTracking());
+
+      // Documents are what makes saveMetadata write at all, so idempotency is only
+      // observable on a turn that carries them.
+      const documents = [{ filename: "report.docx", tool_type: "word" }];
 
       act(() => {
         result.current.startTracking();
@@ -289,6 +290,7 @@ describe("useMetadataTracking", () => {
         result.current.recordE2E({
           sessionId: "session-123",
           messageId: "msg-1",
+          documents,
         });
       });
 
@@ -296,6 +298,7 @@ describe("useMetadataTracking", () => {
         result.current.recordE2E({
           sessionId: "session-123",
           messageId: "msg-1",
+          documents,
         });
       });
 

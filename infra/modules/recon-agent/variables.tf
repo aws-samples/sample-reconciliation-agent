@@ -78,9 +78,9 @@ variable "lessons_table_arn" {
 }
 
 variable "interceptor_mode" {
-  description = "Gateway REQUEST interceptor mode: 'log' (observe only, never blocks) or 'enforce' (reject failing provenance/transition checks). Roll out log -> enforce."
+  description = "Gateway REQUEST interceptor mode: 'enforce' (default — reject failing provenance/evidence/transition checks) or 'log' (observe only, never blocks). Fail-closed default; ask for 'log' explicitly for a first rollout. See the root variables.tf for why."
   type        = string
-  default     = "log"
+  default     = "enforce"
 
   validation {
     condition     = contains(["log", "enforce"], var.interceptor_mode)
@@ -113,11 +113,33 @@ variable "agent_role_names" {
   default     = []
 }
 
-variable "notify_email" {
-  description = "Recipient for auto-resolve notification emails, sent from the shared mailbox via the microsoft-graph gateway tool (empty disables)."
+variable "notify_contact_id" {
+  description = <<-EOT
+    Contact ID of the internal-notification recipient for the runtime's auto-resolve email (empty
+    disables). An ID rather than an address on purpose: notify.py resolves it against
+    contacts_table at send time and refuses a missing, deactivated, or wrong-kind contact.
+  EOT
   type        = string
   default     = ""
 }
+
+variable "contacts_table" {
+  description = "Contacts table name. Read by the runtime (resolve notify_contact_id) and by the gateway interceptor (authorize a send's recipient). Both read it per send -- nothing caches it."
+  type        = string
+  default     = ""
+}
+
+variable "contacts_table_arn" {
+  description = "ARN of the contacts table, for the runtime and interceptor read grants."
+  type        = string
+  default     = ""
+}
+
+# NOTE: no templates_table here on purpose. Nothing in this module reads it — the `templates`
+# gateway target only needs the query Lambda's ARN, and that Lambda gets the table name from the
+# contact-store module that owns it. Neither the runtime nor the interceptor has a reason to read a
+# template: the notification wording is the platform's, and rendering an approved draft is the BFF's
+# job. Wiring an unread table name through here would just imply a dependency that isn't real.
 
 # Every caller passes this explicitly (environments/recon/main.tf), so the module needs no
 # default — and a real mailbox address does not belong in committed code.
@@ -127,7 +149,7 @@ variable "graph_mailbox" {
 }
 
 variable "lambda_zip" {
-  description = "Shared backend Lambda deployment zip (kb-search tool)."
+  description = "Shared backend Lambda deployment zip (recon-status, correspondence-search and eval-agreement tools)."
   type        = string
 }
 
@@ -142,7 +164,7 @@ variable "gl_tool_lambda_arn" {
 }
 
 variable "vpc_subnet_ids" {
-  description = "Private subnets for the kb-search Lambda + VPC-mode AgentCore Runtime ([] = public)."
+  description = "Private subnets for the tool Lambdas + VPC-mode AgentCore Runtime ([] = public)."
   type        = list(string)
   default     = []
 }
@@ -154,6 +176,30 @@ variable "vpc_security_group_ids" {
 
 variable "gl_tool_enabled" {
   description = "Register the general-ledger Gateway target (static gate; pair with gl_tool_lambda_arn)."
+  type        = bool
+  default     = false
+}
+
+variable "notice_tool_lambda_arn" {
+  description = "ARN of the search_notices query Lambda (the actual side). Empty disables the target."
+  type        = string
+  default     = ""
+}
+
+variable "notice_tool_enabled" {
+  description = "Whether to register the notices gateway target."
+  type        = bool
+  default     = false
+}
+
+variable "contact_tool_lambda_arn" {
+  description = "ARN of the list_contacts/list_templates query Lambda. ONE Lambda serves both gateway targets. Empty disables both."
+  type        = string
+  default     = ""
+}
+
+variable "contact_tool_enabled" {
+  description = "Whether to register the `contacts` and `templates` gateway targets. Two targets, not one, because the exposed tool name is <target>___<tool> and the design names contacts___list_contacts and templates___list_templates -- collapsing them would rename the second tool to something Cedar and the allowlists do not match."
   type        = bool
   default     = false
 }
@@ -171,7 +217,7 @@ variable "set_draw_status_enabled" {
 }
 
 variable "confidence_threshold" {
-  description = "Composite-confidence floor the AgentCore Policy enforces before the agent may invoke set_draw_status through the gateway. Templated into the Cedar policy; the Config-tab UI updates it via the Policy update API. Default 0.85 (not 0.95): 0.95 is unreachable on either backend because the model's verbalized term caps the weighted sum around 0.89-0.91 — see the foundation module's auto-resolve-threshold comment and the harness signal + tool-parity design record (D5/D6). Keep the two in step."
+  description = "Evidence-completeness floor the AgentCore Policy enforces before the agent may invoke set_draw_status through the gateway. Templated into the Cedar policy; the Config-tab UI updates it via the Policy update API. Default 0.85. The score is satisfied/prescribed required evidence steps, so the reachable values are a step function of the skill's step count — see the foundation module's auto-resolve-threshold comment before changing it. Keep the two in step."
   type        = number
   default     = 0.85
 }
@@ -190,4 +236,23 @@ variable "otel_baggage_span_attribute_keys" {
   description = "OTEL_BAGGAGE_SPAN_ATTRIBUTE_KEYS for the runtime container: W3C baggage keys the ADOT distro promotes onto this runtime's spans. The agent-worker Lambda sends the baggage (recon.item_id / recon.domain / recon.backend / session.id) on every invocation; without this allow-list the header still propagates but nothing is recorded, so agent spans cannot be filtered by the business key. Keep identical to the tier1 + harness modules' value."
   type        = string
   default     = ""
+}
+
+variable "deploy_actions_function_name" {
+  description = <<-EOT
+    Name of the deploy-actions Lambda (infra/modules/deploy-actions) that performs this module's
+    apply-time readiness waits. Passed in rather than referenced so the two modules do not depend on
+    each other: the actor's IAM grant for knowledge bases is account-scoped precisely because
+    referencing this module's KB ARN would close that cycle.
+  EOT
+  type        = string
+}
+
+variable "deploy_actions_source_code_hash" {
+  description = <<-EOT
+    source_code_hash of the deploy-actions Lambda, folded into each invocation's input so a handler
+    change re-runs the waits. Without it an invocation is keyed only on its arguments and replays a
+    result produced by an older version of the code.
+  EOT
+  type        = string
 }

@@ -1,4 +1,10 @@
-"""IDP-completion-event → ReconItem mapper.
+"""IDP-completion-event → Notice mapper.
+
+A document is EVIDENCE on the actual side of the reconciliation, so it maps to a Notice and never to
+a ReconItem: an item write is what creates a case, and an extracted document must not create one
+-- an extracted document is evidence ABOUT a reconciliation item, never the thing that creates one.
+Nothing in this module imports ReconItem, and that is deliberate — restoring such
+an import would restore the coupling.
 
 The real IDP completion/tracking record is **PascalCase** (verified against a live run):
 
@@ -13,15 +19,22 @@ The real IDP completion/tracking record is **PascalCase** (verified against a li
 The event carries only S3 *pointers*, not the extracted field values. So at ingest we read the
 section result.json files from IDP output S3 (via an injected IdpOutputReader) and EMBED the
 classification + extracted field values + page-image locations into the ReconItem — the detail
-screen renders them directly, with no on-demand IDP call. A legacy snake_case shape is still
-tolerated for older fixtures/tests.
+screen renders them directly, with no on-demand IDP call.
+
+Two key styles are accepted throughout: the PascalCase shape above, which is what IDP emits, and a
+snake_case equivalent, which is what the unit fixtures are written in.
 """
 
 import logging
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
-from backend.recon_core.schema import ReconItem
+from backend.recon_core.notice_derive import (
+    PARSE_METHOD_IDP,
+    SOURCE_SYSTEM_OTHER,
+    derive_amount_type,
+)
+from backend.recon_core.notices import Notice
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +53,15 @@ def _decimalize(obj):
     return obj
 
 
-def _s3_uri_to_bucket_prefix(uri: str) -> tuple[str, str]:
-    """Split an ``s3://bucket/key`` URI into (bucket, key). Returns ('','') if not an s3 URI."""
+def split_s3_uri(uri: str) -> tuple[str, str]:
+    """Split an ``s3://bucket/key`` URI into (bucket, key). Returns ('','') if not an s3 URI.
+
+    Public because ``idp_output.IdpOutputReader.resolve_document`` splits the compressed-output
+    pointer with it. It lives here rather than there because this module has no boto3 dependency.
+
+    :param uri: the URI to split.
+    :returns: ``(bucket, key)``, or ``("", "")`` when ``uri`` is not an ``s3://`` URI.
+    """
     if not uri.startswith("s3://"):
         return "", ""
     rest = uri[len("s3://") :]
@@ -68,52 +88,40 @@ def _derive_output_location(document: dict) -> tuple[str, str, str]:
                 sample_uri = pg["ImageUri"]
                 break
     if sample_uri:
-        bucket, key = _s3_uri_to_bucket_prefix(sample_uri)
+        bucket, key = split_s3_uri(sample_uri)
         # key looks like "<ObjectKey>/sections/1/result.json" -> prefix is "<ObjectKey>"
         prefix = key.split("/sections/")[0].split("/pages/")[0]
         return object_key, bucket, prefix
-    # Fallback: explicit fields (also covers the legacy snake_case fixture).
+    # Fallback: explicit fields, which is also how the snake_case fixtures carry them.
     bucket = document.get("output_bucket", "")
     prefix = document.get("input_key", "") or (object_key or "")
     return object_key, bucket, prefix
 
 
-def idp_event_to_recon_item(
+def _read_sections(
     document: dict,
     *,
-    domain: str | None,
-    output_reader: Optional[object] = None,
-    execution_arn: str | None = None,
-) -> ReconItem:
-    """Map an IDP completion event to a canonical ReconItem, embedding IDP detail at ingest.
+    output_reader: Optional[object],
+    out_bucket: str,
+    out_prefix: str,
+) -> tuple[list[dict], list[dict], Optional[int]]:
+    """Resolve a document's sections, page images and page count.
+
+    Shared by both mappers. Prefers the extracted field VALUES read from IDP output S3; falls back
+    to the high-level per-section data the completion event itself carries, so a transient IDP-S3
+    failure degrades the detail rather than dropping the document.
 
     :param document: the IDP completion/tracking record (PascalCase; snake_case tolerated).
-    :param domain: single deployment domain stamped on the item ('unknown' if None).
-    :param output_reader: an IdpOutputReader (or compatible) used to read section results +
-        page images from IDP output S3. When provided and the S3 location is known, the
-        extracted field values are embedded. When None, only the high-level info from the event
-        (classification, section list, page count, S3 location) is captured.
-    :param execution_arn: the IDP Step-Function run id (``detail.executionArn``) — stored so a
-        later reprocess (a NEW run of the same document) can be distinguished from a re-delivered
-        duplicate event. Falls back to the document's ``workflow_execution_arn`` when absent.
-    :returns: a ReconItem with idp_* attributes populated.
-    :raises ValueError: if the document has no identifiable id/ObjectKey.
+    :param output_reader: an IdpOutputReader (or compatible), or None to use event data only.
+    :param out_bucket: IDP output bucket resolved by :func:`_derive_output_location`.
+    :param out_prefix: IDP output prefix (the document id) for that bucket.
+    :returns: ``(sections, pages, page_count)`` — sections always in the normalised shape
+        ``{section_id, classification, fields, output_uri, page_indices}``; page_count is None when
+        neither the event nor the read could supply one.
     """
-    object_key, out_bucket, out_prefix = _derive_output_location(document)
-    if not object_key:
-        raise ValueError(f"IDP document missing ObjectKey/id: keys={list(document)}")
-
-    raw_ref = f"s3://{out_bucket}/{out_prefix}/" if out_bucket else ""
-    refs = [f"idp:documentId={object_key}", f"idp:objectKey={object_key}"]
-    if raw_ref:
-        refs.append(f"idp:output={raw_ref}")
-
     # High-level section list from the event itself (classification + result URI per section).
     event_sections = document.get("Sections") or document.get("sections") or []
 
-    # Enrich from IDP output S3 when a reader is available: embed extracted field VALUES + pages.
-    # A read failure must NOT drop the item — fall back to the high-level event data below, so a
-    # transient IDP-S3 issue still yields a usable case (classification/sections from the event).
     enriched_sections: list[dict] = []
     pages: list[dict] = []
     page_count = document.get("PageCount")
@@ -124,12 +132,22 @@ def idp_event_to_recon_item(
             pages = read.get("pages", [])
             if page_count is None:
                 page_count = len(pages)
-        except Exception as exc:  # noqa: BLE001 - degrade gracefully, never drop the item
-            logger.warning("IDP output read failed for %s: %s", raw_ref, exc)
+        except Exception as exc:  # noqa: BLE001 - degrade gracefully, never drop the document
+            logger.warning("IDP output read failed for s3://%s/%s: %s", out_bucket, out_prefix, exc)
 
     # If enrichment wasn't available, fall back to whatever the event carried per section.
     if not enriched_sections:
         for s in event_sections:
+            # A section that is a bare string is IDP's COMPRESSED stand-in, whose `sections` is a
+            # list of id strings rather than records — see `IdpOutputReader.resolve_document`. If one
+            # reaches here the pointer was never followed, so say that: the alternative is
+            # `AttributeError: 'str' object has no attribute 'get'` three frames deep, which reads
+            # like a mapper bug rather than an unresolved event (cost us a live debug on 2026-09-02).
+            if not isinstance(s, dict):
+                raise ValueError(
+                    f"IDP section {s!r} is not a record — this looks like an unresolved compressed "
+                    "event; resolve_document() must run before the mapper"
+                )
             sid = str(s.get("Id") or s.get("section_id") or "")
             cls = s.get("Class") or s.get("classification")
             uri = s.get("OutputJSONUri") or s.get("extraction_result_uri") or ""
@@ -146,46 +164,149 @@ def idp_event_to_recon_item(
                 }
             )
 
-    first_section = enriched_sections[0] if enriched_sections else {}
-    first_class = first_section.get("classification")
-    first_fields = first_section.get("fields", {})
-    # Classification-slot confidence for the first section, as resolved by the output reader
-    # (document_class.confidence when IDP emits one, else the mean per-field extraction
-    # confidence from explainability_info). Omitted when absent so pre-Assessment documents don't
-    # carry a misleading zero — the composite renormalizes instead.
-    first_conf = first_section.get("classification_confidence")
-    # Low-confidence extracted fields across ALL sections: the agent may reason over any section,
-    # so the penalty must reflect the whole document. The event's ConfidenceAlertCount is not
-    # emitted by IDP (NULL on every live item, leaving the 10% penalty permanently inert), so it
-    # is only a fallback for the event-only path where no section results were read.
+    return enriched_sections, pages, page_count
+
+
+def _opt(fields: dict, key: str) -> str | None:
+    """Read an extracted field, preserving the absent/blank distinction.
+
+    :param fields: the section's extracted field values.
+    :param key: the field name.
+    :returns: the string value, ``""`` when extracted but blank, or None when this document's class
+        never extracted it at all.
+    """
+    if key not in fields:
+        return None
+    return str(fields[key])
+
+
+def _opt_decimal(fields: dict, key: str) -> Decimal | None:
+    """Read an extracted numeric field as a Decimal, preserving absence.
+
+    Decimal rather than float because boto3's DynamoDB resource rejects floats outright.
+
+    :param fields: the section's extracted field values.
+    :param key: the field name.
+    :returns: the Decimal value, or None when absent or blank.
+    :raises ValueError: when the field is present and non-blank but will not parse as a number —
+        a silently dropped amount would make an unmatchable notice look merely unmatched.
+    """
+    raw = fields.get(key)
+    if raw in (None, ""):
+        return None
+    try:
+        return Decimal(str(raw))
+    except InvalidOperation as exc:
+        raise ValueError(f"extracted {key} is not a number: {raw!r}") from exc
+
+
+def idp_event_to_notice(
+    document: dict,
+    *,
+    output_reader: Optional[object] = None,
+    execution_arn: str | None = None,
+) -> Notice:
+    """Map an IDP completion event to a Notice — the ACTUAL side of the reconciliation.
+
+    A document is EVIDENCE, not a reconciliation item, so extraction produces a Notice and never a
+    case. There is no ``domain`` parameter, because a notice is not scoped to a recon
+    domain.
+
+    :param document: the IDP completion/tracking record (PascalCase; snake_case tolerated).
+    :param output_reader: an IdpOutputReader (or compatible) used to read section results and page
+        images from IDP output S3. When None, only the event's own high-level data is captured.
+    :param execution_arn: the IDP Step-Function run id, stored for the audit trail.
+    :returns: the mapped notice.
+    :raises ValueError: if the document has no identifiable ObjectKey, no extractable notice date,
+        or an amount that will not parse.
+    """
+    object_key, out_bucket, out_prefix = _derive_output_location(document)
+    if not object_key:
+        raise ValueError(f"IDP document missing ObjectKey/id: keys={list(document)}")
+
+    sections, pages, _page_count = _read_sections(
+        document, output_reader=output_reader, out_bucket=out_bucket, out_prefix=out_prefix
+    )
+    first = sections[0] if sections else {}
+    fields = first.get("fields", {}) or {}
+
+    # notice_date is the range key of the notices table's counterparty-index, so a blank one would
+    # be both rejected by the model and dropped from the index — the notice would exist but the
+    # agent's primary query could never return it. Raise instead: the hook re-raises, and IDP's
+    # retry/DLQ gets a second chance at the extraction.
+    notice_date = str(fields.get("notice_date") or fields.get("value_date") or "")
+    if not notice_date:
+        raise ValueError(
+            f"IDP document {object_key} extracted no notice_date/value_date: fields={list(fields)}"
+        )
+
+    # None when the per-section counts could not be read AND IDP's own field is NULL. Propagated as
+    # None on purpose: the interceptor refuses a write it cannot evaluate, and a defaulted number
+    # here would make an unscored extraction look like a scored one.
     section_alerts = [
         s.get("confidence_alert_count")
-        for s in enriched_sections
+        for s in sections
         if s.get("confidence_alert_count") is not None
     ]
     alert_total = sum(section_alerts) if section_alerts else document.get("ConfidenceAlertCount")
 
-    attributes = {
-        "idp_class": first_class,  # opaque; recon never branches on it
-        "idp_attributes": first_fields,  # extracted field values of the first section
-        "idp_sections": enriched_sections,  # per-section classification + fields
-        "idp_pages": pages,  # page-image s3 uris for the preview
-        "idp_page_count": page_count,
-        "idp_confidence_alert_count": alert_total,
-        "idp_workflow_status": document.get("WorkflowStatus"),
-        "idp_raw_ref": raw_ref,
-        # Per-run id: distinguishes a genuine IDP reprocess (new run) from a re-delivered
-        # duplicate completion event, so the hook can re-drive the case only on a real rerun.
-        "idp_execution_arn": execution_arn or document.get("workflow_execution_arn") or "",
-    }
-    if first_conf is not None:
-        attributes["idp_classification_confidence"] = first_conf
+    # Parsed before the constructor call because `amount_type` is derived FROM them. Deriving it from
+    # the raw `fields` dict instead would re-parse, and the two parses could disagree on a blank.
+    amount = _opt_decimal(fields, "amount")
+    global_amount = _opt_decimal(fields, "global_amount")
+    fee_amount = _opt_decimal(fields, "fee_amount")
 
-    return ReconItem(
-        item_id=f"idp-{object_key}",
-        domain=domain or "unknown",
-        sides=[],
-        source_refs=refs,
-        attributes=_decimalize(attributes),
-        tier=1,
+    return Notice(
+        notice_id=f"idp-{object_key}",
+        notice_class=first.get("classification") or "unclassified",
+        # A GSI hash key cannot be blank. "unknown" keeps an unattributable notice retrievable by
+        # notice_id and by reference-index rather than failing the whole extraction over a name.
+        counterparty=str(fields.get("counterparty") or fields.get("borrower") or "unknown"),
+        notice_date=notice_date,
+        fund=_opt(fields, "fund"),
+        facility=_opt(fields, "facility"),
+        reference=_opt(fields, "reference"),
+        amount=amount,
+        currency=_opt(fields, "currency"),
+        # The business activity, in the source's vocabulary. Separate from `notice_class` above, which
+        # is the pipeline's classification of the DOCUMENT — see the Notice model.
+        activity_type=_opt(fields, "activity_type"),
+        # The facility-wide total, kept apart from `amount` so a global figure can never stand in for
+        # this fund's share. `amount_type` records which of the two this notice actually supports.
+        global_amount=global_amount,
+        fee_amount=fee_amount,
+        fee_percentage=_opt_decimal(fields, "fee_percentage"),
+        amount_type=derive_amount_type(
+            amount=amount, global_amount=global_amount, fee_amount=fee_amount
+        ),
+        # Verbatim, and never reconciled against loanx_id — see the Notice model's comment.
+        facility_id_source_raw=_opt(fields, "facility_id_source_raw"),
+        loanx_id=_opt(fields, "loanx_id"),
+        cusip=_opt(fields, "cusip"),
+        isin=_opt(fields, "isin"),
+        agent_bank=_opt(fields, "agent_bank"),
+        agent_contact_name=_opt(fields, "agent_contact_name"),
+        agent_email=_opt(fields, "agent_email"),
+        agent_telephone=_opt(fields, "agent_telephone"),
+        contract_id=_opt(fields, "contract_id"),
+        new_contract_id=_opt(fields, "new_contract_id"),
+        notice_comment=_opt(fields, "notice_comment"),
+        # The date as printed, beside the ISO value above. A conversion with no record of its input
+        # cannot be audited, and manual extracts have been seen carrying Excel serials.
+        notice_date_source_raw=_opt(fields, "notice_date_source_raw"),
+        # Derived from THIS writer's own context, never extracted and never caller-supplied. Constant
+        # on the document path: the source is not the structured feed, and extraction did the parse.
+        source_system=SOURCE_SYSTEM_OTHER,
+        parse_method=PARSE_METHOD_IDP,
+        # `subscription_status` and `source_status_raw` are deliberately NOT set. They are the feed's
+        # reference data, not document content, so they stay ABSENT until a structured-feed adapter
+        # exists — and a blank subscription status is itself the signal that routing needs a human.
+        # `ingestion_channel` is not set either, and not on the model: this event carries nothing that
+        # identifies the delivery route, and reading the input object's metadata would be a second
+        # read into the document pipeline's storage, which the decoupling rule does not sanction.
+        extraction_confidence=first.get("classification_confidence"),
+        confidence_alert_count=alert_total,
+        source_document=object_key,
+        idp_execution_arn=execution_arn or document.get("workflow_execution_arn") or "",
+        idp_pages=_decimalize(pages),
     )

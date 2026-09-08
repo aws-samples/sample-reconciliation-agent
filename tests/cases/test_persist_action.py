@@ -17,7 +17,6 @@ def test_attach_proposal_persists_action_and_typed_steps(make_case_tables, seed_
     store.attach_proposal(
         item_id="idp-1",
         class_id="document-cross-reference",
-        classification_confidence=Decimal("0.95"),
         classification_reasoning="loan draw cancellation notice",
         resolution="Mark the draw cancelled.",
         confidence=Decimal("0.97"),
@@ -42,7 +41,7 @@ def test_attach_proposal_persists_action_and_typed_steps(make_case_tables, seed_
                 "outcome": "executed",
             },
         ],
-        confidence_components={"consistency": Decimal("1")},
+        confidence_components={"prescribed": 1, "satisfied": 1},
         proposed_action={
             "tool": "set_draw_status",
             "reference": "DDTL-A-0001",
@@ -51,9 +50,11 @@ def test_attach_proposal_persists_action_and_typed_steps(make_case_tables, seed_
         },
     )
 
-    row = boto3.resource("dynamodb", region_name="us-east-1").Table("recon-cases").get_item(
-        Key={"item_id": "idp-1"}
-    )["Item"]
+    row = (
+        boto3.resource("dynamodb", region_name="us-east-1")
+        .Table("recon-cases")
+        .get_item(Key={"item_id": "idp-1"})["Item"]
+    )
     assert row["proposed_action"]["reference"] == "DDTL-A-0001"
     assert row["proposed_action"]["status"] == "Cancelled"
     assert row["steps"][0]["kind"] == "tool_call"
@@ -71,7 +72,6 @@ def test_attach_proposal_omits_action_when_none(make_case_tables, seed_case):
     store.attach_proposal(
         item_id="idp-2",
         class_id="unknown",
-        classification_confidence=Decimal("0.4"),
         classification_reasoning="ambiguous",
         resolution="Escalate.",
         confidence=Decimal("0.4"),
@@ -80,9 +80,11 @@ def test_attach_proposal_omits_action_when_none(make_case_tables, seed_case):
         proposed_action=None,
     )
 
-    row = boto3.resource("dynamodb", region_name="us-east-1").Table("recon-cases").get_item(
-        Key={"item_id": "idp-2"}
-    )["Item"]
+    row = (
+        boto3.resource("dynamodb", region_name="us-east-1")
+        .Table("recon-cases")
+        .get_item(Key={"item_id": "idp-2"})["Item"]
+    )
     # A non-executable proposal stores an explicit null (never a fabricated action).
     assert row.get("proposed_action") is None
     # Same for the email draft: the caller omitted it entirely, so it must persist as null rather
@@ -99,7 +101,6 @@ def test_attach_proposal_persists_proposed_email(make_case_tables, seed_case):
     store.attach_proposal(
         item_id="idp-3",
         class_id="counterparty-contact",
-        classification_confidence=Decimal("0.9"),
         classification_reasoning="missing remittance detail",
         resolution="Ask the borrower to confirm the wire reference.",
         confidence=Decimal("0.9"),
@@ -116,9 +117,11 @@ def test_attach_proposal_persists_proposed_email(make_case_tables, seed_case):
         },
     )
 
-    row = boto3.resource("dynamodb", region_name="us-east-1").Table("recon-cases").get_item(
-        Key={"item_id": "idp-3"}
-    )["Item"]
+    row = (
+        boto3.resource("dynamodb", region_name="us-east-1")
+        .Table("recon-cases")
+        .get_item(Key={"item_id": "idp-3"})["Item"]
+    )
     draft = row["proposed_email"]
     assert draft["draft_status"] == "pending"
     assert draft["subject"] == "Wire reference confirmation"
@@ -143,14 +146,15 @@ def test_proposed_email_is_optional_for_every_existing_caller(make_case_tables, 
     store.attach_proposal(
         item_id="idp-4",
         class_id="unknown",
-        classification_confidence=Decimal("0.4"),
         classification_reasoning="ambiguous",
         resolution="Escalate.",
         confidence=Decimal("0.4"),
         steps=[],
     )
 
-    row = boto3.resource("dynamodb", region_name="us-east-1").Table("recon-cases").get_item(
-        Key={"item_id": "idp-4"}
-    )["Item"]
+    row = (
+        boto3.resource("dynamodb", region_name="us-east-1")
+        .Table("recon-cases")
+        .get_item(Key={"item_id": "idp-4"})["Item"]
+    )
     assert row.get("proposed_email") is None

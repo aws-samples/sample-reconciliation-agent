@@ -9,55 +9,35 @@ variable "lambda_source_hash" {
   description = "Base64 SHA-256 of the shared Lambda zip (from the lambda-package module)."
   type        = string
 }
-variable "items_table" {
-  type = string
-}
-variable "items_table_arn" {
-  type = string
-}
-variable "cases_table" {
-  description = "Cases table name (reprocess re-drive resets/ages the case)."
+# The hook's ONLY write target. No items/cases/audit variables exist here on purpose: a document is
+# evidence, not a reconciliation item, so there is nothing else for it to write to.
+variable "notices_table" {
+  description = "DynamoDB table name holding extracted counterparty notices (the actual side)."
   type        = string
-  default     = ""
-}
-variable "cases_table_arn" {
-  type    = string
-  default = "*"
-}
-variable "audit_table" {
-  description = "Audit table name (reprocess re-drive appends audit rows)."
-  type        = string
-  default     = ""
-}
-variable "audit_table_arn" {
-  type    = string
-  default = "*"
-}
-variable "agent_worker_function_arn" {
-  description = "Agent-worker Lambda ARN; the hook re-dispatches it on an IDP reprocess re-drive. Empty disables re-dispatch (item/case still refreshed)."
-  type        = string
-  default     = ""
-}
-variable "agent_runtime_arn" {
-  description = "AgentCore runtime ARN passed to the worker on a reprocess re-drive."
-  type        = string
-  default     = ""
-}
-variable "reprocess_cap" {
-  description = "Max reprocess attempts before a re-drive ages the case out (parity with the UI reject->reprocess cap)."
-  type        = number
-  default     = 3
-}
-variable "recon_domain" {
-  description = "Single recon domain this hook feeds (RECON_DOMAIN env)."
-  type        = string
-  default     = "unknown"
 }
 
-variable "idp_output_bucket" {
-  description = "IDP output bucket the hook reads at ingest (may be a wildcard, e.g. 'idp-unified-output-*'), used in the read-only IAM statement."
+variable "notices_table_arn" {
+  description = "ARN of the notices table, for the hook's PutItem grant."
   type        = string
-  default     = "idp-unified-output-*"
+}
+
+# Two buckets, not one: the section results and page images live in IDP's OUTPUT bucket, but for any
+# document whose tracking record exceeds Step Functions' 256 KB output cap the record itself is written
+# to IDP's WORKING bucket and the event carries only a pointer to it (see
+# `IdpOutputReader.resolve_document`). Without the working-bucket grant every large document — which in
+# recon-dev is all of them — fails ingest on an AccessDenied.
+#
+# Name patterns rather than exact names because IDP's stack names its buckets with a generated suffix
+# and redeploys change it; the hook must not need a recon apply every time IDP is rebuilt. Still
+# least-privilege: GetObject/ListBucket only, and only on IDP-prefixed buckets in this account.
+variable "idp_source_buckets" {
+  description = "IDP bucket name patterns the hook may read at ingest (output bucket for extracted values and page images, working bucket for compressed tracking records)."
+  type        = list(string)
+  default = [
+    "idp-outputbucket-*",
+    "idp-workingbucket-*",
+    "idp-unified-output-*",
+  ]
 }
 
 variable "assets_bucket" {

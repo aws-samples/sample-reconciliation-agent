@@ -4,9 +4,27 @@ Configured as the egress gateway's single REQUEST interceptor, so it sees EVERY 
 from the agent, the worker, and the BFF alike — before the call reaches its target. It
 enforces the two guards Cedar cannot express (they need a DynamoDB lookup):
 
-  * ``set-draw-status___set_draw_status`` — **provenance**: the ``reference`` being written
-    must equal the ``proposed_action.reference`` persisted on the case. No caller (model or
-    platform) can redirect a ledger write to an arbitrary row.
+  * ``set-draw-status___set_draw_status`` — two independent guards:
+      - **provenance**: the ``reference`` being written must equal the
+        ``proposed_action.reference`` persisted on the case. No caller (model or platform) can
+        redirect a ledger write to an arbitrary row.
+      - **evidence quality**: the write is refused unless the proposal's persisted
+        ``evidence_quality`` reads ``CLEAN``. That verdict is decided at proposal time by
+        ``recon_core.evidence_quality`` over whatever sources the investigation actually cited, and
+        this is the categorical block AgentCore Policy structurally cannot express: Cedar sees only
+        the tool's declared inputs (``confidence, item_id, reason, reference, status``), none of which
+        say anything about the evidence.
+
+        This guard used to look the cited notice up here and read its extraction alert count. That
+        worked while extraction was the only route a document took. It is now one of two, and the
+        other produces no alert count — so the guard was silently VOIDED on that route: a proposal
+        grounded on retrieved correspondence cited no notice, an absent notice id read as "nothing to
+        be doubtful about", and the write passed. Reading a recorded verdict instead covers both
+        routes, closes the multi-candidate hole (a search matching several notices also derived no id),
+        and costs one fewer DynamoDB read on the write path.
+
+        ⚠️ An ABSENT verdict REFUSES. Every case row written before this guard changed lacks the key,
+        and those cases must be re-run rather than written from. Absence is not permission.
   * ``recon-status___recon_update_status`` — the case state machine: the requested transition
     must be legal from the case's CURRENT stored status (same ``can_transition`` the tool
     Lambda itself uses — one state machine, enforced at the gateway too).
@@ -44,6 +62,16 @@ from backend.recon_core.status import CaseStatus, can_transition
 logger = logging.getLogger(__name__)
 
 WRITE_TOOL = "set-draw-status___set_draw_status"
+# Count of extracted fields the extraction pipeline flagged as low-confidence, written by
+# ``backend/idp_hook/mapper.py`` onto the NOTICE row (never onto the case — a document is evidence,
+# not a reconciliation item). Resolved via the notice_id the agent's proposal cited,
+# so this guard adds exactly one GetItem to write-class calls and zero I/O to every read.
+# The verdict each backend's intake records on the proposal, and the reason that travels with it. The
+# literals are shared with ``recon_core.evidence_quality`` by value rather than by import: this handler
+# sits on every gateway call and the import would be paid on every cold start for two strings.
+EVIDENCE_QUALITY = "evidence_quality"
+EVIDENCE_QUALITY_REASON = "evidence_quality_reason"
+EVIDENCE_CLEAN = "CLEAN"
 STATUS_TOOL = "recon-status___recon_update_status"
 # Email send: Cedar cannot gate it (OpenAPI ops carry no `confidence`), so the human-confirmation
 # safeguard lives here. A send is allowed ONLY when it carries a confirmation token matching
@@ -61,16 +89,23 @@ CONFIRM_ARG = "confirmationToken"
 # message fields).
 PURPOSE_ARG = "sendPurpose"
 ITEM_ARG = "reconItemId"
-# Internal status mail to the operator's own address (approve/auto-resolve notifications). Checked
-# against RECON_NOTIFY_EMAIL with no I/O.
+# Internal status mail to the operator's own people (approve/auto-resolve notifications). Checked
+# against the operator's contacts table. Both email purposes read that table now, which means the two
+# of them are the only gateway calls that do any I/O at all — every read tool and every non-email tool
+# still passes through with none, which is what keeps this interceptor acceptable on the hot path.
 PURPOSE_NOTIFICATION = "notification"
 # Outbound mail to a party outside the operator, sent from an approved draft on a specific case.
 PURPOSE_COUNTERPARTY = "counterparty"
+# The `kind` a contact must have to receive each purpose's mail. The two are disjoint, so an internal
+# notification address can never be reached down the counterparty path (nor the reverse) even if a
+# draft cites its id.
+CONTACT_KIND_COUNTERPARTY = "counterparty"
+CONTACT_KIND_NOTIFICATION = "internal_notification"
 # Mailbox read: the model reliably gets two OData details wrong, and both fail opaquely (the MCP
 # client surfaces only "unhandled errors in a TaskGroup", so the model retries the same broken
 # shape). Normalized here because the upstream contract is unambiguous and prompt guidance is
 # empirically insufficient — the skill already shows $top as an integer and the model still sends a
-# string. See the Graph read-argument normalization design record (D2/D3).
+# string.
 # Still needed even though `correspondence-search___search_correspondence` now assembles these
 # arguments server-side: that wrapper is only one of this op's callers (the container runtime's
 # in-process wrapper is the other), and the normalization is idempotent, so a correctly-formed call
@@ -109,7 +144,9 @@ def _reject(body: dict, message: str) -> dict:
                     "id": body.get("id"),
                     "result": {
                         "isError": True,
-                        "content": [{"type": "text", "text": f"denied by gateway interceptor: {message}"}],
+                        "content": [
+                            {"type": "text", "text": f"denied by gateway interceptor: {message}"}
+                        ],
                     },
                 },
             }
@@ -129,6 +166,107 @@ def _case_row(item_id: str, *, ddb=None) -> dict | None:
     return resp.get("Item")
 
 
+def _contact_address(*, contact_id: str, kind: str, ddb=None) -> str:
+    """Resolve one contact id to its email address, through the store that owns that decision.
+
+    Delegates rather than reading the row here: ``ContactStore.resolve_address`` is the only place in
+    the codebase that turns an id into an address, and it applies three refusals (unknown, inactive,
+    wrong kind). A local ``get_item`` would be a second answer to "may we send to this contact" and
+    would drift from the first — and the drift would be silent, because the two live on opposite sides
+    of the send decision.
+
+    Imported inside the function so a pass-through tool call — every read, the common case — does not
+    pay for the import on a cold start.
+
+    :param contact_id: the id the approved draft cited.
+    :param kind: the contact kind this send requires.
+    :param ddb: injectable DynamoDB resource (tests); the real resource by default.
+    :returns: the contact's email address.
+    :raises LookupError: when the contact is unknown, deactivated, of the wrong kind, or has no
+        address. The caller turns this into a denial reason rather than letting it escape, so the
+        analyst reads which of the four it was.
+    :raises KeyError: when ``CONTACTS_TABLE`` is unset. Fails closed in enforce mode, as an
+        unevaluable guard must.
+    """
+    from backend.contacts.store import ContactStore
+
+    store = ContactStore(table=os.environ["CONTACTS_TABLE"], ddb=ddb)
+    return store.resolve_address(contact_id=contact_id, kind=kind)
+
+
+def _notification_addresses(*, ddb=None) -> set[str]:
+    """Every address that may currently receive an internal notification, lowercased.
+
+    Read fresh on every call. A TTL cache here would keep a removed recipient reachable for the length
+    of the TTL, and "we stopped emailing them within five minutes" is not what an operator means when
+    they deactivate someone. The table is operator-sized (tens of rows), so the Scan is cheap and only
+    the two email purposes pay for it.
+
+    An unreadable table RAISES rather than returning an empty set. Both fail closed, but they read
+    completely differently to whoever is holding the pager: an empty set produces "no active
+    internal_notification contact is configured", which sends an operator to the Config tab to add a
+    contact that is already sitting there, to fix what is actually a mis-scoped IAM grant. The caller
+    lets the exception become a denial naming the exception type instead.
+
+    :param ddb: injectable DynamoDB resource (tests); the real resource by default.
+    :returns: the lowercased addresses of every active ``internal_notification`` contact. Empty when
+        the table holds none — which refuses every notification send, per the operator's own list being
+        the only source of truth for who may be written to.
+    :raises KeyError: when ``CONTACTS_TABLE`` is unset.
+    """
+    from backend.contacts.store import ContactStore
+
+    store = ContactStore(table=os.environ["CONTACTS_TABLE"], ddb=ddb)
+    # `list_all` rather than `list_for_agent`, because addresses are exactly what is needed here and
+    # the agent-facing projection drops them. The `active`/`kind` filtering is repeated locally for the
+    # same reason: this set IS the authorization decision, so it must not depend on which rows some
+    # other method chose to hide.
+    return {
+        str(row["email"]).strip().lower()
+        for row in store.list_all()
+        if row.get("active")
+        and row.get("kind") == CONTACT_KIND_NOTIFICATION
+        and str(row.get("email") or "").strip()
+    }
+
+
+def _evidence_quality_reason(*, row: dict) -> str | None:
+    """Refuse a ledger write unless the proposal recorded a CLEAN evidence verdict.
+
+    The verdict is computed at PROPOSAL time (``recon_core.evidence_quality``, called from each
+    backend's intake) and read here. Two consequences of that split, both deliberate:
+
+    * this function does no I/O. The case row it reads was already fetched for the provenance check, so
+      the whole guard costs zero additional reads — where the notice lookup it replaces cost one on
+      every write;
+    * the verdict reflects the evidence as it stood when the proposal was made. A notice re-extracted
+      between proposal and write is judged on its earlier state. That is acceptable because a notice
+      changes only by re-extraction, which is grounds for re-running the case rather than writing from a
+      stale proposal — but it is a real window and it is recorded here rather than left to be found.
+
+    An ABSENT verdict refuses. This inverts the rule the previous guard used, where an absent notice id
+    meant "nothing to be doubtful about" — the branch that let knowledge-base-grounded writes through
+    ungated. Absence now means the proposal predates this guard, and a proposal the guard cannot evaluate
+    is not one it may allow.
+
+    :param row: the case row (never None; a missing row is already denied by provenance).
+    :returns: a denial reason, or None when the write may proceed.
+    """
+    action = row.get("proposed_action") or {}
+    if EVIDENCE_QUALITY not in action:
+        return (
+            "evidence quality: this proposal carries no evidence verdict, which means it was written "
+            "before the evidence guard existed; re-run the case rather than writing from it"
+        )
+    verdict = str(action.get(EVIDENCE_QUALITY) or "")
+    if verdict == EVIDENCE_CLEAN:
+        return None
+    # The reason travels with the verdict precisely so the denial can be acted on. Falling back to the
+    # bare verdict would hand an operator a word with no next step.
+    reason = str(action.get(EVIDENCE_QUALITY_REASON) or "no reason recorded")
+    return f"evidence quality: {verdict.lower() or 'unrecognised'} — {reason}"
+
+
 def _check(tool: str, args: dict, *, ddb=None) -> str | None:
     """Evaluate the gateway-layer guard for one gated tool call.
 
@@ -143,14 +281,31 @@ def _check(tool: str, args: dict, *, ddb=None) -> str | None:
     row = _case_row(item_id, ddb=ddb)
 
     if tool == WRITE_TOOL:
+        # Both guards are evaluated and reported together (same reasoning as the send gate): a
+        # write that fails provenance AND the evidence check should say so once, not send an operator
+        # round the loop twice. They are independent — provenance answers "is this the row a human's
+        # proposal named", the evidence verdict answers "is what this proposal rests on good enough to
+        # write from at all" — and either one alone denies.
+        reasons: list[str] = []
         action = (row or {}).get("proposed_action") or {}
         expected = action.get("reference")
         if not (isinstance(expected, str) and expected):
-            return f"provenance: no persisted proposed_action.reference for item {item_id!r}"
-        reference = (args.get("reference") or "").strip()
-        if reference != expected:
-            return f"provenance: reference {reference!r} does not match persisted {expected!r}"
-        return None
+            reasons.append(
+                f"provenance: no persisted proposed_action.reference for item {item_id!r}"
+            )
+        else:
+            reference = (args.get("reference") or "").strip()
+            if reference != expected:
+                reasons.append(
+                    f"provenance: reference {reference!r} does not match persisted {expected!r}"
+                )
+        # Skipped when the row is absent: provenance has already denied above, and there is no
+        # proposal to read a verdict from. Any other failure here propagates and fails closed.
+        if row is not None:
+            evidence_reason = _evidence_quality_reason(row=row)
+            if evidence_reason is not None:
+                reasons.append(evidence_reason)
+        return "; ".join(reasons) or None
 
     # STATUS_TOOL: the requested transition must be legal from the CURRENT stored status.
     if row is None:
@@ -188,9 +343,9 @@ def _message_parts(args: dict) -> tuple[list[str], str, str]:
 def _check_send_purpose(*, purpose: str, item_id: str, args: dict, ddb=None) -> str | None:
     """Evaluate the declared purpose of an email send against what the message actually is.
 
-    ``notification`` is the internal status mail the approve and auto-resolve paths send: its only
-    legitimate destination is the operator's own ``RECON_NOTIFY_EMAIL``, so the check is an env-var
-    comparison with no I/O.
+    ``notification`` is the internal status mail the approve and auto-resolve paths send. Its only
+    legitimate destinations are the operator's own people, named in the contacts table — so the check
+    reads that table, and an address that is not on it (or was on it yesterday) is refused.
 
     ``counterparty`` is mail leaving the operator. It is authorized by PROVENANCE, not capability:
     the case must carry a ``proposed_email`` a human approved, at the revision they approved, and
@@ -211,11 +366,17 @@ def _check_send_purpose(*, purpose: str, item_id: str, args: dict, ddb=None) -> 
     recipient = recipients[0]
 
     if purpose == PURPOSE_NOTIFICATION:
-        notify = os.environ.get("RECON_NOTIFY_EMAIL", "").strip()
-        if not notify:
-            return "RECON_NOTIFY_EMAIL is not configured"
-        if recipient.lower() != notify.lower():
-            return f"notification recipient {recipient!r} is not the configured notify address"
+        # An empty set refuses. The operator's list is the only statement of who may be written to, and
+        # a system with nobody on the list has nobody it is entitled to email — the same fail-closed
+        # direction as an empty counterparty domain allowlist.
+        allowed = _notification_addresses(ddb=ddb)
+        if not allowed:
+            return "no active internal_notification contact is configured"
+        if recipient.lower() not in allowed:
+            return (
+                f"notification recipient {recipient!r} is not an active "
+                f"internal_notification contact"
+            )
         return None
 
     if purpose == PURPOSE_COUNTERPARTY:
@@ -237,11 +398,33 @@ def _check_send_purpose(*, purpose: str, item_id: str, args: dict, ddb=None) -> 
         row = _case_row(item_id, ddb=ddb)
         if row is None:
             return f"no case found for item {item_id!r}"
+        draft = row.get("proposed_email") or {}
+        # Answered before the contact id is looked at, because "cites no recipient_contact_id" would
+        # send the reader off to inspect a draft this case does not have. The reason string comes from
+        # the policy module so the two paths into that refusal cannot drift apart.
+        if not draft:
+            return email_policy.NO_DRAFT_REASON
+        # The address is resolved HERE, from the contact id on the draft, out of the operator's table
+        # — independently of the address the BFF put in the payload and of anything stored on the
+        # case. That independence is the point: the verdict does not depend on the caller being
+        # honest, and deactivating a contact revokes an already-approved draft with no other
+        # machinery. An absent id means the draft predates this shape; refuse rather than fall back to
+        # the payload's address, which would authorize whatever the caller asked for.
+        contact_id = str(draft.get("recipient_contact_id") or "").strip()
+        if not contact_id:
+            return "the approved draft cites no recipient_contact_id"
+        try:
+            resolved = _contact_address(
+                contact_id=contact_id, kind=CONTACT_KIND_COUNTERPARTY, ddb=ddb
+            )
+        except LookupError as exc:
+            return f"cannot resolve the approved draft's recipient: {exc}"
         return email_policy.draft_matches_message(
-            draft=row.get("proposed_email") or {},
+            draft=draft,
             recipient=recipient,
             subject=subject,
             body=body,
+            resolved_recipient=resolved,
         )
 
     return f"unrecognized {PURPOSE_ARG} {purpose or '<absent>'!r}"
@@ -291,9 +474,7 @@ def _handle_send(body: dict, params: dict, mode: str, *, ddb=None) -> dict:
         reasons.append(purpose_reason)
 
     if reasons:
-        logger.warning(
-            "interceptor[%s] %s: %s", mode, SEND_TOOL, "; ".join(reasons)
-        )
+        logger.warning("interceptor[%s] %s: %s", mode, SEND_TOOL, "; ".join(reasons))
     if not reasons or mode != "enforce":
         # Forward with the extra arguments removed (whether they were valid, invalid, or absent) —
         # Graph 400s on unknown message fields, and in log mode a stray token must still not leak.
@@ -334,10 +515,14 @@ def _normalize_read_args(args: dict) -> tuple[dict, list[str]]:
     search = out.get(SEARCH_ARG)
     if isinstance(search, str):
         stripped = search.strip()
-        if stripped and not (stripped.startswith('"') and stripped.endswith('"') and len(stripped) > 1):
+        if stripped and not (
+            stripped.startswith('"') and stripped.endswith('"') and len(stripped) > 1
+        ):
             # Inner double quotes would break the OData literal; drop them before wrapping.
             out[SEARCH_ARG] = '"{}"'.format(stripped.replace('"', ""))
-            notes.append(f"{SEARCH_ARG}: {search!r} -> {out[SEARCH_ARG]!r} (OData requires a quoted string)")
+            notes.append(
+                f"{SEARCH_ARG}: {search!r} -> {out[SEARCH_ARG]!r} (OData requires a quoted string)"
+            )
 
     return out, notes
 

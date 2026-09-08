@@ -540,7 +540,7 @@ export function ChatInterface() {
       return { title: extractTitle(content), content }
     }
 
-    // 2. Try to parse as JSON (legacy format)
+    // 2. Try to parse as JSON
     try {
       const parsed = JSON.parse(result)
       if (parsed.content && typeof parsed.content === 'string') {

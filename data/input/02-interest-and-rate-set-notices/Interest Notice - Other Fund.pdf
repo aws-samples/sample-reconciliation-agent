@@ -1,0 +1,62 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 1112 >>
+stream
+BT /F1 9.5 Tf 54 738 Td 13 TL
+(Message Originated From: loan.ops@tarnsmoor-trust.example) Tj T*
+() Tj T*
+(                             Tarnsmoor Trust Bank, N.A.) Tj T*
+(                                Loan Operations) Tj T*
+() Tj T*
+(Date: 12-Sep-2026) Tj T*
+(TO: NORTHWIND CREDIT MANAGED ACCOUNT \(SYN\) LP) Tj T*
+(ATTN: Loan Administration) Tj T*
+(Re: MISTFELL FOODS 1L 2023/11/30) Tj T*
+() Tj T*
+(                   ***** Interest Payment *****) Tj T*
+() Tj T*
+(Effective: 15-Sep-2026) Tj T*
+() Tj T*
+(Facility: MISTFELL INITIAL TERM LOANS LoanXid: LX0052901) Tj T*
+(Facility ID: SL-311842) Tj T*
+(Reference: MF-INT-0915-OCF) Tj T*
+() Tj T*
+(Borrower MISTFELL FOODS CORP. will make the following interest payment:) Tj T*
+() Tj T*
+(Description                    Global Amount        Your Share) Tj T*
+(Term SOFR Term Interest        41,250,000.00        618,750.00) Tj T*
+() Tj T*
+( Rate Basis: Actual/360) Tj T*
+( Currency: USD) Tj T*
+() Tj T*
+(Portfolio: Opp Credit) Tj T*
+(Agent Bank: Tarnsmoor Trust Bank, N.A.) Tj T*
+(Contact: Loan Administration  loan.ops@tarnsmoor-trust.example  +1-555-0188) Tj T*
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000210 00000 n 
+0000000336 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1500
+%%EOF

@@ -10,12 +10,14 @@ import { Eyebrow, Panel } from "@/components/recon/ui";
 // Editor's "Document Data" pane. Page-image previews (idp_pages) are shown as source links,
 // since the images live in IDP's output bucket.
 
-function humanizeKey(k: string): string {
+// Exported so MatchedNoticesPanel renders notice fields identically -- two copies of this
+// would drift, and the panels sit on the same page where the difference would show.
+export function humanizeKey(k: string): string {
   // "MessageOriginatedFrom" -> "Message Originated From"; leave ALLCAPS/short keys alone.
   return k.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/_/g, " ");
 }
 
-function FieldValue({ value }: { value: unknown }) {
+export function FieldValue({ value }: { value: unknown }) {
   if (value === null || value === undefined || value === "") {
     return <span className="text-[var(--rc-ink-faint)]">—</span>;
   }

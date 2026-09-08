@@ -1,0 +1,40 @@
+{
+  "document_class": {
+    "type": "paydown_notice"
+  },
+  "split_document": {
+    "page_indices": [
+      0,
+      1,
+      2
+    ]
+  },
+  "classification": "paydown_notice",
+  "page_ids": [
+    "1",
+    "2",
+    "3"
+  ],
+  "confidence": 1.0,
+  "inference_result": {
+    "notice_date": "2026-12-26",
+    "notice_date_source_raw": "26-Dec-2026",
+    "value_date": "2026-12-31",
+    "counterparty": "CINDERMOOR LOGISTICS HOLDINGS INC.",
+    "fund": "TIDELANTERN SENIOR LOAN FUND, LP",
+    "facility": "CINDERMOOR LOGISTICS TL $160MM",
+    "reference": "CINDERMOOR LOGISTICS HOLDINGS, INC. $183.25MM 2021/11/06",
+    "amount": "8317.07",
+    "global_amount": "400000.00",
+    "currency": "USD",
+    "activity_type": "Principal Payment",
+    "loanx_id": "LX223061XXXX1",
+    "cusip": "SYN00063J",
+    "isin": "USSYN00063J66",
+    "agent_bank": "Meridian Agency Services LLC",
+    "agent_contact_name": "MICHAEL REED",
+    "agent_email": "loan.ops@meridian-agent.example",
+    "agent_telephone": "",
+    "notice_comment": "Hello. PIK rate is 0.75% 12/31/26 to 3/31/27."
+  }
+}

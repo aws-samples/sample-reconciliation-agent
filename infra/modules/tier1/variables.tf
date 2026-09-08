@@ -210,8 +210,25 @@ variable "graph_mailbox" {
   default     = ""
 }
 
-variable "notify_email" {
-  description = "Recipient for auto-resolve notification emails (empty disables)."
+variable "notify_contact_id" {
+  description = <<-EOT
+    Contact ID of the internal-notification recipient for auto-resolve emails (empty disables the
+    email step). Deliberately an ID and not an address: the worker looks the address up in
+    contacts_table at send time and refuses the send if the contact is missing, deactivated, or of
+    the wrong kind. An address baked in here could not be revoked without a redeploy.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "contacts_table" {
+  description = "Contacts table the worker resolves notify_contact_id against (needs GetItem)."
+  type        = string
+  default     = ""
+}
+
+variable "contacts_table_arn" {
+  description = "ARN of the contacts table, for the worker role's read grant."
   type        = string
   default     = ""
 }
@@ -246,4 +263,16 @@ variable "otel_baggage_span_attribute_keys" {
   EOT
   type        = string
   default     = "harness.id,harness.endpoint.qualifier,session.id,recon.item_id,recon.domain,recon.backend"
+}
+
+variable "workflow_types_table" {
+  description = "Name of the recon-workflow-types table, read when deciding whether the knowledge-base route counts as an evidence source. Empty disables the lookup, which resolves to NOT enabled."
+  type        = string
+  default     = ""
+}
+
+variable "workflow_types_table_arn" {
+  description = "ARN of the recon-workflow-types table, for the Scan grant. Empty when the lookup is disabled."
+  type        = string
+  default     = ""
 }

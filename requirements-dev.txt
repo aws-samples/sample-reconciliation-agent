@@ -1,0 +1,55 @@
+# Test-time Python dependencies. CI installs this file alongside the agent runtime
+# requirements (agent-blueprint/recon-agent/requirements.txt), because the suite under tests/
+# imports the same backend modules the agent container runs.
+#
+#   pip install -r agent-blueprint/recon-agent/requirements.txt -r requirements-dev.txt
+#   python -m pytest -q
+#
+# Pins match the interpreter the suite is verified against (Python 3.12). Nothing here reaches
+# a deployed artifact -- the Lambda packages and the agent image install only the runtime files.
+
+# Test runner. pyproject.toml holds its configuration ([tool.pytest.ini_options]).
+pytest==9.1.1
+
+# AWS mocking. Every @mock_aws test in tests/ needs it. Base install only: no test in this
+# repo exercises a moto service that requires an extra (no antlr/docker-backed services).
+moto==5.2.2
+
+# HTTP stubbing for the egress tests (Graph email, gateway tools).
+responses==0.26.2
+
+# SKILL.md frontmatter parsing (backend/recon_core/skill_meta.py). PyYAML arrives transitively
+# via strands-agents in the agent runtime requirements, but it is pinned explicitly in both places:
+# a transitive pin can move under us on an unrelated strands bump, and this parser is on an
+# untrusted-input path (skill files are UI-editable and read live from S3).
+PyYAML==6.0.3
+
+# Spreadsheet writer for the knowledge-base email attachments
+# (scripts/generate_kb_email_attachments.py) and the test that reads them back
+# (tests/kb_seed/test_email_attachments.py). Test-time only: the generated .xlsx files are
+# committed, so nothing at deploy time or in a container needs this.
+#
+# Deliberately NOT paired with a PDF library. The PDF writer is ~80 lines of stdlib and the
+# test validates it structurally (xref offsets, uncompressed text runs) rather than by round
+# -tripping through a parser, which would mean carrying pypdf for one assertion.
+openpyxl==3.1.5
+
+# PDF writer for email bodies (backend/email_preprocess/render.py). Needed at test time even
+# though nothing here asserts on PDF content: render.py imports reportlab at module scope, so
+# without it the whole email_preprocess test package fails to import and pytest stops during
+# collection rather than reporting a test failure.
+#
+reportlab==5.0.1
+
+# Outlook .msg reader for the same package. Easy to think the suite does not need this, because
+# most of the .msg tests drive the field mapping through stand-in objects and the real import sits
+# inside _split_outlook_msg rather than at module scope. One test defeats that: it feeds bytes that
+# are not an email under the name bad.msg to assert the upload is refused, which routes through the
+# real container parser. Without the package that test fails on ModuleNotFoundError instead of the
+# refusal it is checking for. Version-locked to the deployed zip's pin in
+# infra/modules/lambda-package/variables.tf so the parser tested is the parser that ships.
+extract-msg==0.56.1
+
+# Lint gate. `ruff check .` is clean repo-wide and CI enforces it. `ruff format --check` is
+# NOT clean (59 files predate the convention), so CI deliberately does not gate on formatting.
+ruff==0.15.20

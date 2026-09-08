@@ -1,0 +1,20 @@
+{
+  "document_class": {
+    "type": "incomplete_notice"
+  },
+  "split_document": {
+    "page_indices": [
+      0
+    ]
+  },
+  "classification": "incomplete_notice",
+  "page_ids": [
+    "1"
+  ],
+  "confidence": 1.0,
+  "inference_result": {
+    "counterparty": "NORTHWIND MANUFACTURING LLC",
+    "agent_bank": "Tarnsmoor Trust Bank, N.A.",
+    "agent_contact_name": "AGENCY SERVICES"
+  }
+}

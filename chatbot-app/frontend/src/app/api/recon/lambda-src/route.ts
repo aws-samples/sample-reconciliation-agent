@@ -18,14 +18,23 @@ function s3() {
   return new S3Client({ region: REGION });
 }
 
-// Read-only source viewers, keyed by ?src=: the deterministic Tier-1 Lambda, or the Tier-2
-// container agent. Both are seeded under lambda-src/<name>/ at deploy time — viewable, not editable.
+// Read-only source viewers, keyed by ?src=: the deterministic Tier-1 Lambda, the Tier-2 container
+// agent, or the egress-gateway REQUEST interceptor (the code that refuses a ledger write). All are
+// seeded under lambda-src/<name>/ at deploy time — viewable, not editable.
 const AGENT_PREFIX = process.env.AGENT_SRC_PREFIX ?? "lambda-src/agent/";
+const GUARD_PREFIX = process.env.GUARD_SRC_PREFIX ?? "lambda-src/guard/";
 
-// GET /api/recon/lambda-src[?src=agent] -> [{ path, content }] for the seeded source files
+// An unknown ?src= falls back to Tier-1 rather than erroring, matching the pre-existing behaviour
+// for every value other than "agent".
+const PREFIXES: Record<string, string> = {
+  agent: AGENT_PREFIX,
+  guard: GUARD_PREFIX,
+};
+
+// GET /api/recon/lambda-src[?src=agent|guard] -> [{ path, content }] for the seeded source files
 export async function GET(req: Request) {
   const src = new URL(req.url).searchParams.get("src");
-  const prefix = src === "agent" ? AGENT_PREFIX : PREFIX;
+  const prefix = (src && PREFIXES[src]) ?? PREFIX;
   try {
     const client = s3();
     const listed = await client.send(

@@ -1,0 +1,30 @@
+{
+  "metadataAttributes": {
+    "doc_type": {
+      "value": { "type": "STRING", "stringValue": "playbook" },
+      "includeForEmbedding": false
+    },
+    "break_class": {
+      "value": {
+        "type": "STRING_LIST",
+        "stringListValue": ["missing_reference"]
+      },
+      "includeForEmbedding": true
+    },
+    "skill": {
+      "value": {
+        "type": "STRING_LIST",
+        "stringListValue": ["document-cross-reference", "correspondence-search"]
+      },
+      "includeForEmbedding": false
+    },
+    "autonomy": {
+      "value": { "type": "STRING", "stringValue": "propose-only" },
+      "includeForEmbedding": false
+    },
+    "effective_date": {
+      "value": { "type": "NUMBER", "numberValue": 20260826 },
+      "includeForEmbedding": false
+    }
+  }
+}

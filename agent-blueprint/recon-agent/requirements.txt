@@ -1,14 +1,23 @@
-strands-agents==1.50.2
-bedrock-agentcore==1.18.1
-boto3==1.43.57
+strands-agents==1.54.0
+bedrock-agentcore==1.22.0
+boto3==1.43.89
 pydantic==2.13.4
 # Gateway tool transport (gateway_mcp: streamablehttp_client + ClientSession); anyio is
 # transitive to mcp but pinned for reproducibility.
 mcp==1.28.1
 anyio==4.14.2
+# SKILL.md frontmatter parsing (skills_loader -> backend/recon_core/skill_meta.py). Arrives
+# transitively via strands-agents, but pinned explicitly: a transitive pin can move on an unrelated
+# strands bump, and this parser sits on an untrusted-input path (skill files are UI-editable and
+# read live from S3).
+PyYAML==6.0.3
 # ADOT auto-instrumentation: the container must ship its own OTel (launched via
 # opentelemetry-instrument in the Dockerfile CMD) — the AgentCore platform does NOT inject
 # it into custom runtime images (only the managed harness has it built in). Without this,
-# aws/spans gets only the platform Invoke span and the online evaluators have no gen-ai
-# conversation spans to score.
+# the agent's own `spans` log stream gets nothing and the online evaluators have no gen-ai
+# conversation spans to score -- only the platform's AgentCore.Runtime.Invoke span is recorded.
+#
+# 0.18.0 is also the floor for the UNIFIED span destination: earlier releases ignore
+# UNIFIED_TRACES_DESTINATION_ENABLED and deliver to the shared aws/spans regardless. (The launch
+# announcement says 0.17.1; the AgentCore developer guide says 0.18.0 -- the pin below clears both.)
 aws-opentelemetry-distro==0.19.0

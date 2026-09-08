@@ -1,9 +1,9 @@
 /**
  * MSAL configuration for Microsoft Entra ID inbound auth.
  *
- * Active when NEXT_PUBLIC_AUTH_PROVIDER === 'entra'. See
- * the Entra-only auth design record for the migration design, and the Entra
- * app-registration setup guide (both kept outside this repository).
+ * Active when NEXT_PUBLIC_AUTH_PROVIDER === 'entra'. Requires an Entra app registration whose
+ * redirect URIs match the deployed CloudFront origin; the three NEXT_PUBLIC_ENTRA_* values below
+ * come from it.
  *
  * The three NEXT_PUBLIC_ENTRA_* env vars are populated at build time by
  * infra/modules/chat (Docker build args sourced from auth-entra SSM params).

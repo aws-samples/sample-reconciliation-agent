@@ -4,16 +4,23 @@ import {
   GetParameterCommand,
   PutParameterCommand,
 } from "@aws-sdk/client-ssm";
-import { parseDomainAllowlist } from "@/lib/emailPolicy";
+import { requireReconAdmin } from "@/lib/reconAdmin";
 
 // Same-origin BFF for platform config, backed by SSM parameters read at runtime:
 //   tier1Enabled          — deterministic Tier-1 route on/off (Tier-1 Lambda reads per batch)
-//   autoResolveThreshold  — composite-confidence threshold for straight-through processing
+//   autoResolveThreshold  — evidence-completeness threshold for straight-through processing
 //                           (the agent reads it after each proposal); null = disabled ("off").
-// Plus one READ-ONLY field that is not SSM-backed at all:
-//   counterpartyEmailDomains — the recipient allowlist, from the deploy's environment. Exposed so
-//                           the draft panel can show which addresses are usable and reject a typo
-//                           while the analyst types, rather than after a round trip.
+// The recipient allowlist is deliberately NOT here. `counterparty_email_domains` is a GATE and
+// nothing else: it is read by the gateway interceptor, which re-derives the verdict on every send,
+// and by no one else. Publishing it let three other places form an opinion about it -- an amber
+// warning on a saved contact, a rejection on the draft PUT, and a banner on the Config tab -- none of
+// which was the boundary, all of which read a container env var fixed at task start, and one of which
+// read as "the save was blocked" when the save had in fact succeeded.
+//
+// PUT is admin-only; GET is not, and that asymmetry is deliberate. The case screen reads this to know
+// whether a comment is required before approving, so gating the read would break the analyst's day
+// job to protect values that say nothing an analyst cannot already observe by using the product. The sibling `/config/contacts` and `/config/templates` reads ARE
+// gated, because those return addresses and message bodies.
 export const runtime = "nodejs";
 
 const REGION = process.env.AWS_REGION ?? "us-east-1";
@@ -44,8 +51,9 @@ async function readParam(name: string): Promise<string | null> {
 
 function parseThreshold(raw: string | null): number | null {
   // Deployment default before the param exists. Must match the seed in
-  // infra/modules/foundation/main.tf — 0.85, not 0.95: 0.95 is arithmetically unreachable
-  // because the composite's verbalized term is supplied by a habitually-low model estimate.
+  // infra/modules/foundation/main.tf — 0.85, not 0.95. The score is satisfied/required evidence
+  // steps, so both values demand full evidence for any skill with six or fewer required steps;
+  // 0.85 is the lower of the two only in that a 7-step skill can clear it at 6/7.
   if (raw === null) return 0.85;
   const v = raw.trim().toLowerCase();
   if (v === "off") return null;
@@ -72,9 +80,6 @@ export async function GET() {
       agentBackend: (AGENT_BACKENDS as readonly string[]).includes(backend)
         ? backend
         : "runtime",
-      counterpartyEmailDomains: parseDomainAllowlist(
-        process.env.COUNTERPARTY_EMAIL_DOMAINS ?? "",
-      ),
     });
   } catch (err) {
     return NextResponse.json(
@@ -85,6 +90,12 @@ export async function GET() {
 }
 
 export async function PUT(req: Request) {
+  // Admin only. Every value written here changes how the platform behaves for everyone — the
+  // auto-resolve threshold decides which cases skip a human entirely, and `agentBackend` swaps the
+  // model runtime under a live queue.
+  const who = await requireReconAdmin(req);
+  if ("error" in who) return who.error;
+
   const body = (await req.json().catch(() => ({}))) as {
     tier1Enabled?: boolean;
     autoResolveThreshold?: number | null;

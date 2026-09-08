@@ -37,7 +37,11 @@ from backend.recon_core.schema import ReasoningStep
 # the tool_outputs key. Inverse of harness_config.GATEWAY_TOOLS naming.
 _SHORT = {
     "general-ledger___search_ledger": "search_ledger",
-    "knowledge-base___search_guidance": "search_guidance",
+    # ⚠️ This entry is load-bearing, not cosmetic. The managed KB connector's operation is Bedrock's
+    # own `Retrieve`, so the ``___`` fallback below would shorten it to "Retrieve" — a name no skill,
+    # prompt or trace reader uses. Mapping it to `search_guidance` keeps one vocabulary across both
+    # backends (the runtime's wrapper is named search_guidance too).
+    "managed-kb___Retrieve": "search_guidance",
     "document-extraction___get_results": "get_results",
     "set-draw-status___set_draw_status": "set_draw_status",
     "microsoft-graph___sendSharedMailboxMail": "send_mail",
@@ -172,7 +176,7 @@ def assemble_stream(events) -> StreamResult:
         else:
             short = short or "tool"
             res.steps.append(
-                ReasoningStep(skill=short, confidence=0.0, reasoning=f"{short} result",
+                ReasoningStep(skill=short, reasoning=f"{short} result",
                               kind="tool_call", tool=short, tool_output=summary)
             )
         res.tool_outputs.setdefault(short, []).append(payload)
@@ -226,8 +230,8 @@ def assemble_stream(events) -> StreamResult:
                     for part in parts:
                         if isinstance(part, dict):
                             blk["result_parts"].append(part)
-                # FIXTURE/legacy fallback: an envelope-shaped delta ({toolUseId,name,content})
-                # is recorded immediately (unit-test shape; keep tolerant).
+                # Envelope-shaped delta ({toolUseId,name,content}) — self-describing, so it is
+                # recorded immediately. This is the shape the unit-test fixtures carry; keep tolerant.
                 elif isinstance(tr, dict) and "content" in tr:
                     _record_tool_result(tool_use_id=tr.get("toolUseId"), name=tr.get("name"),
                                         content=tr.get("content") or [])
@@ -263,7 +267,7 @@ def assemble_stream(events) -> StreamResult:
                 if short != "submit_proposal":
                     # A gateway tool call — emit a tool_call trace step (output filled by its result).
                     step = ReasoningStep(
-                        skill=short, confidence=0.0,
+                        skill=short,
                         reasoning=f"called {short}", kind="tool_call",
                         tool=short, tool_input=parsed if isinstance(parsed, dict) else None)
                     res.steps.append(step)

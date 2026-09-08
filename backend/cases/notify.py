@@ -33,21 +33,37 @@ def send_resolution_email(
     case: dict,
     *,
     mailbox: str,
-    recipient: str,
+    contact_id: str,
     transport: Optional[GatewayTransport] = None,
 ) -> str:
-    """Email the approved resolution to the configured recipient from the shared mailbox.
+    """Email the approved resolution to one internal-notification contact from the shared mailbox.
+
+    The caller names a CONTACT, not an address. The address is resolved here, on this call, out of the
+    operator's contacts table — so deactivating a recipient stops the mail immediately instead of at
+    the next deploy, and no address for a human sits in an environment variable. The gateway
+    interceptor reads the same table and refuses anything not on it, so a stale address resolved here
+    would be denied there rather than delivered.
 
     :param case: the case record (``item_id``, ``domain``, ``class_id``, ``resolution``,
         ``confidence``).
     :param mailbox: shared mailbox SMTP address the mail is sent FROM (``GRAPH_MAILBOX``).
-    :param recipient: notification recipient (``RECON_NOTIFY_EMAIL``).
+    :param contact_id: the ``internal_notification`` contact to notify.
     :param transport: test seam — ``callable(tool_name, arguments) -> result`` replacing the
         live SigV4 MCP round-trip. Production leaves it None.
-    :returns: an identifier for the send (Graph sendMail returns no body; kept for log/audit
-        parity with the old SES MessageId).
+    :returns: an identifier for the send, synthesized here because Graph sendMail returns no body.
+        Kept so a log or audit line can name the send at all.
+    :raises LookupError: when the contact is unknown, deactivated, or not of kind
+        ``internal_notification``. Raised rather than skipped so the caller decides whether a
+        missing notification is fatal — ``maybe_auto_resolve`` logs it and resolves anyway; the
+        approve path surfaces it.
+    :raises KeyError: when ``CONTACTS_TABLE`` is unset.
     :raises RuntimeError: when the gateway or the Graph operation reports an error.
     """
+    from backend.contacts.store import ContactStore
+
+    recipient = ContactStore(table=os.environ["CONTACTS_TABLE"]).resolve_address(
+        contact_id=contact_id, kind="internal_notification"
+    )
     item_id = case.get("item_id", "?")
     subject = f"[Recon] Resolved: {item_id} ({case.get('domain', '')})"
     body = (
@@ -73,11 +89,12 @@ def send_resolution_email(
             # resolution), so it is authorized to carry the token; the agent's autonomous
             # counterparty-email tool has none. Stripped by the interceptor before Graph.
             "confirmationToken": os.environ.get("EMAIL_CONFIRMATION_TOKEN", ""),
-            # What this send IS: internal status mail to the operator's own notify address. The
-            # interceptor checks the sole recipient against RECON_NOTIFY_EMAIL, so this branch
-            # cannot be used to reach anyone outside — mail leaving the operator must instead go
-            # through `counterparty`, which requires an approved draft on a case. Also stripped
-            # before Graph. An absent or unknown purpose is DENIED, so this is not optional.
+            # What this send IS: internal status mail to one of the operator's own people. The
+            # interceptor checks the sole recipient against the active `internal_notification`
+            # contacts, so this branch cannot be used to reach anyone outside — mail leaving the
+            # operator must instead go through `counterparty`, which requires an approved draft on a
+            # case. Also stripped before Graph. An absent or unknown purpose is DENIED, so this is
+            # not optional.
             "sendPurpose": "notification",
         },
         transport=transport,

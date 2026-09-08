@@ -64,7 +64,7 @@ def test_flattens_nested_arrays_and_pairs_each_field_with_its_value():
 
 
 def test_extraction_confidence_excludes_fields_idp_extracted_nothing_for():
-    """The load-bearing rule (D1): absent optional fields must not drag the aggregate down.
+    """The load-bearing rule: absent optional fields must not drag the aggregate down.
 
     Including Fax's 0.0 would give 0.67; excluding it gives the mean of the four real
     extractions. Across the live corpus this is the difference between a 0.025-0.950 noise band
@@ -94,7 +94,7 @@ def test_alert_count_uses_each_fields_own_threshold_not_a_global_constant():
 
 
 def test_missing_explainability_yields_none_not_a_fabricated_default():
-    """Fail-loudly/no-silent-default (D3): pre-Assessment documents keep the renormalized path.
+    """Fail loudly, never silently default: pre-Assessment documents keep the renormalized path.
 
     17 of the 35 live section results carry no explainability_info at all, so this is the common
     case, not an edge case — and it must NOT become a 0.0 that tanks the composite, nor a 1.0

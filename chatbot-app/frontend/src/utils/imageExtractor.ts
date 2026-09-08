@@ -8,7 +8,7 @@ export type ImageData =
 
 /**
  * Extract blob images from message, matched by toolUseId
- * Handles both new _blobImages (multiple) and legacy _blobImage (single)
+ * Handles both _blobImages (multiple) and _blobImage (single)
  */
 export function extractBlobImages(msg: any, toolUseId: string): ImageData[] {
   const images: ImageData[] = []

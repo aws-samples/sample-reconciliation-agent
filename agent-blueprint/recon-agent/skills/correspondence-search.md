@@ -2,6 +2,9 @@
 name: correspondence-search
 description: Search the shared mailbox via the Microsoft Graph API for messages that clarify the item by amount, date, or entity.
 tools: [correspondence-search___search_correspondence]
+metadata:
+  # No trigger: a probe is chosen by the agent when the investigation needs it, not routed to.
+  tier: probe
 ---
 
 Search the shared operations mailbox with **`search_correspondence`** to find messages relevant to
@@ -32,6 +35,13 @@ Gateway target, which does the same translation server-side. If a skill or note 
 Identify any message that references the payment, break, or expected booking and extract the
 clarifying detail (e.g. a corrected reference, an agreed allocation, or a value-date confirmation).
 
+**This is not the same source as the knowledge base's archived email.** `consult-guidance` retrieves
+`doc_type=email` documents — a curated, indexed archive of _past_ correspondence, useful as
+precedent. This skill reads the **live mailbox**, which is the only place a message that arrived
+recently can be found. A KB archive hit does not tell you whether the counterparty has since replied,
+so when the question is "what did they say about _this_ item", search the mailbox; the archive
+answers "how was a break like this settled before". Neither substitutes for the other.
+
 Always conclude with: (1) a one-paragraph **reasoning** of what the correspondence revealed and
-how it resolves or narrows the match, (2) a **confidence** score in [0,1], and (3) the
-**evidence** list (message subjects/snippets you relied on). These populate the ReasoningStep.
+how it resolves or narrows the match, (2) the **evidence_steps** report required by the break-type skill this case was classified under — this skill prescribes no steps of its own, so it adds no entries and removes none — and (3) the
+**evidence** list (message subjects/snippets you relied on). These populate the case's ReasoningStep entries, and the evidence_steps outcomes are what determine whether this case can be resolved without a human.

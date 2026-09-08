@@ -5,19 +5,43 @@
  * down is which controls a given `draft_status` offers — and, more to the point, which it withholds.
  * An "Approve draft" button that is live while the textarea holds unsaved text would approve a
  * revision that does not exist; a plain retry offered after an unconfirmed send would offer to
- * double-send. Both are cheap to assert here and expensive to notice in production.
+ * double-send; an approve button on a draft that failed to render would arm text nobody wrote. All
+ * three are cheap to assert here and expensive to notice in production.
+ *
+ * Note what the recipient control is: a picker over names, with no address anywhere in the markup.
+ * The address is resolved from the chosen id at send time, so several assertions below are about the
+ * absence of an address rather than the presence of one.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { EmailDraftPanel } from "@/components/recon/EmailDraftPanel";
 import type { EmailDraft } from "@/lib/reconApi";
+import type { ContactChoice } from "@/lib/emailPolicy";
 
-const DOMAINS = ["counterparty.example"];
+const CONTACTS: ContactChoice[] = [
+  {
+    contact_id: "cp-ap",
+    display_name: "Counterparty AP",
+    kind: "counterparty",
+    active: true,
+  },
+  {
+    contact_id: "cp-ops",
+    display_name: "Counterparty Ops Desk",
+    kind: "counterparty",
+    active: true,
+  },
+];
 
 function draft(over: Partial<EmailDraft> = {}): EmailDraft {
   return {
-    recipient: "ap@counterparty.example",
+    // Always null in every persisted row: the draft stores WHO, not where.
+    recipient: null,
+    recipient_contact_id: "cp-ap",
     recipient_hint: "Counterparty AP",
+    template_id: "tpl-short-payment",
+    variables: { reference: "42", amount: "900.00" },
+    render_error: null,
     subject: "Invoice 42 — short payment",
     body: "We received 900.00 against invoice 42 for 1000.00.",
     draft_status: "pending",
@@ -47,7 +71,7 @@ function panel(
     <EmailDraftPanel
       draft={draft(over)}
       caseStatus="PROPOSED"
-      allowedDomains={DOMAINS}
+      contacts={CONTACTS}
       onSave={onSave}
       onDecide={onDecide}
       onOverrideChange={onOverrideChange}
@@ -57,7 +81,7 @@ function panel(
 }
 
 const button = (name: RegExp) => screen.queryByRole("button", { name });
-const recipientInput = () =>
+const recipientPicker = () =>
   screen.getByLabelText("Counterparty email recipient");
 const bodyInput = () => screen.getByLabelText("Counterparty email body");
 
@@ -73,13 +97,41 @@ describe("EmailDraftPanel — draft_status", () => {
 
     expect(screen.getByText("pending")).toBeTruthy();
     expect(screen.getByText("rev 2")).toBeTruthy();
-    expect(recipientInput()).toBeTruthy();
+    expect(recipientPicker()).toHaveProperty("value", "cp-ap");
     expect(button(/Save changes/)).toBeTruthy();
     expect(button(/Approve draft/)).toBeTruthy();
     expect(button(/Discard draft/)).toBeTruthy();
-    // Nothing typed yet, so there is nothing to store.
+    // Nothing changed yet, so there is nothing to store.
     expect(button(/Save changes/)).toHaveProperty("disabled", true);
     expect(button(/Approve draft/)).toHaveProperty("disabled", false);
+  });
+
+  it("pending: names the template the wording came from", () => {
+    panel();
+    // Answers "why does it say that" without the analyst having to ask an operator.
+    expect(
+      screen.getByText(/Drafted from template tpl-short-payment/),
+    ).toBeTruthy();
+    expect(screen.getByText(/reference=42, amount=900.00/)).toBeTruthy();
+  });
+
+  it("pending: offers names, never addresses", () => {
+    // The whole point of the contact indirection. `ContactChoice` has no `email` field, so an address
+    // cannot reach this component — but the picker could still invent one out of the hint or the id,
+    // and an address on screen is an address that stays reachable after a deactivation.
+    //
+    // Scoped to the picker rather than the whole panel: `edited by analyst@x.com` is an operator's own
+    // identity and belongs in the audit line.
+    panel();
+    const options = [...recipientPicker().querySelectorAll("option")].map(
+      (o) => o.textContent ?? "",
+    );
+    expect(options).toEqual([
+      "— choose a recipient —",
+      "Counterparty AP",
+      "Counterparty Ops Desk",
+    ]);
+    for (const label of options) expect(label).not.toMatch(/@/);
   });
 
   it("pending: an edit enables save and disables approve, saying why", () => {
@@ -94,33 +146,65 @@ describe("EmailDraftPanel — draft_status", () => {
 
     fireEvent.click(button(/Save changes/)!);
     expect(onSave).toHaveBeenCalledWith({
-      recipient: "ap@counterparty.example",
+      recipient_contact_id: "cp-ap",
       subject: "Invoice 42 — short payment",
       body: "Reworded ask.",
       revision: 2,
     });
   });
 
-  it("pending: an out-of-allowlist recipient blocks both save and approve", () => {
+  it("pending: changing the recipient is itself an edit", () => {
     panel();
-    fireEvent.change(recipientInput(), {
-      target: { value: "ap@attacker.example" },
-    });
+    fireEvent.change(recipientPicker(), { target: { value: "cp-ops" } });
 
-    expect(
-      screen.getByText(
-        /attacker.example is not an allowed counterparty domain/,
-      ),
-    ).toBeTruthy();
+    expect(button(/Save changes/)).toHaveProperty("disabled", false);
+    fireEvent.click(button(/Save changes/)!);
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ recipient_contact_id: "cp-ops" }),
+    );
+  });
+
+  it("pending: no selection blocks save and approve", () => {
+    panel({ recipient_contact_id: undefined });
+
+    expect(recipientPicker()).toHaveProperty("value", "");
     expect(button(/Save changes/)).toHaveProperty("disabled", true);
     expect(button(/Approve draft/)).toHaveProperty("disabled", true);
     expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("pending: a stale contact id is refused with a reason", () => {
+    // What an analyst sees when an operator deactivated the recipient between page load and click.
+    panel({ recipient_contact_id: "cp-gone" });
+
+    expect(screen.getByText(/No contact answers to cp-gone/)).toBeTruthy();
+    expect(button(/Approve draft/)).toHaveProperty("disabled", true);
   });
 
   it("pending: sends the displayed revision with a discard", () => {
     panel({ revision: 7 });
     fireEvent.click(button(/Discard draft/)!);
     expect(onDecide).toHaveBeenCalledWith("discard_draft", 7);
+  });
+
+  it("render_failed: editable and discardable, but never approvable", () => {
+    panel({
+      draft_status: "render_failed",
+      render_error:
+        "template tpl-short-payment is missing value for value_date",
+    });
+
+    expect(
+      screen.getByText(/could not be rendered from its template/),
+    ).toBeTruthy();
+    expect(screen.getByText(/missing value for value_date/)).toBeTruthy();
+    // Fixing it is the only way forward, so the fields stay open and discard stays available…
+    expect(bodyInput()).toBeTruthy();
+    expect(button(/Save changes/)).toBeTruthy();
+    expect(button(/Discard draft/)).toBeTruthy();
+    // …but the text on screen is not what would be sent, so there is nothing here to approve. Absent
+    // rather than disabled: an analyst cannot make it approvable by trying harder.
+    expect(button(/Approve draft/)).toBeNull();
   });
 
   it("approved: shows the armed revision and only offers revoke", () => {
@@ -140,6 +224,8 @@ describe("EmailDraftPanel — draft_status", () => {
     expect(button(/Discard draft/)).toBeNull();
     // Read-only: the approved text is what the gateway will compare the send against.
     expect(screen.queryByLabelText("Counterparty email body")).toBeNull();
+    // The recipient reads back as a NAME, resolved from the stored id.
+    expect(screen.getByText("Counterparty AP")).toBeTruthy();
 
     fireEvent.click(button(/Revoke approval/)!);
     expect(onDecide).toHaveBeenCalledWith("revoke_draft", 3);
@@ -226,35 +312,48 @@ describe("EmailDraftPanel — case status and busy", () => {
     expect(button(/Save changes/)).toHaveProperty("disabled", true);
     expect(button(/Approve draft/)).toHaveProperty("disabled", true);
     expect(button(/Discard draft/)).toHaveProperty("disabled", true);
-    expect(recipientInput()).toHaveProperty("disabled", true);
+    expect(recipientPicker()).toHaveProperty("disabled", true);
   });
 
-  it("explains the missing address rather than inventing one from the hint", () => {
-    panel({ recipient: null, recipient_hint: "Counterparty AP" });
+  it("surfaces the agent's guess without acting on it", () => {
+    panel({
+      recipient_contact_id: undefined,
+      recipient_hint: "Counterparty AP",
+    });
 
-    expect(recipientInput()).toHaveProperty("value", "");
+    expect(recipientPicker()).toHaveProperty("value", "");
     expect(
       screen.getByText(/believes this goes to Counterparty AP/),
     ).toBeTruthy();
-    expect(
-      screen.getByText(/Allowed domains: counterparty.example/),
-    ).toBeTruthy();
-    // Nothing to save and nothing to approve until a human supplies the address.
+    // Nothing to save and nothing to approve until a human picks someone.
     expect(button(/Save changes/)).toHaveProperty("disabled", true);
     expect(button(/Approve draft/)).toHaveProperty("disabled", true);
   });
 
-  it("says so when the deployment allows no counterparty domain at all", () => {
-    panel({}, { allowedDomains: [] });
+  it("flags a recipient that disagrees with the source document", () => {
+    // Not an error — the hint comes from a counterparty's own paperwork — but a silent mismatch is how
+    // mail reaches the wrong desk.
+    panel({
+      recipient_contact_id: "cp-ops",
+      recipient_hint: "Counterparty AP",
+    });
 
-    // Said twice, deliberately: once as the field's hint, once inline against the address that is
-    // already sitting in the input and can no longer be used.
     expect(
-      screen.getByText(
-        /No counterparty domains are configured for this deployment/,
-      ),
+      screen.getByText(/The source document named Counterparty AP/),
     ).toBeTruthy();
-    expect(screen.getByText(/no address can be used yet/)).toBeTruthy();
+    // Still approvable: the analyst may well be right.
+    expect(button(/Approve draft/)).toHaveProperty("disabled", false);
+  });
+
+  it("says so when no counterparty contact exists at all", () => {
+    panel({}, { contacts: [] });
+
+    expect(
+      screen.getByText(/No counterparty contacts are configured/),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/An operator adds them on the Config tab/),
+    ).toBeTruthy();
     expect(button(/Approve draft/)).toHaveProperty("disabled", true);
   });
 });

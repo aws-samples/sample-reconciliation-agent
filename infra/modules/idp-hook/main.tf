@@ -1,7 +1,10 @@
 ####################################################################################
 # IDP post-processing hook Lambda. IDP invokes this (via its PostProcessingLambdaHookFunctionArn
-# — set separately, out of scope here) on document completion; it writes a ReconItem through the
-# normal intake path. Only channel to IDP is this inbound invocation. ARN is a module output.
+# — set separately, out of scope here) on document completion; it writes a Notice to the notices
+# table. Only channel to IDP is this inbound invocation. ARN is a module output.
+#
+# It CANNOT open a reconciliation case, by grant as well as by code: the role has PutItem on the
+# notices table and nothing else, and the notices table has no stream.
 ####################################################################################
 
 # The Lambda deployment zip is built once by the shared lambda-package module (root contains
@@ -49,36 +52,45 @@ resource "aws_iam_role_policy" "hook" {
       },
 
       {
-        # Items table: PutItem for first ingest; GetItem to compare the incoming IDP run id
-        # against the stored one (reprocess detection).
+        # Notices table: PutItem only. The hook writes evidence and nothing else — no items, no
+        # cases, no audit, no agent dispatch. An extracted document is not a break.
         Effect   = "Allow"
-        Action   = ["dynamodb:PutItem", "dynamodb:GetItem"]
-        Resource = var.items_table_arn
+        Action   = ["dynamodb:PutItem"]
+        Resource = var.notices_table_arn
       },
       {
-        # Cases + audit: a genuine IDP reprocess re-drives the case (read status, reset to
-        # PENDING / age out, append audit rows).
-        Effect   = "Allow"
-        Action   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
-        Resource = [var.cases_table_arn, var.audit_table_arn]
-      },
-      {
-        # Re-dispatch the Tier-2 agent worker on a reprocess re-drive (async Event invoke).
-        # Guarded so the statement is valid even when no worker arn is wired.
-        Effect   = "Allow"
-        Action   = ["lambda:InvokeFunction"]
-        Resource = var.agent_worker_function_arn != "" ? var.agent_worker_function_arn : "arn:aws:lambda:${local.region}:${local.account_id}:function:${var.name_prefix}-agent-worker"
-      },
-      {
-        # READ-ONLY read of IDP's output bucket at ingest, to embed extracted field values +
-        # page-image locations into the ReconItem. This is the one sanctioned IDP-storage read
-        # (user-approved); the recon runtime/agent never reads IDP S3.
+        # READ-ONLY read of IDP's own buckets at ingest, to embed extracted field values +
+        # page-image locations into the notice. This is the one sanctioned IDP-storage read
+        # (user-approved); the recon runtime/agent never reads IDP S3. See var.idp_source_buckets
+        # for why the working bucket is in scope alongside the output bucket.
         Effect = "Allow"
         Action = ["s3:GetObject", "s3:ListBucket"]
-        Resource = [
-          "arn:aws:s3:::${var.idp_output_bucket}",
-          "arn:aws:s3:::${var.idp_output_bucket}/*",
-        ]
+        Resource = flatten([
+          for b in var.idp_source_buckets : [
+            "arn:aws:s3:::${b}",
+            "arn:aws:s3:::${b}/*",
+          ]
+        ])
+      },
+      {
+        # IDP encrypts its buckets with a customer-managed KMS key, so GetObject on them returns
+        # `AccessDenied ... not authorized to perform: kms:Decrypt` without this — the S3 grant above
+        # is necessary but not sufficient. IDP's key policy delegates to IAM (root principal with
+        # kms:*), so this identity-based grant is enough and recon never has to touch IDP's key policy.
+        #
+        # Resource = "*" scoped by kms:ViaService rather than the key ARN, on purpose: naming the key
+        # would either hard-code an id that changes when IDP is rebuilt, or need an
+        # `aws_kms_alias` data source, which would make a recon plan FAIL in any environment where IDP
+        # is not deployed. With this condition the role can only use KMS through S3, and its S3 reach
+        # is already limited to the IDP buckets above — so the effective grant is exactly "decrypt the
+        # objects it can already GetObject". Decrypt only: no Encrypt/GenerateDataKey, because the
+        # preview copies land in recon's own AES256 bucket.
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
+        Resource = "*"
+        Condition = {
+          StringEquals = { "kms:ViaService" = "s3.${local.region}.amazonaws.com" }
+        }
       },
       {
         # Copy page previews into recon's own assets bucket at ingest (UI serves same-origin).
@@ -115,15 +127,8 @@ resource "aws_lambda_function" "hook" {
 
   environment {
     variables = {
-      ITEMS_TABLE   = var.items_table
-      RECON_DOMAIN  = var.recon_domain
+      NOTICES_TABLE = var.notices_table
       ASSETS_BUCKET = var.assets_bucket
-      # Reprocess re-drive: re-open the case + re-dispatch the agent on a NEW IDP run.
-      CASES_TABLE           = var.cases_table
-      AUDIT_TABLE           = var.audit_table
-      AGENT_WORKER_FUNCTION = var.agent_worker_function_arn
-      AGENT_RUNTIME_ARN     = var.agent_runtime_arn
-      REPROCESS_CAP         = tostring(var.reprocess_cap)
     }
   }
 }

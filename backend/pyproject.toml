@@ -6,6 +6,9 @@ requires-python = ">=3.12"
 dependencies = [
     "pydantic==2.13.0",
     "boto3==1.43.48",
+    # SKILL.md frontmatter is real YAML (nested metadata.trigger blocks), parsed with
+    # yaml.safe_load in backend/recon_core/skill_meta.py.
+    "PyYAML==6.0.3",
 ]
 
 [project.optional-dependencies]

@@ -22,6 +22,30 @@ variable "idp_gateway_target_url" {
   default     = ""
 }
 
+variable "idp_appsync_endpoint" {
+  description = "HTTPS GraphQL endpoint of the document pipeline's AppSync API, from that stack's outputs (GraphQLAPIURL). Read server-side by the console's Documents tab. Empty leaves the tab reporting it is not configured."
+  type        = string
+  default     = ""
+}
+
+variable "idp_appsync_api_arn" {
+  description = "ARN of the same AppSync API -- arn:aws:appsync:REGION:ACCOUNT:apis/API_ID, built from that stack's GraphQLAPIId output. Only the console task role gets a grant, and only on two named query fields. Empty grants nothing."
+  type        = string
+  default     = ""
+}
+
+variable "idp_input_bucket" {
+  description = "Name of the document pipeline's input bucket, from that stack's outputs. An extraction-routed upload is put here. Empty leaves the upload route reporting it has nowhere to put an extraction file, which is the correct behaviour: the alternative is a put that lands somewhere nothing reads."
+  type        = string
+  default     = ""
+}
+
+variable "idp_input_bucket_arn" {
+  description = "ARN of the same bucket. Only the console task role gets a grant, and only s3:PutObject on the object path -- never ListBucket, and never on the pipeline's output prefixes."
+  type        = string
+  default     = ""
+}
+
 variable "recon_domain" {
   description = "Recon domain the IDP hook stamps on ingested items."
   type        = string
@@ -29,7 +53,7 @@ variable "recon_domain" {
 }
 
 variable "idp_mcp_secret_json" {
-  description = "JSON {token_url, client_id, client_secret, scope} for IDP MCP client-credentials. Empty disables."
+  description = "JSON {token_url, client_id, client_secret, scope, issuer} for IDP MCP client-credentials. `issuer` is Cognito's real issuer (https://cognito-idp.<region>.amazonaws.com/<poolId>), NOT the token_url host. Empty disables."
   type        = string
   default     = ""
   sensitive   = true
@@ -56,7 +80,13 @@ variable "entra_client_secret" {
 # --- Approval email + reprocess cap ---
 
 variable "notify_email" {
-  description = "Recipient for case-approval / auto-resolve emails, sent from the shared mailbox via the microsoft-graph gateway tool. Empty disables the email step."
+  description = <<-EOT
+    SEED address for the internal-notification contact, applied once when the contacts table is
+    first created. It is no longer the recipient of anything: every send resolves a contact ID
+    against that table at the moment it sends, so changing this value on a live deployment has no
+    effect and the actual recipient is edited in the Config tab. Empty skips the seed, in which case
+    notifications do not send until an operator adds a contact.
+  EOT
   type        = string
   default     = ""
 }
@@ -97,6 +127,35 @@ variable "okta_client_id" {
 
 variable "okta_redirect_uri" {
   description = "Pinned Okta OIDC callback URL (must end in /login/callback). Strongly recommended when auth_provider=okta: left empty, the frontend derives it from the browser origin, so it changes whenever the CloudFront domain does and login breaks until the new URL is registered on the Okta app. See the okta_redirect_uri_to_register output."
+  type        = string
+  default     = ""
+}
+
+# Configuration changes — the auto-resolve threshold, the agent backend, the Tier-1 switch, and the list
+# of addresses the platform may email — are restricted to members of this OIDC group.
+#
+# Nothing here creates the group. This deployment has no Cognito user pool, so membership arrives as a
+# claim from Okta or Entra and an operator maintains it there. The empty default is deliberate and it
+# fails closed: until a group is named, every configuration route answers 403, which is a visible and
+# one-variable-fixable state rather than a silently open one.
+variable "recon_admin_group" {
+  description = "OIDC group whose members may change platform configuration. Empty means nobody can."
+  type        = string
+  default     = ""
+}
+
+variable "auth_groups_claim" {
+  description = "JWT claim carrying OIDC group memberships (Okta: groups; Entra: groups or roles)."
+  type        = string
+  default     = "groups"
+}
+
+# Seeds the one extraction workflow type at create time. Empty (the default) seeds only the
+# knowledge-base type, and an operator adds extraction types from the Config tab -- which is the
+# right shape here, because the configuration version names live in the document-pipeline deployment
+# and are not discoverable from this one.
+variable "seed_extraction_config_version" {
+  description = "IDP configuration version name for the seeded extraction workflow type. Empty skips that seed."
   type        = string
   default     = ""
 }
@@ -155,10 +214,19 @@ variable "harness_model_id" {
   default     = "us.anthropic.claude-sonnet-5"
 }
 
+# Defaults to "enforce", not "log". "log" never blocks: it records the decision it would have made
+# and forwards the call anyway. Since the model's self-reported classification floor was removed
+# (2026-09-04) there is no second threshold in app code behind the provenance, evidence-quality and
+# transition guards, so a deployment that inherited a "log" default had one gate where it previously
+# had several — security audit 2026-09-04, finding M1. A fail-open default for an enforcement
+# component is the wrong direction for the same reason an unset counterparty allowlist means
+# "nobody" rather than "anyone". Set it to "log" EXPLICITLY for a first rollout: deploy once, verify
+# the e2e matrix in the interceptor's CloudWatch logs, then remove the override. It is a Lambda
+# env-only change, so the flip is cheap and there is no reason to linger.
 variable "interceptor_mode" {
-  description = "Gateway REQUEST interceptor mode: 'log' (observe only) or 'enforce' (block failing provenance/transition checks). Roll out log -> enforce."
+  description = "Gateway REQUEST interceptor mode: 'enforce' (default — block failing provenance/evidence/transition checks) or 'log' (observe only, never blocks). Set 'log' explicitly for a first rollout, then remove it."
   type        = string
-  default     = "log"
+  default     = "enforce"
 }
 
 variable "counterparty_email_domains" {

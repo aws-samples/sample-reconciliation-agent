@@ -1,5 +1,13 @@
 # Synthetic Reconciliation Sample Documents
 
+> **Setup, before anything below makes sense.** The notice store starts **empty**. Nothing seeds it —
+> notices exist only where a document has been through extraction, so the first step of any demo or
+> test run is uploading one of the documents in `input/` through the console. An empty actual side on a
+> freshly applied environment is the designed state, not a broken one.
+>
+> See `input/IDP-EXTRACTION-REQUIREMENTS.md` for the field contract extraction has to satisfy for those
+> uploads to produce useful notices.
+
 These files are **synthetic (fake but realistic)** versions of syndicated-loan /
 credit-agreement notices used to demo the **unapplied cash reconciliation**
 workflow app. They mirror the structure, field labels, section headings, and
@@ -27,16 +35,74 @@ share for demo/testing purposes.
 - **Account numbers:** masked, e.g. `****4821`
 - **Dates:** 2026 (some accruals span late 2025 into 2026)
 
-## Folder contents
+## What each document is FOR
 
-Each folder holds one representative document per reconciliation behavior. Ten
-documents in total cover the ten rows in `general-ledger/gl-entries.csv`, plus
-the deliberate non-matching / exception cases the agent must escalate or reject.
+Every document exists to make exactly one reconciliation outcome reachable. That intent is the reason
+the corpus is the size it is, and it is what a test or a demo is actually exercising.
 
-| Folder                               | Contents                                                                                                                                                                                                                                                                                    |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `01-borrowing-notices/`              | One borrowing (facility draw) notice for a known borrower. A draw disburses cash and has **no** corresponding cash-receipt GL row, so it is expected **not** to reconcile — exercises the unmatched-draw path.                                                                              |
-| `02-interest-and-rate-set-notices/`  | An interest payment / rate-set notice with Term SOFR accrual line items that **cleanly matches** its GL row (Tier-1), plus a commitment-fee notice that is a **near-miss** (same borrower/facility/fee type as a GL fee row, but a different amount) — exercises the discrepancy path.      |
-| `03-paydown-principal-notices/`      | An optional and a mandatory principal paydown notice that each **cleanly match** a single GL row (Tier-1), plus a combined paydown + interest notice whose two line items map to **two** GL rows — exercises multi-line Tier-2 escalation.                                                  |
-| `04-cancellation-notices/`           | One borrowing/DDTL-draw cancellation notice. A cancellation derives a **debit** and therefore cannot match the credit GL rows even when the borrower and facility overlap — exercises the direction-mismatch rejection.                                                                     |
-| `05-multi-facility-aggregated-wire/` | Three single-wire-for-multiple-facilities documents: a Consolidated Payment Advice whose components map to **three** GL rows (Tier-2 aggregated-wire escalation), a Summary Statement that **cleanly matches** one GL row, and an Activity Memo whose fee component matches one GL fee row. |
+**Read the band column knowing where the ceiling is.** MEDIUM is the highest band this platform can
+award: the band above it requires evidence that a source system has finalised the record, and no
+source connected here produces that. That is a decision, not a gap — there is deliberately no
+`internal_validation_status` on a notice and no path by which a human marks one reviewed, so no case
+can ever be corroborated that way. Changing the ceiling means revisiting that first.
+
+| Document                                      | Ledger counterpart                | Scenario | Band          | What decides it                                                                  |
+| --------------------------------------------- | --------------------------------- | -------- | ------------- | -------------------------------------------------------------------------------- |
+| `02/Interest Payment & Rate Set Notice.pdf`   | `GL-2026-000107`                  | 1        | MEDIUM        | all four core dimensions align; MEDIUM is the ceiling                            |
+| `02/Interest Notice - Global Amount Only.pdf` | `GL-2026-000103`                  | 1        | MEDIUM        | `amount` absent, `amount_type = GLOBAL_ONLY` — fund-level validation unavailable |
+| `02/Commitment Fee Notice.pdf`                | `GL-2026-000110` (near miss)      | 3        | MEDIUM        | same borrower, facility and fee type; a different amount                         |
+| `02/Commitment Fee Notice - EUR.pdf`          | `GL-2026-000111` (EUR)            | 3        | MEDIUM / DISQ | currency: the EUR row matches, USD `…000110` is disqualified on it               |
+| `02/Rollover Rate Set Notice.pdf`             | `GL-2026-000109`                  | 4        | capped        | `activity_type = Rollover`, no payment line — no standalone cash expected        |
+| `02/Interest Notice - Other Fund.pdf`         | none (resembles `GL-2026-000108`) | Unknown  | DISQUALIFIED  | the fund alias resolves cleanly — to the wrong fund                              |
+| `03/Optional Paydown Notice.pdf`              | `GL-2026-000105`                  | 1        | MEDIUM        | clean single-row match                                                           |
+| `03/Mandatory Paydown Notice.pdf`             | `GL-2026-000108`                  | 1        | MEDIUM        | clean single-row match                                                           |
+| `03/Paydown and Interest Notice.pdf`          | `GL-2026-000101` + `…000102`      | 1        | MEDIUM        | two line items, two ledger rows — multi-line escalation                          |
+| `03/Paydown Notice - Unmapped Facility.pdf`   | `GL-2026-000105`                  | 1        | MEDIUM        | `SL-99001` with no crosswalk entry — asset identity unavailable                  |
+| `01/Borrowing Notice.pdf`                     | none (a draw disburses cash)      | Unknown  | no match      | a draw has no cash-receipt row to match                                          |
+| `04/Borrowing Cancellation Notice.pdf`        | none (direction conflict)         | Unknown  | DISQUALIFIED  | derives a DEBIT; every ledger row here is a CREDIT                               |
+| `05/… Consolidated Payment Advice.pdf`        | `…000103` + `…000104` + `…000105` | 1        | MEDIUM        | one wire, three components — sum-to-total aggregation                            |
+| `05/… Summary Statement.pdf`                  | one ledger row                    | 1        | MEDIUM        | clean single-row match                                                           |
+| `05/… Activity Memo.pdf`                      | one ledger fee row                | 1        | MEDIUM        | fee component matches a fee row                                                  |
+| `06/Agent Notice - Partial Fax Cover.pdf`     | none                              | Unknown  | DISQUALIFIED  | only the borrower name is legible — issuer text alone is never enough            |
+
+There is deliberately **no row for the top band**. It would be a case that can only fail.
+
+### Generated versus committed documents
+
+Six of these are build artefacts of `scripts/generate_input_notices.py` — the four `02/` additions, the
+`03/` unmapped-facility notice, and the `06/` fax cover. Edit the script, not the PDFs;
+`tests/input_corpus/` fails when the two disagree. The other ten predate that script and are committed
+binaries with no generator.
+
+The generator writes **uncompressed** PDF content streams. That is not a size trade-off: the corpus
+sweep greps the raw bytes for email addresses, and a compressed stream would hide a real address from
+the one check that looks for it.
+
+### Folders
+
+| Folder                               | Holds                                                             |
+| ------------------------------------ | ----------------------------------------------------------------- |
+| `01-borrowing-notices/`              | facility draws — cash out, so no receipt row to reconcile against |
+| `02-interest-and-rate-set-notices/`  | interest, rate sets, rollovers, commitment fees                   |
+| `03-paydown-principal-notices/`      | principal paydowns, mandatory and optional                        |
+| `04-cancellation-notices/`           | cancellations — a DEBIT, which cannot match a credit row          |
+| `05-multi-facility-aggregated-wire/` | one wire covering several facilities, in three document shapes    |
+| `06-incomplete-notices/`             | documents that arrived truncated or unreadable                    |
+
+## The expected side
+
+`general-ledger/gl-entries.csv` is the book of record for the matrix above: 11 rows, one non-USD
+(`GL-2026-000111`, EUR), each carrying a fund code, an expected value date, identifier columns and an
+activity type.
+
+⚠️ Its column order is a **positional contract** with the Glue table in `infra/modules/gl-mock/main.tf`.
+`LazySimpleSerDe` maps CSV columns by position, so a header that disagrees with that schema does not
+error — Athena returns values under the wrong column names. Append only, to both at once.
+
+## The guidance corpus
+
+`kb-seed/` holds what the agent retrieves rather than what it reconciles: five class playbooks, an
+archive of counterparty correspondence, and `source-selection.md` on which source answers which
+question. The playbooks carry **precedent and convention only** — procedure lives in the skills, and
+policy in the shared-core system prompt, because a rule reached by a filtered search is a rule that is
+sometimes absent.

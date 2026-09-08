@@ -31,7 +31,16 @@ from backend.recon_core.errors import ToolDenied  # noqa: F401
 # Short tool name (what the model/agent uses) -> gateway MCP tool name ({target}___{tool}).
 GATEWAY_TOOL_NAMES = {
     "search_ledger": "general-ledger___search_ledger",
-    "search_guidance": "knowledge-base___search_guidance",
+    # The ACTUAL side. Flat keyword arguments, unlike managed-kb___Retrieve's nested shape.
+    "search_notices": "notices___search_notices",
+    # The knowledge base is reached through the Gateway's managed `bedrock-knowledge-bases`
+    # connector, which calls Bedrock's Retrieve API directly -- there is no Lambda in this path any
+    # more. Two consequences for callers:
+    #   - the operation name is the API's (`Retrieve`, capital R), not a short name we chose;
+    #   - the ARGUMENTS ARE NESTED, mirroring the Retrieve request shape rather than being flat
+    #     keywords. strands_investigator.search_guidance builds that shape; do not hand this tool
+    #     a bare {"query": ...}, which the gateway rejects on schema validation.
+    "search_guidance": "managed-kb___Retrieve",
     # IDP's MCP server nests its tools under the `IDPTools` group, so the gateway tool name is
     # document-extraction___IDPTools___get_results (NOT ___get_results — that name doesn't exist
     # and the MCP call fails with an opaque "unhandled errors in a TaskGroup").
@@ -39,6 +48,11 @@ GATEWAY_TOOL_NAMES = {
     "set_draw_status": "set-draw-status___set_draw_status",
     # Mailbox read routes through the existing microsoft-graph OpenAPI target.
     "search_correspondence": "microsoft-graph___listSharedMailboxMessages",
+    # Two DIFFERENT prefixes for what is one Lambda behind two gateway targets. The prefix is the
+    # target name, so `contacts___list_templates` is not a shorter spelling of the second entry — it
+    # is a tool that does not exist, and the MCP call fails as an unknown tool.
+    "list_contacts": "contacts___list_contacts",
+    "list_templates": "templates___list_templates",
     # NOTE: no send entry. The Graph send op exists on the gateway, but no short name maps to it
     # here, so an agent tool cannot reach it even by accident. Sending is the platform's act, on a
     # draft a human approved (backend/cases/notify.py and the BFF hold that path).
@@ -55,11 +69,11 @@ def parse_tool_result(res) -> dict:
 
     The live AgentCore gateway returns tool output as ``content`` TEXT parts (the JSON payload,
     sometimes chunked across several parts) and only populates ``structuredContent`` when the
-    tool declares an ``outputSchema`` — which the recon Lambda targets do NOT. The previous code
-    returned ``res.structuredContent or {}``, silently discarding the real data in ``content``
-    and handing the agent ``{}`` for every read (search_ledger/search_guidance/get_results). The
-    managed harness client reads ``content`` (see backend/harness_agent/intake.py), so the two
-    backends disagreed on the SAME gateway call. This makes the runtime read ``content`` too.
+    tool declares an ``outputSchema`` — which the recon Lambda targets do NOT. So
+    ``res.structuredContent or {}`` is the trap: it silently discards the real data in ``content`` and
+    hands the agent ``{}`` for every read (search_ledger/search_guidance/get_results). The managed
+    harness client reads ``content``, so a runtime that did not would leave the two backends
+    disagreeing about the SAME gateway call.
 
     Precedence: ``structuredContent`` when present (proper MCP path if a schema is ever added),
     else the concatenated ``content`` text parts parsed as JSON, else an empty dict.

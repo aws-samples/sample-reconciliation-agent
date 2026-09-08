@@ -25,6 +25,8 @@ const LIFECYCLE: {
     label: "In Investigation",
     color: "var(--rc-violet)",
   },
+  // Not terminal: a FAILED case is retryable, and its tile is a work queue, not an archive.
+  { status: "FAILED", label: "Failed — Retry", color: "var(--rc-red)" },
   { status: "PROPOSED", label: "Awaiting Approval", color: "var(--rc-cyan)" },
   { status: "APPROVED", label: "Approved", color: "var(--rc-green)" },
   { status: "REJECTED", label: "Rejected", color: "var(--rc-red)" },
@@ -48,7 +50,7 @@ const LIFECYCLE: {
   },
   { status: "AGED", label: "Aged Out", color: "var(--rc-red)", terminal: true },
 ];
-const OPEN = new Set(["PENDING", "IN_PROGRESS", "PROPOSED"]);
+const OPEN = new Set(["PENDING", "IN_PROGRESS", "PROPOSED", "FAILED"]);
 
 export default function DashboardPage() {
   const [cases, setCases] = useState<ReconCase[] | null>(null);
@@ -199,12 +201,14 @@ export default function DashboardPage() {
 
         <div className="space-y-4">
           <Panel className="rc-rise p-6">
-            <Eyebrow>Mean Proposal Confidence</Eyebrow>
+            {/* "Evidence Score" everywhere, matching the case screen: "Proposal Confidence" read
+                as something the model reported about itself, which no longer exists. */}
+            <Eyebrow>Mean Evidence Score</Eyebrow>
             <div className="mt-4">
               <ConfidenceMeter value={avgConf} />
             </div>
             <p className="rc-mono mt-3 text-[11px] leading-relaxed text-[var(--rc-ink-faint)]">
-              Computed composite across {proposed.length} case
+              Computed evidence completeness across {proposed.length} case
               {proposed.length === 1 ? "" : "s"} awaiting approval.
             </p>
           </Panel>

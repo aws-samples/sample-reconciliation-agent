@@ -1,85 +1,35 @@
-"""S3-backed live skill catalog (shared module, importable from the Lambda zip).
+"""S3-backed live skill catalog for the harness backend (importable from the Lambda zip).
 
-Reads SKILL.md objects under a prefix (any `.md` key), parses their frontmatter, and caches
-the result briefly so repeated calls within one Lambda invocation don't re-list. ``catalog_s3``
-returns frontmatter only (the body is stripped) — the harness worker uses it for the IDP-class →
-skill match, and ``DEFAULT_CLASS_THRESHOLD`` for ``intake._classify``'s threshold check. The
-body-bearing loader lives in ``agent-blueprint/recon-agent/skills_loader.py``, which is the copy
-the agent container actually ships.
+A thin harness-side wrapper over ``backend.recon_core.skill_meta``: the paginated scan, the
+frontmatter parse and the 60 s cache all live there. Keeping the parse there matters because the agent
+container reads the same catalog through ``agent-blueprint/recon-agent/skills_loader.catalog_s3``: a
+second, hand-rolled parser on this side is easy to write and easy to get subtly wrong (flat keys only,
+nested ``metadata`` block silently dropped), and the symptom is that switching ``AGENT_BACKEND``
+changes what the catalog says about a skill. One parser means it cannot.
+
+``catalog_s3`` returns frontmatter only (the body is stripped) — the harness worker uses it for the
+IDP-class → skill match and for validating Tier-1's class hint.
 """
 
 import time
-from typing import Any
 
-import boto3
-
-# Global classification-confidence floor (mirrors skills_loader.DEFAULT_CLASS_THRESHOLD).
-DEFAULT_CLASS_THRESHOLD = 0.6
-
-_FIELDS = ("name", "description", "tools", "model")
-_TTL = 60  # seconds
-
-
-def _parse_list(value: str) -> list[str]:
-    """Parse a frontmatter list value ``[a, b, c]`` (or bare ``a, b``) into a list of strings."""
-    v = (value or "").strip().strip("[]").strip()
-    return [t.strip().strip("'\"") for t in v.split(",") if t.strip()]
-
-
-def _parse(md: str) -> dict:
-    """Parse ``--- key: value --- body`` frontmatter into a classification-type record."""
-    fields: dict[str, Any] = {f: "" for f in _FIELDS}
-    lines = md.split("\n")
-    in_fm, body_start = False, 0
-    for i, line in enumerate(lines):
-        if line.strip() == "---":
-            if not in_fm:
-                in_fm = True
-            else:
-                body_start = i + 1
-                break
-        elif in_fm:
-            key, _, value = line.partition(":")
-            if key.strip() in fields:
-                fields[key.strip()] = value.strip()
-    fields["tools"] = _parse_list(fields["tools"])
-    fields["model"] = fields["model"] or None
-    fields["body"] = "\n".join(lines[body_start:]).strip()
-    return fields
-
-
-_CACHE: dict[str, tuple[float, list[dict]]] = {}
+from backend.recon_core.skill_meta import catalog_entry, read_s3_skills
 
 
 def catalog_s3(bucket: str, prefix: str, *, now=None, s3=None) -> list[dict]:
     """Return the SKILL.md catalog under the S3 prefix (frontmatter metadata, no bodies).
 
-    Cached for 60 s per bucket+prefix so repeated calls within one Lambda invocation don't re-list.
+    Cached for ``skill_meta.S3_TTL_SECONDS`` per bucket+prefix so repeated calls within one Lambda
+    invocation don't re-list. The clock is ``time.monotonic``, matching ``skills_loader.catalog_s3``
+    — both share ``skill_meta._S3_CACHE``, and mixing wall-clock with monotonic expiries in one
+    cache would let an entry written by one caller look valid forever to the other.
 
     :param bucket: assets bucket name.
     :param prefix: S3 prefix (e.g. ``skills/``).
     :param now: injectable clock for tests (``callable() -> float``).
     :param s3: injectable S3 client for tests.
-    :returns: list of parsed skill dicts (same shape as ``skills_loader.catalog_s3``).
+    :returns: list of parsed skill dicts, body stripped (same shape as
+        ``skills_loader.catalog_s3``).
     """
-    now = now or time.time
-    key = f"{bucket}/{prefix}"
-    hit = _CACHE.get(key)
-    if hit and hit[0] > now():
-        return hit[1]
-    s3 = s3 or boto3.client("s3")
-    parsed: list[dict] = []
-    kwargs: dict = {"Bucket": bucket, "Prefix": prefix}
-    while True:
-        resp = s3.list_objects_v2(**kwargs)
-        for obj in resp.get("Contents", []):
-            if obj["Key"].endswith(".md"):
-                body = s3.get_object(Bucket=bucket, Key=obj["Key"])["Body"].read().decode()
-                p = _parse(body)
-                if p.get("name"):
-                    parsed.append(p)
-        if not resp.get("IsTruncated"):
-            break
-        kwargs["ContinuationToken"] = resp["NextContinuationToken"]
-    _CACHE[key] = (now() + _TTL, parsed)
-    return [{k: v for k, v in p.items() if k != "body"} for p in parsed]
+    now = now or time.monotonic
+    return [catalog_entry(p) for p in read_s3_skills(bucket, prefix, now=now, s3=s3)]

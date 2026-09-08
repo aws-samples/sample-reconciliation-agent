@@ -344,8 +344,8 @@ describe('sseParser', () => {
     })
 
 
-    it('should allow legacy interrupt event (falls through to default, always valid)', () => {
-      // interrupt is a legacy/custom type — validator allows all unknown types
+    it('should allow a custom interrupt event (falls through to default, always valid)', () => {
+      // interrupt is a custom type — the validator allows all unknown types
       const missingInterrupts = { type: 'interrupt' } as unknown as AGUIStreamEvent
       const withInterrupts = {
         type: 'interrupt',

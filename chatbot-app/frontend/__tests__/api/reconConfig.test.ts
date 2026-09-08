@@ -13,7 +13,11 @@ process.env.TIER1_ENABLED_PARAM = "/recon-test/tier1-enabled";
 process.env.AUTO_RESOLVE_PARAM = "/recon-test/auto-resolve-threshold";
 
 const ssmSend = vi.fn();
+// PUT is admin-gated. Mocked here so these tests stay about the config contract; the gate itself is
+// tested in reconAdminGuard.test.ts, and one case below re-checks that this endpoint honours a refusal.
+const requireReconAdmin = vi.fn();
 
+vi.mock("@/lib/reconAdmin", () => ({ requireReconAdmin }));
 vi.mock("@aws-sdk/client-ssm", () => ({
   SSMClient: vi.fn().mockImplementation(() => ({ send: ssmSend })),
   GetParameterCommand: vi
@@ -38,6 +42,7 @@ function put(body: unknown) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  requireReconAdmin.mockResolvedValue({ actor: "operator@x.com" });
   // Every parameter absent, so each field falls back to its deployment default.
   ssmSend.mockRejectedValue(
     Object.assign(new Error("not found"), { name: "ParameterNotFound" }),
@@ -45,21 +50,15 @@ beforeEach(() => {
 });
 
 describe("GET /api/recon/config", () => {
-  it("reports the deployed counterparty allowlist, normalized", async () => {
+  it("never publishes the counterparty allowlist, even when one is deployed", async () => {
+    // The allowlist is a GATE and the gateway request interceptor is the gate. Publishing it here let
+    // three other places form an opinion about it, each reading a container env var fixed at task
+    // start -- so a narrowed allowlist was enforced by the interceptor while the UI still showed the
+    // old one. A control that misreports its own configuration is worse than one that says nothing.
     process.env.COUNTERPARTY_EMAIL_DOMAINS =
       " Partner.Example , other.example ";
     const body = await (await GET()).json();
-    expect(body.counterpartyEmailDomains).toEqual([
-      "partner.example",
-      "other.example",
-    ]);
-  });
-
-  it("reports an empty allowlist when none is deployed", async () => {
-    delete process.env.COUNTERPARTY_EMAIL_DOMAINS;
-    const body = await (await GET()).json();
-    // Empty means no counterparty email is possible — not "unrestricted". The panel says so.
-    expect(body.counterpartyEmailDomains).toEqual([]);
+    expect("counterpartyEmailDomains" in body).toBe(false);
   });
 });
 
@@ -88,5 +87,19 @@ describe("PUT /api/recon/config", () => {
     const res = await put({ tier1Enabled: false });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ tier1Enabled: false });
+  });
+
+  it("refuses a non-admin before touching SSM", async () => {
+    // The threshold this endpoint writes decides which breaks skip a human entirely, so the refusal has
+    // to land before the write rather than being reported after it.
+    const { NextResponse } = await import("next/server");
+    requireReconAdmin.mockResolvedValue({
+      error: NextResponse.json({ error: "not an admin" }, { status: 403 }),
+    });
+
+    const res = await put({ autoResolveThreshold: 0.5 });
+
+    expect(res.status).toBe(403);
+    expect(ssmSend).not.toHaveBeenCalled();
   });
 });

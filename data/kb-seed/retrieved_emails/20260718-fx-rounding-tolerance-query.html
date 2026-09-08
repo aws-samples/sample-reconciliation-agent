@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>
+      RE: June FX revaluation — small USD differences on four trades
+    </title>
+  </head>
+  <body>
+    <h1>RE: June FX revaluation — small USD differences on four trades</h1>
+
+    <table>
+      <tbody>
+        <tr>
+          <th>From</th>
+          <td>Marta Oyelaran &lt;settlements@coastline-trust.example&gt;</td>
+        </tr>
+        <tr>
+          <th>To</th>
+          <td>recon-team@loanmesa.example</td>
+        </tr>
+        <tr>
+          <th>Date</th>
+          <td>Saturday, 18 July 2026 11:05 (UTC)</td>
+        </tr>
+        <tr>
+          <th>Subject</th>
+          <td>
+            RE: June FX revaluation — small USD differences on four trades
+          </td>
+        </tr>
+        <tr>
+          <th>Message-ID</th>
+          <td>MSG-20260718-FXQ4471</td>
+        </tr>
+        <tr>
+          <th>Attachments</th>
+          <td>20260718-fx-revaluation-detail-JUN26.xlsx</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>Hi both,</p>
+
+    <p>
+      Attached is the trade-level detail behind the four small differences you
+      queried on the June revaluation. Short answer: these are
+      <strong>FX rate rounding differences, not booking errors</strong>. The
+      largest is USD 72.00 on a USD 2.6m notional, which is 0.0028%.
+    </p>
+
+    <p>
+      The cause is the number of decimal places each side carries on the rate.
+      Coastline publish and store rates to <strong>five</strong> decimal places;
+      your ledger appears to truncate to five as well but sources from a
+      different snap time, so EUR/USD comes through as 1.08409 against our
+      1.08412. On a 2.4m EUR notional that three-pip difference is USD 72.00.
+      The same mechanic explains GBP and CHF. JPY nets to zero because the rate
+      agrees at the published precision.
+    </p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Trade</th>
+          <th>Ccy</th>
+          <th>Custodian rate</th>
+          <th>Ledger rate</th>
+          <th>Difference (USD)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>TR-771204</td>
+          <td>EUR</td>
+          <td>1.08412</td>
+          <td>1.08409</td>
+          <td>72.00</td>
+        </tr>
+        <tr>
+          <td>TR-771318</td>
+          <td>GBP</td>
+          <td>1.27055</td>
+          <td>1.27051</td>
+          <td>46.00</td>
+        </tr>
+        <tr>
+          <td>TR-771402</td>
+          <td>CHF</td>
+          <td>1.11840</td>
+          <td>1.11838</td>
+          <td>17.60</td>
+        </tr>
+        <tr>
+          <td>TR-771455</td>
+          <td>JPY</td>
+          <td>0.00662</td>
+          <td>0.00662</td>
+          <td>0.00</td>
+        </tr>
+        <tr>
+          <td><strong>Total</strong></td>
+          <td></td>
+          <td></td>
+          <td></td>
+          <td><strong>135.60</strong></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>
+      All four sit well inside the USD 250 per-trade tolerance in the
+      reconciliation policy, so they can be matched with the tolerance recorded.
+      Please cite the
+      <strong>custodian rate as the rate source</strong> when you record the
+      tolerance applied — that is the rate that governs the actual cash
+      movement.
+    </p>
+
+    <p>
+      One caveat worth carrying forward: a rounding difference should scale with
+      notional. If you ever see a difference that is large relative to the
+      notional, or one that stays constant across trades of very different
+      sizes, it is not rounding — that pattern usually means the wrong rate
+      <em>date</em> was applied, and it should be escalated rather than
+      tolerated.
+    </p>
+
+    <p>
+      Regards,<br />
+      Marta Oyelaran<br />
+      Settlements — Coastline Trust Company<br />
+      settlements@coastline-trust.example
+    </p>
+  </body>
+</html>

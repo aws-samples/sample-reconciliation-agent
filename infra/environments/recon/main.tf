@@ -64,7 +64,7 @@ module "foundation" {
   hosted_ui_prefix = var.hosted_ui_prefix
   # Cognito client is created with placeholder callbacks (no frontend dependency, to avoid a
   # foundation<->frontend cycle). The real CloudFront callback/logout URLs are patched in by
-  # null_resource.cognito_callbacks below, once the frontend distribution exists — same
+  # aws_lambda_invocation.cognito_callbacks below, once the frontend distribution exists — same
   # post-hoc pattern the reference repo uses for its OAuth callback registration. One apply.
 }
 
@@ -88,6 +88,10 @@ module "frontend" {
   okta_client_id    = var.okta_client_id
   okta_redirect_uri = var.okta_redirect_uri
 
+  # Who may change platform configuration. Empty means nobody — see the variable's own note.
+  recon_admin_group = var.recon_admin_group
+  auth_groups_claim = var.auth_groups_claim
+
   # BFF data access (same-origin /api/recon/* routes read these via the ECS task role).
   cases_table       = module.foundation.cases_table
   cases_table_arn   = module.foundation.cases_table_arn
@@ -100,14 +104,36 @@ module "frontend" {
   lessons_table     = module.foundation.lessons_table
   lessons_table_arn = module.foundation.lessons_table_arn
   # Approve email: sent FROM the shared mailbox via the egress gateway's microsoft-graph tool.
-  notify_email       = var.notify_email
+  # No recipient address is configured here. The BFF resolves the draft's recipient_contact_id
+  # against the contacts table at send time, so a deactivated contact stops being sendable at once.
   graph_mailbox      = var.graph_mailbox
   egress_gateway_url = module.recon_agent.gateway_url
   reprocess_cap      = var.reprocess_cap
-  # Counterparty-email draft: the domains an analyst may address. Same value the interceptor gets,
-  # so the BFF's inline rejection and the gateway's denial agree about what is addressable.
-  counterparty_email_domains = var.counterparty_email_domains
-
+  # Config tab -> Contacts/Templates: the only role in the system that WRITES these two tables.
+  contacts_table      = module.contact_store.contacts_table_name
+  contacts_table_arn  = module.contact_store.contacts_table_arn
+  templates_table     = module.contact_store.templates_table_name
+  templates_table_arn = module.contact_store.templates_table_arn
+  # Config tab -> Workflow types: what may be uploaded, and whether each kind is extracted or
+  # ingested as knowledge. Same posture as the two tables above -- the BFF is the only writer.
+  workflow_types_table     = module.workflow_types.workflow_types_table_name
+  workflow_types_table_arn = module.workflow_types.workflow_types_table_arn
+  # Documents tab -> the document pipeline's own API. A read path only, and one this deployment can
+  # add on its own: the grant is identity-side on recon's task role, so nothing in the pipeline's
+  # account or state changes.
+  idp_appsync_endpoint = var.idp_appsync_endpoint
+  idp_appsync_api_arn  = var.idp_appsync_api_arn
+  # Documents tab -> Upload. The audit table is recon's own record of what it sent, and it is what the
+  # tab reads back -- which is why nothing here grants a read on either destination bucket. The
+  # PutObject into the pipeline's input bucket is identity-side too while both live in this account; a
+  # cross-account pipeline would additionally need a resource policy on their side.
+  uploads_table                  = module.upload_audit.uploads_table_name
+  uploads_table_arn              = module.upload_audit.uploads_table_arn
+  uploads_table_index_arn        = module.upload_audit.uploads_table_index_arn
+  idp_input_bucket               = var.idp_input_bucket
+  idp_input_bucket_arn           = var.idp_input_bucket_arn
+  email_preprocess_function_name = module.email_preprocess.function_name
+  email_preprocess_function_arn  = module.email_preprocess.function_arn
   # Lessons -> AgentCore Memory feed (agent recalls them on future similar items).
   recon_memory_id   = module.recon_agent.memory_id
   recon_memory_arn  = module.recon_agent.memory_arn
@@ -115,6 +141,10 @@ module "frontend" {
   # Reject→reprocess re-drives the agent via the agent-worker Lambda (backend switch honored);
   # approve executes the persisted proposed_action THROUGH the gateway's set_draw_status tool.
   agent_worker_function_arn = module.tier1.worker_function_arn
+  # Queue → "Create New": manual payload submission goes through the intake Lambda, so it lands in
+  # the items table exactly like an IDP-fed item and Tier-1 picks it up off the DynamoDB Stream.
+  intake_function_name = module.intake.function_name
+  intake_function_arn  = module.intake.function_arn
   # Config tab → Policy: rewrite the gated Cedar statements' threshold on change.
   policy_engine_name = module.recon_agent.policy_engine_name
   egress_gateway_arn = module.recon_agent.gateway_arn
@@ -148,30 +178,47 @@ module "frontend" {
   email_confirmation_token      = random_password.email_confirmation.result
 }
 
+# The apply-time actor: readiness waits and one-shot API calls that have no declarative form.
+# Deliberately dependency-free so its zip needs no pip — see the module header.
+module "deploy_actions" {
+  source = "../../modules/deploy-actions"
+
+  name_prefix = var.name_prefix
+  # Scoped to the one pool whose SPA client gets patched below. UpdateUserPoolClient REPLACES a
+  # client's configuration, so this grant is deliberately not broader.
+  user_pool_arn     = module.foundation.user_pool_arn
+  assets_bucket_arn = module.foundation.assets_bucket_arn
+}
+
 # Patch the Cognito SPA client's OAuth callback/logout URLs to the CloudFront domain after the
 # frontend distribution is up. Breaks the foundation<->frontend cycle (depends only forward).
-resource "null_resource" "cognito_callbacks" {
-  triggers = {
-    distribution = module.frontend.distribution_domain
-    client_id    = module.foundation.spa_client_id
-  }
+#
+# Was a local-exec AWS CLI call. The argument list matters and is re-sent in full by the handler:
+# UpdateUserPoolClient REPLACES the client's configuration rather than merging, so dropping the auth
+# flows or supported providers would silently strip them from a working client.
+# Forget the retired CLI shim. It has no destroy provisioner, so nothing is torn down either way;
+# `destroy = false` keeps it out of the plan's DELETE list, which the CI destroy guard matches
+# exactly and would otherwise gate behind the manual allow-destroy job for a no-op.
+removed {
+  from = null_resource.cognito_callbacks
 
-  provisioner "local-exec" {
-    command = <<-EOT
-      set -e
-      aws cognito-idp update-user-pool-client \
-        --region ${var.region} \
-        --user-pool-id ${module.foundation.user_pool_id} \
-        --client-id ${module.foundation.spa_client_id} \
-        --allowed-o-auth-flows code \
-        --allowed-o-auth-scopes openid email profile \
-        --allowed-o-auth-flows-user-pool-client \
-        --supported-identity-providers COGNITO \
-        --explicit-auth-flows ALLOW_REFRESH_TOKEN_AUTH ALLOW_USER_SRP_AUTH \
-        --callback-urls "https://${module.frontend.distribution_domain}/callback" \
-        --logout-urls "https://${module.frontend.distribution_domain}/"
-    EOT
+  lifecycle {
+    destroy = false
   }
+}
+
+resource "aws_lambda_invocation" "cognito_callbacks" {
+  function_name = module.deploy_actions.function_name
+
+  input = jsonencode({
+    action        = "patch_cognito_callbacks"
+    user_pool_id  = module.foundation.user_pool_id
+    client_id     = module.foundation.spa_client_id
+    callback_urls = ["https://${module.frontend.distribution_domain}/callback"]
+    logout_urls   = ["https://${module.frontend.distribution_domain}/"]
+    # Re-run when the actor's code changes, not only when the domain or client id does.
+    handler_version = module.deploy_actions.source_code_hash
+  })
 }
 
 module "intake" {
@@ -214,7 +261,11 @@ module "tier1" {
   egress_gateway_arn = module.recon_agent.gateway_arn
   egress_gateway_url = module.recon_agent.gateway_url
   graph_mailbox      = var.graph_mailbox
-  notify_email       = var.notify_email
+  # An ID, not an address: the worker resolves it against the contacts table on each send, so
+  # deactivating this contact stops the resolution email on the very next case.
+  notify_contact_id  = module.contact_store.notify_contact_id
+  contacts_table     = module.contact_store.contacts_table_name
+  contacts_table_arn = module.contact_store.contacts_table_arn
 
   # Backend selector + harness config (used when agent_backend="harness").
   agent_backend                = var.agent_backend
@@ -247,18 +298,27 @@ module "tier1" {
   gl_query_function_arn  = module.gl_mock.function_arn
   vpc_subnet_ids         = local.vpc_subnets
   vpc_security_group_ids = local.vpc_sgs
+
+  workflow_types_table     = module.workflow_types.workflow_types_table_name
+  workflow_types_table_arn = module.workflow_types.workflow_types_table_arn
 }
 
 module "recon_agent" {
   source = "../../modules/recon-agent"
 
-  name_prefix            = var.name_prefix
-  region                 = var.region
-  agent_src_dir          = "${path.root}/../../../agent-blueprint/recon-agent"
-  cases_table            = module.foundation.cases_table
-  cases_table_arn        = module.foundation.cases_table_arn
-  audit_table            = module.foundation.audit_table
-  audit_table_arn        = module.foundation.audit_table_arn
+  # Apply-time readiness waits (managed-KB data source, managed-kb connector target) run in the
+  # deploy-actions Lambda rather than a local-exec AWS CLI poll.
+  deploy_actions_function_name    = module.deploy_actions.function_name
+  deploy_actions_source_code_hash = module.deploy_actions.source_code_hash
+
+  name_prefix     = var.name_prefix
+  region          = var.region
+  agent_src_dir   = "${path.root}/../../../agent-blueprint/recon-agent"
+  cases_table     = module.foundation.cases_table
+  cases_table_arn = module.foundation.cases_table_arn
+  audit_table     = module.foundation.audit_table
+  audit_table_arn = module.foundation.audit_table_arn
+  # The interceptor's extraction-confidence guard resolves the notice a proposal cited.
   assets_bucket          = module.foundation.assets_bucket
   assets_bucket_arn      = module.foundation.assets_bucket_arn
   idp_gateway_target_url = var.idp_gateway_target_url
@@ -275,7 +335,9 @@ module "recon_agent" {
   # Gateway REQUEST interceptor mode: log (observe only) or enforce (block on violation).
   interceptor_mode = var.interceptor_mode
 
-  # Counterparty-email recipient allowlist, enforced on the send at the gateway.
+  # Counterparty-email recipient allowlist. This module is the ONLY consumer: the allowlist is a gate,
+  # and the gateway request interceptor is the gate. It is deliberately NOT passed to frontend-ecs --
+  # a BFF copy could only ever agree with this one or be wrong, and it read as a blocked save.
   counterparty_email_domains = var.counterparty_email_domains
 
   # Same baggage allow-list as the Lambda + harness, so the runtime backend's spans carry
@@ -287,11 +349,16 @@ module "recon_agent" {
   # never reads env), but the model's own counterparty-email tool call carries no token → blocked.
   email_confirmation_token = random_password.email_confirmation.result
 
-  # Gateway Lambda tools (kb-search built from the shared zip; general-ledger from gl-mock).
+  # Gateway Lambda tools (recon-status + correspondence-search from the shared zip;
+  # general-ledger and set-draw-status from gl-mock). The knowledge-base read is NOT a Lambda —
+  # it is the `managed-kb` connector target the Gateway calls Bedrock for directly.
   lambda_zip         = module.lambda_package.zip_path
   lambda_source_hash = module.lambda_package.source_code_hash
   gl_tool_lambda_arn = module.gl_mock.function_arn
   gl_tool_enabled    = true
+  # The ACTUAL side: extracted counterparty notices. Read-only — there is no notices write tool.
+  notice_tool_lambda_arn = module.notice_store.notice_tool_lambda_arn
+  notice_tool_enabled    = true
   # Write tool: the agent (when confident) + human-approve path set draw/ledger status here.
   set_draw_status_lambda_arn = module.gl_mock.write_function_arn
   set_draw_status_enabled    = true
@@ -303,9 +370,17 @@ module "recon_agent" {
   auto_resolve_param_arn = module.foundation.auto_resolve_param_arn
   lessons_table          = module.foundation.lessons_table
   lessons_table_arn      = module.foundation.lessons_table_arn
-  notify_email           = var.notify_email
   # Shared mailbox the agent's Microsoft Graph email tools send from / read (GRAPH_MAILBOX).
   graph_mailbox = var.graph_mailbox
+
+  # Contacts + templates: the two read-only gateway targets the model picks a recipient and a
+  # wording from, and the contacts table the interceptor checks a send against. The notification
+  # contact ID goes to the runtime's auto-resolve path -- again an ID, never an address.
+  contact_tool_lambda_arn = module.contact_store.contact_tool_lambda_arn
+  contact_tool_enabled    = true
+  contacts_table          = module.contact_store.contacts_table_name
+  contacts_table_arn      = module.contact_store.contacts_table_arn
+  notify_contact_id       = module.contact_store.notify_contact_id
 
   # AgentCore Policy confidence gate: LOG_ONLY first, flip to ENFORCE (Task 9) after inspecting
   # live Cedar decision logs from the harness runs.
@@ -337,7 +412,7 @@ module "recon_agent_harness" {
   otel_baggage_span_attribute_keys = local.otel_baggage_span_attribute_keys
   # Deliberately NOT enabled here (unlike on the worker Lambda): the online evaluators score
   # gen-ai CONTENT records read from this harness's log group, and both settings suppress content.
-  # See the harness OTel-observability design record, D2.
+  # Same baggage allow-list as the harness, so both backends' spans carry the same recon attributes.
   otel_genai_content_extraction_opt_out = false
   otel_semconv_stability_opt_in         = ""
 
@@ -383,17 +458,38 @@ locals {
     harness = module.recon_agent_harness.harness_runtime_log_group
     runtime = module.recon_agent.runtime_log_group
   }
+  # The UI-editable S3 seeds: bucket key => repo file that seeds it.
+  #
+  # ONE definition feeding two consumers — the `aws_s3_object` seeds below (first write only) and
+  # `aws_lambda_invocation.seed_push` (every apply, unless the live object was edited). Adding a skill file
+  # is now a single change; before this, a new skill could be seeded but never pushed, or pushed but
+  # never seeded, and neither shows up as an error.
+  editable_seeds = merge(
+    {
+      "system-prompt.md"         = "${path.root}/../../../agent-blueprint/recon-agent/system-prompt.md"
+      "system-prompt-harness.md" = "${path.root}/../../../agent-blueprint/recon-agent-harness/system-prompt.md"
+    },
+    {
+      # Directory-per-skill layout: skills/<name>/SKILL.md, which the AgentCore Harness requires.
+      # The container loader reads any .md under the prefix recursively, so both paths work.
+      for f in fileset("${path.root}/../../../agent-blueprint/recon-agent/skills", "*.md") :
+      "skills/${trimsuffix(f, ".md")}/SKILL.md" => "${path.root}/../../../agent-blueprint/recon-agent/skills/${f}"
+    },
+  )
 }
 
 # Seed the harness's CALLING CONTRACT to S3 (submit_proposal fields + prefixed gateway tool
 # names). This is appended after the shared policy core in system_prompt_seed below — the policy
-# itself is NOT duplicated here, so the two backends cannot drift apart. Create-only like the
-# other editable objects: repo edits need a manual `aws s3 cp` to reach the live object.
+# itself is NOT duplicated here, so the two backends cannot drift apart. Create-only like the other
+# editable objects, so this resource writes the object once and never overwrites the live text — but
+# repo edits do NOT need a manual `aws s3 cp`: `aws_lambda_invocation.seed_push` below re-pushes
+# every changed `local.editable_seeds` entry on each apply, and fails the apply on a two-sided
+# conflict. (This comment claimed the opposite until 2026-09-04 and misled a planning pass.)
 resource "aws_s3_object" "harness_system_prompt_seed" {
   bucket       = module.foundation.assets_bucket
   key          = "system-prompt-harness.md"
-  source       = "${path.root}/../../../agent-blueprint/recon-agent-harness/system-prompt.md"
-  etag         = filemd5("${path.root}/../../../agent-blueprint/recon-agent-harness/system-prompt.md")
+  source       = local.editable_seeds["system-prompt-harness.md"]
+  etag         = filemd5(local.editable_seeds["system-prompt-harness.md"])
   content_type = "text/markdown"
 
   lifecycle {
@@ -440,61 +536,134 @@ module "observability" {
   resource_name = "recon-agent-runtime"
   resource_arn  = module.recon_agent.runtime_arn
 
-  # Deliver runtime TRACES into aws/spans so the online eval config can score
+  # Deliver runtime TRACES to CloudWatch so the online eval config can score
   # runtime-backend sessions (account-level Transaction Search enabled 2026-07-27).
   enable_xray_traces = true
 }
 
 # Upload the KB seed corpus to the assets bucket's knowledge-base/ prefix.
-resource "aws_s3_object" "kb_seed" {
-  bucket = module.foundation.assets_bucket
-  key    = "knowledge-base/resolution-patterns.md"
-  source = "${path.root}/../../../data/kb-seed/resolution-patterns.md"
-  etag   = filemd5("${path.root}/../../../data/kb-seed/resolution-patterns.md")
-}
+#
+# The corpus is a directory tree, not two files: playbooks/ holds the reconciliation
+# methodology, retrieved_emails/ holds archived correspondence (HTML bodies plus PDF and
+# spreadsheet attachments), and every document has a sibling <name>.<ext>.metadata.json sidecar
+# carrying the attributes the agent filters on. 14 documents + 14 sidecars = 28 objects.
+# tests/kb_seed/ is the contract for that shape.
+locals {
+  kb_seed_dir = "${path.root}/../../../data/kb-seed"
 
-# Reconciliation guidance/playbooks for the recon KB (consult-guidance skill).
-resource "aws_s3_object" "kb_guidance" {
-  bucket = module.foundation.assets_bucket
-  key    = "knowledge-base/reconciliation-guidance.md"
-  source = "${path.root}/../../../data/kb-seed/reconciliation-guidance.md"
-  etag   = filemd5("${path.root}/../../../data/kb-seed/reconciliation-guidance.md")
-}
-
-# Uploading the seed objects does NOT make them searchable — the KB's vector index only
-# reflects the S3 prefix after a Bedrock ingestion job runs. Without this, consult-guidance
-# silently returns nothing on a from-scratch deploy until someone notices and clicks "Sync" in
-# the console. Re-run on every seed-content change and block the apply until it finishes, so a
-# single `terraform apply` leaves the KB actually queryable.
-resource "null_resource" "kb_ingestion" {
-  triggers = {
-    kb_seed_etag     = aws_s3_object.kb_seed.etag
-    kb_guidance_etag = aws_s3_object.kb_guidance.etag
+  # S3 defaults an unknown extension to binary/octet-stream, and Bedrock chooses its document
+  # parser from the object's content type. A .pdf or .xlsx uploaded as octet-stream still
+  # *ingests*: it is indexed with no extractable text, stays retrievable, and reports nothing
+  # wrong anywhere -- the agent just cites a document that contains no evidence.
+  kb_seed_content_types = {
+    ".md"   = "text/markdown"
+    ".html" = "text/html"
+    ".pdf"  = "application/pdf"
+    ".xlsx" = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    ".json" = "application/json" # the .metadata.json sidecars
   }
+}
 
-  provisioner "local-exec" {
-    command = <<-EOT
-      set -e
-      JOB_ID=$(aws bedrock-agent start-ingestion-job \
-        --knowledge-base-id ${module.recon_agent.kb_id} \
-        --data-source-id ${module.recon_agent.kb_data_source_id} \
-        --region ${var.region} --query 'ingestionJob.ingestionJobId' --output text)
-      echo "KB ingestion job: $JOB_ID"
-      for i in $(seq 1 60); do
-        STATUS=$(aws bedrock-agent get-ingestion-job \
-          --knowledge-base-id ${module.recon_agent.kb_id} \
-          --data-source-id ${module.recon_agent.kb_data_source_id} \
-          --ingestion-job-id "$JOB_ID" --region ${var.region} \
-          --query 'ingestionJob.status' --output text)
-        echo "  status: $STATUS"
-        case "$STATUS" in
-          COMPLETE) exit 0 ;;
-          FAILED) exit 1 ;;
-        esac
-        sleep 10
-      done
-      exit 1
-    EOT
+resource "aws_s3_object" "kb_seed" {
+  # "**" walks the whole tree, so both subdirectories and the sidecars are picked up.
+  for_each = fileset(local.kb_seed_dir, "**")
+
+  bucket = module.foundation.assets_bucket
+  key    = "knowledge-base/${each.value}"
+  source = "${local.kb_seed_dir}/${each.value}"
+  etag   = filemd5("${local.kb_seed_dir}/${each.value}")
+
+  # Indexing the map directly (rather than lookup() with a default) is deliberate: a new format
+  # added to the corpus must fail the plan so the content type is a decision, not a default.
+  # regex() returns the LAST extension, which is what lets notice.pdf and notice.pdf.metadata.json
+  # coexist in one folder -- the sidecar maps to .json, the document to .pdf.
+  content_type = local.kb_seed_content_types[regex("\\.[^.]+$", each.value)]
+}
+
+# (knowledge base, data source) pairs the corpus is ingested into.
+#
+# ⚠️ ONLY a managed KB, and do not add an **S3 Vectors**-backed one beside it. This corpus violates
+# two of S3 Vectors' hard limits (verified live 2026-08-26, job CH0ZJE8F5D):
+#
+#   1. sidecar FILE size limit of 1024 bytes -- "Ignored 8 files as the associated metadata was
+#      larger than service limit of MaximumFileSizeSupported: 1024 bytes". All 8
+#      retrieved_emails/*.metadata.json exceed it (1149-1217 bytes even minified: the
+#      {"value":{"type":...},"includeForEmbedding":...} envelope costs ~70 bytes per attribute and
+#      an email carries 10). Those documents are ignored OUTRIGHT -- they never appear in
+#      ListKnowledgeBaseDocuments, not even as FAILED.
+#   2. "Filterable metadata must have at most 2048 bytes (Service: S3Vectors, Status Code: 400)" --
+#      4 of the 7 playbooks hard-FAIL. This one has no observable discriminator: two playbooks with
+#      IDENTICAL metadata land on opposite sides of it, and the failing set's sizes (522-575 bytes)
+#      overlap the passing set's exactly. Do not try to reason it out from sidecar size.
+#
+# The managed KB has neither limit -- it indexes every document in the corpus, sidecars of 1610-1660
+# bytes included. So the metadata design and an S3 Vectors index are mutually exclusive: supporting
+# one would mean gutting the attribute set corpus-wide, degrading the retrieval filtering that is
+# the whole point of the sidecars. Keep this note -- it is the reason not to try.
+locals {
+  kb_ingest_targets = {
+    managed = {
+      kb_id = module.recon_agent.managed_kb_id
+      ds_id = module.recon_agent.managed_kb_data_source_id
+    }
+  }
+}
+
+# Uploading the seed objects does NOT make them searchable — a KB's index only reflects the S3
+# prefix after a Bedrock ingestion job runs. Without this, consult-guidance silently returns
+# nothing on a from-scratch deploy until someone notices and clicks "Sync" in the console.
+# Re-run on every seed-content change and block the apply until it finishes, so a single
+# `terraform apply` leaves the KB actually queryable.
+#
+# ⚠️ This resource is load-bearing, not tidiness. Creating a KB does not start an ingestion job:
+# S3 objects are ingested only by an explicit StartIngestionJob. A managed KB left un-ingested is
+# created EMPTY, its connector target still validates and reports READY, tools/list still advertises
+# the filter parameters, and every retrieval returns an empty retrievalResults with no error
+# anywhere. The whole feature reads as "filters work — everything matches nothing".
+#
+# The for_each stays despite there being one target, because the state addresses are already keyed;
+# collapsing it to a bare resource would destroy and re-create the managed ingestion for nothing.
+resource "aws_lambda_invocation" "kb_ingestion" {
+  for_each = local.kb_ingest_targets
+
+  function_name = module.deploy_actions.function_name
+
+  input = jsonencode({
+    action            = "start_kb_ingestion"
+    knowledge_base_id = each.value.kb_id
+    data_source_id    = each.value.ds_id
+    # Hash over every object's etag, so adding, editing or removing any document in the corpus
+    # re-ingests. Not read by the handler — its only job is to make the invocation's input change.
+    corpus = sha256(join(",", [for object in aws_s3_object.kb_seed : object.etag]))
+    # Re-run when the actor's code changes, not only when the corpus does.
+    handler_version = module.deploy_actions.source_code_hash
+  })
+}
+
+# ⚠️ The document counts the handler returns are apply-time EVIDENCE that the corpus landed, and
+# they are not redundant with the job status: a job can report COMPLETE with a non-zero failed
+# count, and a managed-KB job has been observed dropping 5 documents while reporting 0 failed.
+# Surfaced as an output so they appear in the apply log the way the provisioner's echo used to.
+# If the numbers look wrong, go to ListKnowledgeBaseDocuments — a dropped document is simply ABSENT.
+
+output "kb_ingestion_counts" {
+  description = "Per-KB ingestion job id and scanned/indexed/failed document counts from this apply."
+  value       = { for k, invocation in aws_lambda_invocation.kb_ingestion : k => jsondecode(invocation.result) }
+}
+
+# Forget the retired null_resource, including the stale ["vectors"] instance.
+#
+# Both instances are pure state entries: a null_resource with no `when = destroy` provisioner tears
+# down nothing in AWS, so nothing is lost by dropping them. `destroy = false` is here to keep them
+# out of the plan's DELETE list — the CI destroy guard matches `actions == ["delete"]` exactly, and
+# these two no-ops would otherwise force the manual `terraform:apply:allow-destroy` job and a human
+# approval for no reason. (The ["vectors"] entry has been a pending pure delete since the 2026-08-26
+# apply, when S3 Vectors stopped being a key in local.kb_ingest_targets.)
+removed {
+  from = null_resource.kb_ingestion
+
+  lifecycle {
+    destroy = false
   }
 }
 
@@ -502,15 +671,20 @@ resource "null_resource" "kb_ingestion" {
 # the BFF skills manager and the agent read at runtime; edits via the UI overwrite them in
 # place (no redeploy). Managed with lifecycle ignore so UI edits are not reverted on the
 # next apply — seeding is first-write only.
+# The key => file map lives in local.editable_seeds so the deploy-time push (aws_lambda_invocation.seed_push)
+# cannot drift from what is seeded here.
 resource "aws_s3_object" "skill_seed" {
-  for_each = fileset("${path.root}/../../../agent-blueprint/recon-agent/skills", "*.md")
+  # Keyed on the FILE NAME, matching the `fileset()` keys this resource has always had, so the state
+  # addresses are unchanged. Re-keying on the bucket key would destroy and recreate all seven objects.
+  for_each = {
+    for k, f in local.editable_seeds : basename(f) => { key = k, source = f }
+    if startswith(k, "skills/")
+  }
 
-  bucket = module.foundation.assets_bucket
-  # Directory-per-skill layout: skills/<name>/SKILL.md. The AgentCore Harness requires a dir per
-  # skill; the container loader reads any .md under the prefix recursively, so both paths work.
-  key          = "skills/${trimsuffix(each.value, ".md")}/SKILL.md"
-  source       = "${path.root}/../../../agent-blueprint/recon-agent/skills/${each.value}"
-  etag         = filemd5("${path.root}/../../../agent-blueprint/recon-agent/skills/${each.value}")
+  bucket       = module.foundation.assets_bucket
+  key          = each.value.key
+  source       = each.value.source
+  etag         = filemd5(each.value.source)
   content_type = "text/markdown"
 
   lifecycle {
@@ -518,37 +692,77 @@ resource "aws_s3_object" "skill_seed" {
   }
 }
 
-# One-time migration of the FLAT layout (skills/<name>.md) to nested (skills/<name>/SKILL.md),
-# preserving any live UI edits: copy each flat object to its nested key only if the nested key
-# does not already exist (so the seed's first-write / a UI edit wins), then delete the flat
-# object. Idempotent — after the flat objects are gone it is a no-op. Runs on every apply but
-# exits fast once migrated.
-resource "terraform_data" "skills_layout_migration" {
-  triggers_replace = { bucket = module.foundation.assets_bucket }
+# The one-time flat -> nested skills migration (skills/<name>.md -> skills/<name>/SKILL.md) is DONE
+# and its resource is deleted rather than ported to the deploy-actions Lambda.
+#
+# Verified against the live bucket on 2026-09-02: every object under skills/ is already a nested
+# SKILL.md and no flat <name>.md remains, so the provisioner had become a permanent no-op that still
+# shelled out to `aws s3api list-objects-v2` on every apply. Porting a no-op would have moved the
+# dependency without removing the work.
+#
+# ⚠️ If a flat object ever reappears (an old checkout applying an earlier revision), the seed
+# resources above create the NESTED key and the flat one is simply ignored — it is not read by
+# anything. The migration was only needed to preserve UI edits made under the old layout, and there
+# are none left to preserve.
+removed {
+  from = terraform_data.skills_layout_migration
 
-  provisioner "local-exec" {
-    interpreter = ["/bin/bash", "-c"]
-    command     = <<-EOT
-      set -euo pipefail
-      BUCKET='${module.foundation.assets_bucket}'
-      REGION='${var.region}'
-      # List flat skill objects (skills/<name>.md, NOT skills/<name>/SKILL.md).
-      FLAT=$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix skills/ --region "$REGION" \
-        --query "Contents[?ends_with(Key, '.md') && !contains(Key, '/SKILL.md')].Key" \
-        --output text 2>/dev/null || true)
-      for KEY in $FLAT; do
-        NAME=$(basename "$KEY" .md)
-        NESTED="skills/$NAME/SKILL.md"
-        if ! aws s3api head-object --bucket "$BUCKET" --key "$NESTED" --region "$REGION" >/dev/null 2>&1; then
-          echo "[skills-migration] $KEY -> $NESTED"
-          aws s3 cp "s3://$BUCKET/$KEY" "s3://$BUCKET/$NESTED" --region "$REGION" >/dev/null
-        fi
-        aws s3 rm "s3://$BUCKET/$KEY" --region "$REGION" >/dev/null
-      done
-    EOT
+  lifecycle {
+    destroy = false
   }
+}
 
-  depends_on = [aws_s3_object.skill_seed]
+# Push repo edits to the create-only seeds above, UNLESS the live object was edited in this
+# environment. The seeds are `ignore_changes`d because the UI rewrites them in place, which until now
+# meant a repo edit to a prompt or a skill never reached S3 through an apply at all: the apply was
+# green and the deployed agent kept the old instructions.
+#
+# The decision (and every failure message) lives in the committed script, not here, because it has a
+# second caller: an operator reconciling a conflict runs the same script by hand.
+#
+# ⚠️ This resource can FAIL the apply, by design. If a repo file AND the live object have both changed
+# since the last push, no rule resolves that without a human, so it stops and names every stuck key
+# with the two commands that fix it. A UI edit on its own is not a conflict — it wins silently.
+resource "aws_lambda_invocation" "seed_push" {
+  function_name = module.deploy_actions.function_name
+
+  input = jsonencode({
+    action = "push_editable_seeds"
+    bucket = module.foundation.assets_bucket
+    # ⚠️ The CONTENT travels in the payload, not a path: the actor has no repo checkout. That also
+    # makes the input change whenever a seed changes, which is what re-runs the reconciliation —
+    # the retired provisioner used a `filemd5` trigger for exactly that. `source` is carried only so
+    # a conflict message can name the repo file an operator has to reconcile.
+    #
+    # ~40 KB across all seeds today, against Lambda's 6 MB synchronous payload limit. If the corpus
+    # ever approaches that, stage the content in S3 and pass keys instead.
+    seeds = {
+      for k, f in local.editable_seeds : k => {
+        content = file(f)
+        source  = f
+      }
+    }
+    handler_version = module.deploy_actions.source_code_hash
+  })
+
+  # Seeding is create-only (`ignore_changes = [etag, source]`), so the objects must exist before the
+  # reconciliation reads their ETags — a missing object is the "record" branch, and racing it would
+  # write a marker for content the seed resource is about to create.
+  depends_on = [
+    aws_s3_object.system_prompt_seed,
+    aws_s3_object.harness_system_prompt_seed,
+    aws_s3_object.skill_seed,
+  ]
+}
+
+# Forget the retired provisioner (no destroy provisioner; `destroy = false` keeps a no-op out of the
+# plan's DELETE list, which the CI destroy guard matches exactly).
+removed {
+  from = terraform_data.seed_push
+
+  lifecycle {
+    destroy = false
+  }
 }
 
 # The SHARED policy core. Read by the runtime container AND by the harness worker (which appends
@@ -557,8 +771,8 @@ resource "terraform_data" "skills_layout_migration" {
 resource "aws_s3_object" "system_prompt_seed" {
   bucket       = module.foundation.assets_bucket
   key          = "system-prompt.md"
-  source       = "${path.root}/../../../agent-blueprint/recon-agent/system-prompt.md"
-  etag         = filemd5("${path.root}/../../../agent-blueprint/recon-agent/system-prompt.md")
+  source       = local.editable_seeds["system-prompt.md"]
+  etag         = filemd5(local.editable_seeds["system-prompt.md"])
   content_type = "text/markdown"
 
   lifecycle {
@@ -570,7 +784,7 @@ resource "aws_s3_object" "system_prompt_seed" {
 # skills, this is not editable in the UI, so it is NOT lifecycle-ignored — it tracks the repo and
 # re-syncs on every apply so the viewer always shows the code that is actually deployed.
 resource "aws_s3_object" "tier1_source" {
-  for_each = toset(["handler.py", "engine.py", "matchers.py", "config.py"])
+  for_each = toset(["handler.py", "engine.py", "matchers.py", "config.py", "classify.py"])
 
   bucket       = module.foundation.assets_bucket
   key          = "lambda-src/tier1/${each.value}"
@@ -592,6 +806,20 @@ resource "aws_s3_object" "agent_source" {
   key          = "lambda-src/agent/${each.value}"
   source       = "${path.root}/../../../agent-blueprint/recon-agent/${each.value}"
   etag         = filemd5("${path.root}/../../../agent-blueprint/recon-agent/${each.value}")
+  content_type = "text/x-python"
+}
+
+# Publish the egress-gateway REQUEST interceptor for the Config tab's READ-ONLY viewer. This is the
+# code that actually refuses a ledger write (provenance + low-confidence-extraction guards), and it
+# runs on EVERY tool call regardless of which tier or backend is active — so unlike the two viewers
+# above it is not gated on a toggle in the UI. Tracks the repo and re-syncs each apply.
+resource "aws_s3_object" "guard_source" {
+  for_each = toset(["handler.py"])
+
+  bucket       = module.foundation.assets_bucket
+  key          = "lambda-src/guard/${each.value}"
+  source       = "${path.root}/../../../backend/gateway_interceptor/${each.value}"
+  etag         = filemd5("${path.root}/../../../backend/gateway_interceptor/${each.value}")
   content_type = "text/x-python"
 }
 
@@ -618,26 +846,101 @@ module "graph" {
 module "idp_hook" {
   source = "../../modules/idp-hook"
 
-  name_prefix            = var.name_prefix
-  lambda_zip             = module.lambda_package.zip_path
-  lambda_source_hash     = module.lambda_package.source_code_hash
-  items_table            = module.foundation.items_table
-  items_table_arn        = module.foundation.items_table_arn
-  recon_domain           = var.recon_domain
+  name_prefix        = var.name_prefix
+  lambda_zip         = module.lambda_package.zip_path
+  lambda_source_hash = module.lambda_package.source_code_hash
+  # The hook's only write target. It stores extracted documents as EVIDENCE and has no grant on
+  # items, cases or audit — an extracted document must not create a case.
+  notices_table          = module.notice_store.notices_table_name
+  notices_table_arn      = module.notice_store.notices_table_arn
   assets_bucket          = module.foundation.assets_bucket
   assets_bucket_arn      = module.foundation.assets_bucket_arn
   vpc_subnet_ids         = local.vpc_subnets
   vpc_security_group_ids = local.vpc_sgs
+}
 
-  # Reprocess re-drive: a NEW IDP run of an already-ingested document re-opens + re-investigates
-  # its case (see the IDP reprocess/re-drive design record).
-  cases_table               = module.foundation.cases_table
-  cases_table_arn           = module.foundation.cases_table_arn
-  audit_table               = module.foundation.audit_table
-  audit_table_arn           = module.foundation.audit_table_arn
-  agent_worker_function_arn = module.tier1.worker_function_arn
-  agent_runtime_arn         = module.recon_agent.runtime_arn
-  reprocess_cap             = var.reprocess_cap
+# Splits an uploaded .msg/.eml into documents the two destinations can read. Invoked only by the
+# console's upload route -- no trigger, no schedule.
+module "email_preprocess" {
+  source = "../../modules/email-preprocess"
+
+  name_prefix            = var.name_prefix
+  assets_bucket          = module.foundation.assets_bucket
+  assets_bucket_arn      = module.foundation.assets_bucket_arn
+  lambda_zip             = module.lambda_package.zip_path
+  lambda_source_hash     = module.lambda_package.source_code_hash
+  vpc_subnet_ids         = local.vpc_subnets
+  vpc_security_group_ids = local.vpc_sgs
+}
+
+# Extracted counterparty notices — the ACTUAL side, backing the `notices` Gateway tool. Deliberately
+# streamless: an extracted document is reference data and must never create a recon case.
+module "notice_store" {
+  source = "../../modules/notice-store"
+
+  name_prefix            = var.name_prefix
+  lambda_zip             = module.lambda_package.zip_path
+  lambda_source_hash     = module.lambda_package.source_code_hash
+  vpc_subnet_ids         = local.vpc_subnets
+  vpc_security_group_ids = local.vpc_sgs
+}
+
+# Who the platform may email, and in what words -- operator-maintained from the Config tab.
+# Also streamless, for the same reason as notice_store: a recipient list must not create a case.
+module "contact_store" {
+  source = "../../modules/contact-store"
+
+  name_prefix            = var.name_prefix
+  lambda_zip             = module.lambda_package.zip_path
+  lambda_source_hash     = module.lambda_package.source_code_hash
+  vpc_subnet_ids         = local.vpc_subnets
+  vpc_security_group_ids = local.vpc_sgs
+  # The LAST place this variable is read. It seeds the first internal-notification contact at
+  # create time and nothing consumes it at runtime any more -- the senders get a contact ID and
+  # look the address up. See the variable's own description for why editing it later is a no-op.
+  notify_email = var.notify_email
+}
+
+# What an operator may upload, and where each kind of upload goes (extracted into a notice, or
+# ingested into the knowledge base as guidance). Config-tab CRUD; no Lambda and no agent tool --
+# nothing the agent does depends on this table, it describes the intake side.
+module "workflow_types" {
+  source = "../../modules/workflow-types"
+
+  name_prefix = var.name_prefix
+  # Empty by default, which skips the extraction seed. See the variable: this deployment cannot
+  # discover IDP's real configuration version names, so a placeholder here would produce the exact
+  # silent misextraction the route/version pairing exists to prevent.
+  seed_extraction_config_version = var.seed_extraction_config_version
+}
+
+module "upload_audit" {
+  source      = "../../modules/upload-audit"
+  name_prefix = var.name_prefix
+}
+
+# Starts a Bedrock ingestion job after a knowledge-base upload lands, and records whether the
+# document actually got indexed. Without it a KB-routed upload sits in the bucket forever and
+# consult-guidance never finds it, with no error anywhere -- the same failure the seed-corpus
+# ingestion note below warns about, arriving one upload at a time instead of once at deploy.
+module "kb_ingest_trigger" {
+  source = "../../modules/kb-ingest-trigger"
+
+  name_prefix       = var.name_prefix
+  assets_bucket     = module.foundation.assets_bucket
+  assets_bucket_arn = module.foundation.assets_bucket_arn
+  # The same managed KB the seed corpus is ingested into, from the one entry in
+  # local.kb_ingest_targets. Reading the module outputs directly rather than the local, because the
+  # local is keyed for the null_resource's state addresses and is not a lookup table.
+  kb_id                   = module.recon_agent.managed_kb_id
+  kb_data_source_id       = module.recon_agent.managed_kb_data_source_id
+  uploads_table_name      = module.upload_audit.uploads_table_name
+  uploads_table_arn       = module.upload_audit.uploads_table_arn
+  uploads_table_index_arn = module.upload_audit.uploads_table_index_arn
+  lambda_zip              = module.lambda_package.zip_path
+  lambda_source_hash      = module.lambda_package.source_code_hash
+  vpc_subnet_ids          = local.vpc_subnets
+  vpc_security_group_ids  = local.vpc_sgs
 }
 
 # Mocked general ledger (S3 + Athena) backing the deterministic Tier-1 lookup and the

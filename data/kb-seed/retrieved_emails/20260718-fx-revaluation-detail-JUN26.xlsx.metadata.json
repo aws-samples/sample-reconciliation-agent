@@ -1,0 +1,59 @@
+{
+  "metadataAttributes": {
+    "doc_type": {
+      "value": { "type": "STRING", "stringValue": "email_attachment" },
+      "includeForEmbedding": false
+    },
+    "break_class": {
+      "value": { "type": "STRING_LIST", "stringListValue": ["tolerance"] },
+      "includeForEmbedding": true
+    },
+    "skill": {
+      "value": {
+        "type": "STRING_LIST",
+        "stringListValue": [
+          "document-cross-reference",
+          "ledger-status-resolution"
+        ]
+      },
+      "includeForEmbedding": false
+    },
+    "effective_date": {
+      "value": { "type": "NUMBER", "numberValue": 20260718 },
+      "includeForEmbedding": false
+    },
+    "message_id": {
+      "value": { "type": "STRING", "stringValue": "MSG-20260718-FXQ4471" },
+      "includeForEmbedding": false
+    },
+    "sender": {
+      "value": {
+        "type": "STRING",
+        "stringValue": "settlements@coastline-trust.example"
+      },
+      "includeForEmbedding": false
+    },
+    "receiver": {
+      "value": {
+        "type": "STRING_LIST",
+        "stringListValue": ["recon-team@loanmesa.example"]
+      },
+      "includeForEmbedding": false
+    },
+    "subject": {
+      "value": {
+        "type": "STRING",
+        "stringValue": "RE: June FX revaluation — small USD differences on four trades"
+      },
+      "includeForEmbedding": true
+    },
+    "received_date": {
+      "value": { "type": "NUMBER", "numberValue": 20260718 },
+      "includeForEmbedding": false
+    },
+    "attachment_format": {
+      "value": { "type": "STRING", "stringValue": "xlsx" },
+      "includeForEmbedding": false
+    }
+  }
+}

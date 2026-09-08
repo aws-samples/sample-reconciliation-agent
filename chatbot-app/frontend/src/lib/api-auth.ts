@@ -22,6 +22,7 @@
  */
 
 import { createRemoteJWKSet, jwtVerify } from "jose";
+import { NextResponse } from "next/server";
 
 /** How the BFF is configured to authorize callers. */
 export type ApiAuthMode = "okta" | "entra" | "anonymous" | "misconfigured";
@@ -39,8 +40,34 @@ export interface ApiAuthConfig {
 }
 
 export type AuthResult =
-  | { ok: true; mode: ApiAuthMode; subject: string }
+  | { ok: true; mode: ApiAuthMode; subject: string; groups: string[] }
   | { ok: false; status: 401 | 503; message: string };
+
+/**
+ * Read the caller's group memberships out of a verified token payload.
+ *
+ * Which claim carries them is a per-deployment fact, not a constant: Okta puts them in `groups` when
+ * the app is configured to release them, Entra uses `groups` or `roles` depending on how the app
+ * registration is set up, and an app that was never configured to release them at all sends none. So
+ * the claim NAME comes from the environment and an absent claim yields an empty list — the caller is
+ * simply in no groups, which every consumer must already handle.
+ *
+ * Read only from a payload `jwtVerify` has already returned, never from an unverified token: a group
+ * list is an authorization input, and the whole point is that the caller could not have written it.
+ *
+ * @param payload the verified JWT payload.
+ * @param env process environment to read `AUTH_GROUPS_CLAIM` from (injected in tests).
+ * @returns the caller's groups, or `[]` when the claim is absent or not a list of strings.
+ */
+function groupsFrom(
+  payload: Record<string, unknown>,
+  env: Record<string, string | undefined> = process.env,
+): string[] {
+  const claim = env.AUTH_GROUPS_CLAIM || "groups";
+  const raw = payload[claim];
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((g): g is string => typeof g === "string");
+}
 
 /** Drop a trailing slash so `${issuer}/v1/keys` never doubles up. */
 function trimSlash(value: string): string {
@@ -197,7 +224,16 @@ export async function authorizeRequest(
     };
   }
   if (config.mode === "anonymous") {
-    return { ok: true, mode: "anonymous", subject: "anonymous" };
+    // `RECON_ALLOW_ANONYMOUS_API=true` already grants the whole BFF, so withholding the admin group
+    // here would only make the Config tab untestable locally without pretending to secure anything.
+    // The group is named from the environment so a local run and the deployment agree on the string.
+    const admin = process.env.RECON_ADMIN_GROUP;
+    return {
+      ok: true,
+      mode: "anonymous",
+      subject: "anonymous",
+      groups: admin ? [admin] : [],
+    };
   }
 
   const header = request.headers.get("authorization") ?? "";
@@ -223,7 +259,12 @@ export async function authorizeRequest(
     if (!payload.sub) {
       return { ok: false, status: 401, message: "token has no sub claim" };
     }
-    return { ok: true, mode: config.mode, subject: payload.sub };
+    return {
+      ok: true,
+      mode: config.mode,
+      subject: payload.sub,
+      groups: groupsFrom(payload),
+    };
   } catch (error) {
     const status = statusForVerifyError(error);
     const detail = error instanceof Error ? error.message : String(error);
@@ -236,4 +277,29 @@ export async function authorizeRequest(
           : `could not verify token (identity provider unreachable): ${detail}`,
     };
   }
+}
+
+/**
+ * The authenticated principal for a write route, or the response explaining why there is none.
+ *
+ * `src/proxy.ts` has already rejected unauthenticated `/api/recon/*` by the time a handler runs, so
+ * this rarely fails — it exists to NAME the actor on rows that record who changed them. Deriving that
+ * name any other way (a header the client sets, a default like "operator") would produce an audit
+ * trail that looks authoritative and is not, which is worse than having none.
+ *
+ * @param req - the incoming request.
+ * @returns `{ actor }` on success, or `{ error }` holding the response to return unchanged.
+ */
+export async function requireActor(
+  req: Request,
+): Promise<{ actor: string } | { error: NextResponse }> {
+  const auth = await authorizeRequest(req);
+  if (!auth.ok)
+    return {
+      error: NextResponse.json(
+        { error: auth.message },
+        { status: auth.status },
+      ),
+    };
+  return { actor: auth.subject };
 }

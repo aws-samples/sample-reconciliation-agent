@@ -110,3 +110,76 @@ def test_tier1_enabled_by_default_auto_clears(monkeypatch):
     monkeypatch.setattr("backend.tier1.handler.tier1_enabled", lambda: True)
     out = handle(_stream_event(_ITEM), None)
     assert out["results"][0]["status"] == "AUTO_CLEARED"
+
+
+@mock_aws
+def test_escalated_case_carries_the_reason_and_the_break_type():
+    """Both `tier1_*` keys are on the case at PENDING time, from one writer.
+
+    The classification is plain Python (no S3, no network), which is what lets it run here on the
+    stream shard instead of one hop later in the agent-worker — and running here is what puts it on
+    the case record at open time, with no follow-up UpdateItem.
+    """
+    _make_tables()
+    item = dict(_ITEM, item_id="i-3")
+    item["sides"] = [
+        {"name": "bank", "attributes": {"amount": "100.00"}},
+        {"name": "ledger", "attributes": {"amount": "105.00"}},
+    ]
+    out = handle(_stream_event(item), None)
+    assert out["results"][0]["reason"] == "tolerance_miss"
+
+    stored = boto3.resource("dynamodb", region_name="us-east-1").Table("recon-cases")
+    attributes = stored.get_item(Key={"item_id": "i-3"})["Item"]["item"]["attributes"]
+    assert attributes["tier1_escalation_reason"] == "tolerance_miss"
+    assert attributes["tier1_break_type"] == "record-match-review"
+
+
+@mock_aws
+def test_an_unclassifiable_escalation_omits_the_break_type():
+    """One side is a shape no rule claims — escalate unclassified rather than guess.
+
+    The key must be ABSENT, not empty: the agent branches on presence, and "" would name a class no
+    skill can satisfy.
+    """
+    _make_tables()
+    item = dict(_ITEM, item_id="i-5")
+    item["sides"] = [{"name": "bank", "attributes": {"amount": "100.00"}}]
+    handle(_stream_event(item), None)
+
+    stored = boto3.resource("dynamodb", region_name="us-east-1").Table("recon-cases")
+    attributes = stored.get_item(Key={"item_id": "i-5"})["Item"]["item"]["attributes"]
+    assert attributes["tier1_escalation_reason"] == "side_count"
+    assert "tier1_break_type" not in attributes
+
+
+@mock_aws
+def test_disabled_tier1_names_itself_as_the_reason(monkeypatch):
+    """A toggled-off deterministic tier is not the same escalation as a real tolerance miss."""
+    _make_tables()
+    monkeypatch.setattr("backend.tier1.handler.tier1_enabled", lambda: False)
+    out = handle(_stream_event(dict(_ITEM, item_id="i-4")), None)
+    assert out["results"][0]["reason"] == "tier1_disabled"
+
+
+@mock_aws
+def test_disabled_tier1_also_stops_classifying(monkeypatch):
+    """The kill switch means Tier-1 contributes NOTHING, not "nothing but a hint".
+
+    Someone debugging why the agent followed a particular skill needs a way to take Tier-1 out of the
+    picture entirely; leaving the class stamped would make the toggle misleading at exactly the
+    moment it is being relied on.
+    """
+    _make_tables()
+    monkeypatch.setattr("backend.tier1.handler.tier1_enabled", lambda: False)
+    item = dict(_ITEM, item_id="i-6")
+    item["sides"] = [
+        {"name": "bank", "attributes": {"amount": "100.00"}},
+        {"name": "ledger", "attributes": {"amount": "100.00"}},
+    ]
+    handle(_stream_event(item), None)
+
+    stored = boto3.resource("dynamodb", region_name="us-east-1").Table("recon-cases")
+    attributes = stored.get_item(Key={"item_id": "i-6"})["Item"]["item"]["attributes"]
+    assert attributes["tier1_escalation_reason"] == "tier1_disabled"
+    assert "tier1_break_type" not in attributes

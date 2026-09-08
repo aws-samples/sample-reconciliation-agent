@@ -15,11 +15,16 @@ import { Eyebrow, Panel, Placeholder } from "@/components/recon/ui";
 const NEW_TEMPLATE = `---
 name: new-skill-name
 description: One line describing when the agent uses this investigation procedure.
-tools: [search_ledger, search_guidance]
+tools: [general-ledger___search_ledger, managed-kb___Retrieve]
 model:
 ---
 Describe the investigation procedure the agent should follow. Reference the gateway tools it
-should call. Conclude with reasoning, a confidence in [0,1], and the evidence relied on.
+should call by their FULL prefixed names, as above — the harness backend accepts nothing else.
+The knowledge-base read is managed-kb___Retrieve (Bedrock's own Retrieve operation, reached
+through a managed connector); the container runtime also offers it as search_guidance. Conclude
+with your reasoning and the evidence relied on. Do NOT ask the agent to rate its own certainty —
+submit_proposal has no field for a self-reported number, and the platform scores the proposal by
+counting which of this skill's required steps came back with data.
 `;
 
 export default function SkillsManagerPage() {

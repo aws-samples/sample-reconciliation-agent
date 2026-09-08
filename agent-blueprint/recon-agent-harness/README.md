@@ -6,18 +6,16 @@ per-session microVM — no container, no orchestration code). A/B-selectable aga
 container runtime via the `agent_backend` Terraform variable + the `AGENT_BACKEND` env on the
 agent-worker Lambda.
 
-See the harness-blueprint design record (kept outside this repository).
-
 ## Task 1 spike findings (2026-07-23, account `0264…8683` / profile `huthmac` / us-east-1)
 
 Run `python infra/scripts/spike_harness.py` (safe, read-only) to reproduce.
 
-| Question                                                                         | Finding                                                                                                                                                                                                                                                                                                                                            |
-| -------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Harness API in pinned botocore?                                                  | **Yes** — botocore **1.43.48** `bedrock-agentcore-control` has `CreateHarness`/`GetHarness`/`UpdateHarness`/`DeleteHarness`/`ListHarnesses` (+ endpoint/version ops); data-plane `bedrock-agentcore` has `InvokeHarness`. Terraform-first provisioning via `terraform_data` + boto3 `manage_harness.py` is viable (no AWS-CLI version dependence). |
-| Harness endpoint available in us-east-1?                                         | **Yes** — `ListHarnesses` succeeds (0 existing). No beta-endpoint override needed.                                                                                                                                                                                                                                                                 |
-| Sonnet 5 Bedrock model id?                                                       | Base `anthropic.claude-sonnet-5`; on-demand inference profiles `us.anthropic.claude-sonnet-5` and `global.anthropic.claude-sonnet-5`. **Use `us.anthropic.claude-sonnet-5`** (cross-region on-demand) as `harness_model_id`.                                                                                                                       |
-| Exact IAM action for harness `awsIam` outbound → AWS_IAM-inbound egress gateway? | **`bedrock-agentcore:InvokeGateway`** on the gateway ARN (`arn:aws:bedrock-agentcore:<region>:<acct>:gateway/<id>`). Authorization is gateway-level, not per-target. Resolved during the ingress caller-switch (same action the Tier-1 worker now uses); confirmed against AWS docs (gateway-inbound-auth / resource-based-policies).              |
+| Question                                                                         | Finding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Harness API in pinned botocore?                                                  | **Yes** — botocore **1.43.48** `bedrock-agentcore-control` has `CreateHarness`/`GetHarness`/`UpdateHarness`/`DeleteHarness`/`ListHarnesses` (+ endpoint/version ops); data-plane `bedrock-agentcore` has `InvokeHarness`. Terraform-first provisioning via `terraform_data` + a boto3 script was viable (no AWS-CLI version dependence), and is what the spike concluded. **Superseded:** the harness is now `AWS::BedrockAgentCore::Harness` inside an `aws_cloudformation_stack` (`infra/modules/recon-agent-harness`), so an apply needs no interpreter and no boto3 at all. |
+| Harness endpoint available in us-east-1?                                         | **Yes** — `ListHarnesses` succeeds (0 existing). No beta-endpoint override needed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Sonnet 5 Bedrock model id?                                                       | Base `anthropic.claude-sonnet-5`; on-demand inference profiles `us.anthropic.claude-sonnet-5` and `global.anthropic.claude-sonnet-5`. **Use `us.anthropic.claude-sonnet-5`** (cross-region on-demand) as `harness_model_id`.                                                                                                                                                                                                                                                                                                                                                    |
+| Exact IAM action for harness `awsIam` outbound → AWS_IAM-inbound egress gateway? | **`bedrock-agentcore:InvokeGateway`** on the gateway ARN (`arn:aws:bedrock-agentcore:<region>:<acct>:gateway/<id>`). Authorization is gateway-level, not per-target. Resolved during the ingress caller-switch (same action the Tier-1 worker now uses); confirmed against AWS docs (gateway-inbound-auth / resource-based-policies).                                                                                                                                                                                                                                           |
 
 ### Resolved during implementation (all three were open at Task 1)
 
@@ -32,14 +30,13 @@ What they resolved to:
   `backend/harness_agent/worker.py` (`_toolresult_message`), with the reason recorded at the site.
 - **Skill-source URI semantics** — **per-skill directory**, not a prefix: the skills list is
   built from comma-separated `s3://…/skills/<name>/` URIs
-  (`infra/modules/recon-agent-harness/manage_harness.py:_skills`). Note the turn-budget
+  (`local.skill_uris`, `infra/modules/recon-agent-harness/main.tf:42`). Note the turn-budget
   consequence: skill loads consume turns under the agent-skills feature, so the harness max-turns
   default was raised 12 → 20 (`harness_config.py`).
 - **Gateway client-context field names for write-tool provenance** — provenance is no longer a
   Lambda-side discriminator problem. It moved to the gateway **REQUEST interceptor**
   (`backend/gateway_interceptor/`), which checks the written reference against the persisted
-  `proposed_action.reference`; the write Lambda keeps only the status allowlist. See
-  the gateway trust-layer design record.
+  `proposed_action.reference`; the write Lambda keeps only the status allowlist.
 
 ## A/B selector
 
@@ -55,11 +52,12 @@ orthogonal; flipping `agent_backend` is instant A/B + rollback.
 
 - **`GATEWAY_TOOLS`** — a _description_ of what the egress gateway exposes. Its only consumer is a
   naming comment in `backend/harness_agent/stream.py`. It enforces nothing.
-- **`ALLOWED_TOOLS`** — the _enforced_ list, passed to `CreateHarness` as `allowedTools` by
-  `manage_harness.py`. It is a strict subset: anything in `GATEWAY_TOOLS` but not here is never
-  offered to the model.
+- **`ALLOWED_TOOLS`** — the _enforced_ list, reaching the harness as the CloudFormation resource's
+  `AllowedTools` (`infra/modules/recon-agent-harness/main.tf:112`) via the committed
+  `harness_config.json` export. It is a strict subset: anything in `GATEWAY_TOOLS` but not here is
+  never offered to the model.
 
-The model gets four reads (`search_ledger`, `search_guidance`, `get_results`,
+The model gets four reads (`search_ledger`, the managed KB's `Retrieve`, `get_results`,
 `search_correspondence`) and `submit_proposal`. Nothing it can call writes anything or leaves the
 operator. Three things are withheld, for three different reasons:
 
@@ -72,6 +70,33 @@ operator. Three things are withheld, for three different reasons:
 - `microsoft-graph___listSharedMailboxMessages` — a **technical** blocker: the raw op is on the
   gateway, but **the schema the gateway advertises for it** can never be offered to a model (see
   the `correspondence-search` bullet below).
+
+### The KB read has no wrapper on this backend
+
+`managed-kb___Retrieve` is the AgentCore Gateway's managed `bedrock-knowledge-bases` connector, so
+what the model sees is Bedrock's Retrieve API itself: **nested** arguments
+(`retrievalQuery.text`, `retrievalConfiguration.managedSearchConfiguration.{filter,numberOfResults}`)
+and a raw Bedrock metadata filter. The container runtime hides all of that behind a typed Python
+wrapper (`strands_investigator.build_guidance_filter`) that validates the facets and picks the right
+operator per attribute type. **There is no equivalent here** — the model composes the filter JSON
+itself, from prose.
+
+That makes `system-prompt.md` load-bearing rather than explanatory. It carries the nested shape, a
+worked `andAll` example, and the operator each attribute type needs. The mistakes do **not** all fail
+the same way, and the split matters — verified live 2026-08-27 against `managed-kb___Retrieve`:
+
+| Mistake                                               | What actually happens                                                                                                                                             |
+| ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `equals` on a `STRING_LIST` (`break_class`, `skill`)  | **Silent.** `{"retrievalResults": []}`, HTTP 200, nothing raised or logged. The model reads it as "no guidance exists for this break". This is the dangerous one. |
+| A quoted `NUMBER` (`"20260101"` for `effective_date`) | **Loud.** `DependencyFailedException` — _"The filter value type provided isn't supported for the given operation: GREATER_THAN_OR_EQUALS."_                       |
+| `stringContains` / `startsWith`                       | **Loud.** Not supported on a managed KB; the call is rejected.                                                                                                    |
+| A one-element `andAll`                                | **Loud.** The API requires ≥2 members.                                                                                                                            |
+
+So only the `STRING_LIST` case is silent — but it is also the easiest to write and the one that hides
+`autonomy-and-escalation.md`, so the prompt leads with it. If you change the filterable attributes, the two places
+to update are that prompt and `local.kb_filter_description` in
+`infra/modules/recon-agent/kb-connector-target.tf` — the target's parameter description, which is the
+only other thing the model ever reads about the filter.
 
 Both mailbox skills still run here. How each one relates to Graph is worth knowing:
 
@@ -128,6 +153,6 @@ recommendation can never paraphrase the `submit_proposal` field list into the sh
 
 ## AgentCore-CLI dev loop (optional)
 
-Terraform (`manage_harness.py`) is the source of truth for the deployed harness. For rapid local
+Terraform (`infra/modules/recon-agent-harness`) is the source of truth for the deployed harness. For rapid local
 iteration on the system prompt / tools, the AgentCore CLI can create a scratch harness — but do
 not point production traffic at a CLI-managed harness; re-apply Terraform to converge.

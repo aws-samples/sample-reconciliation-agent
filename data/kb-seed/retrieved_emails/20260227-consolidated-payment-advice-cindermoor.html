@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>
+      Consolidated payment advice — one wire, 3 facilities — Cindermoor
+      Logistics
+    </title>
+  </head>
+  <body>
+    <h1>
+      Consolidated payment advice — one wire, 3 facilities — Cindermoor
+      Logistics
+    </h1>
+
+    <table>
+      <tbody>
+        <tr>
+          <th>From</th>
+          <td>
+            Meridian Loan Operations &lt;loan.ops@meridian-agent.example&gt;
+          </td>
+        </tr>
+        <tr>
+          <th>To</th>
+          <td>loan-ops@loanmesa.example</td>
+        </tr>
+        <tr>
+          <th>Cc</th>
+          <td>recon-team@loanmesa.example</td>
+        </tr>
+        <tr>
+          <th>Date</th>
+          <td>Friday, 27 February 2026 15:40 (UTC)</td>
+        </tr>
+        <tr>
+          <th>Subject</th>
+          <td>
+            Consolidated payment advice — one wire, 3 facilities — Cindermoor
+            Logistics
+          </td>
+        </tr>
+        <tr>
+          <th>Message-ID</th>
+          <td>MSG-20260227-CPA26322</td>
+        </tr>
+        <tr>
+          <th>Attachments</th>
+          <td>
+            20260227-consolidated-payment-advice-cindermoor.pdf,
+            20260227-facility-allocation-cindermoor.xlsx
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>Lenders,</p>
+
+    <p>
+      Attached is the consolidated payment advice for Tidelantern Senior Loan
+      Fund, LP on the Cindermoor Logistics Holdings, Inc. credit agreement,
+      payment due 2026-03-02. This is a
+      <strong>single wire of USD 26,322.73</strong> covering three components
+      across three facilities. It will not tie to any individual facility
+      position.
+    </p>
+
+    <p>Components, as per the attached allocation schedule:</p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Facility</th>
+          <th>Activity</th>
+          <th>Identifier</th>
+          <th>Cash amount (USD)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Revolving Credit Facility $200MM</td>
+          <td>Rollover — Interest</td>
+          <td>SL-204833</td>
+          <td>4,182.55</td>
+        </tr>
+        <tr>
+          <td>CINDERMOOR LOGISTICS TL-A $160MM</td>
+          <td>Receive Accrued Interest — Interest</td>
+          <td>LoanXid: LX223061XXXX1</td>
+          <td>9,640.18</td>
+        </tr>
+        <tr>
+          <td>CINDERMOOR LOGISTICS TL-B $250MM</td>
+          <td>Early CME Term SOFR Paydown — Principal</td>
+          <td>SL-99001</td>
+          <td>12,500.00</td>
+        </tr>
+        <tr>
+          <td><strong>Total</strong></td>
+          <td></td>
+          <td></td>
+          <td><strong>26,322.73</strong></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>
+      Interest on the two interest components is calculated Actual/360 for the
+      period 2025-11-30 through 2026-02-28 (90 days). Funds are remitted through
+      Tarnsmoor Trust Bank, N.A. New York (STBKUS33) to account ****7305.
+    </p>
+
+    <p>
+      Three things that have caused allocation errors on previous consolidated
+      advices and are worth calling out:
+    </p>
+
+    <ol>
+      <li>
+        <strong>The wire reference does not identify a facility.</strong> The
+        advice quotes
+        <em>CINDERMOOR LOGISTICS HOLDINGS, INC. $850MM 3/15/2021</em> — that is
+        the credit agreement, and all three components carry it. Matching this
+        wire on its reference returns three candidates by construction. The
+        per-facility <strong>Cash Amount</strong> is the discriminator, not the
+        reference.
+      </li>
+      <li>
+        The TL-B component is a <strong>principal paydown</strong>, not
+        interest, even though it is remitted in the same wire as two interest
+        payments. It must not be included in any interest accrual
+        reconciliation.
+      </li>
+      <li>
+        The advice prints a <strong>Total Interest Amount</strong> beside each
+        Cash Amount — 470,250.00 on the revolver and 8,265,552.00 on TL-A. Those
+        are facility-wide figures for all lenders. Only the Cash Amount is ours.
+        Booking a Total Interest Amount as a receivable is the error that
+        produced the four-figure-to-seven-figure mismatch on the November
+        advice.
+      </li>
+    </ol>
+
+    <p>
+      Queries quoting the payment due date and facility to
+      loan.ops@meridian-agent.example.
+    </p>
+
+    <p>
+      Meridian Agency Services LLC<br />
+      Loan Operations<br />
+      loan.ops@meridian-agent.example
+    </p>
+  </body>
+</html>

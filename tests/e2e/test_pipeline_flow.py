@@ -16,7 +16,7 @@ from agent import persist_proposal, reconcile_item
 
 from backend.intake.handler import handle as intake_handle
 from backend.recon_core.cases import CaseStore
-from backend.recon_core.schema import Proposal, ReasoningStep
+from backend.recon_core.schema import InvestigationResult, Proposal, ReasoningStep
 from backend.recon_core.status import CaseStatus
 from backend.status_tool.handler import handle as status_tool
 from backend.tier1.handler import handle as tier1_handle
@@ -70,7 +70,10 @@ def _stream_event_from_items():
     items = boto3.resource("dynamodb", region_name="us-east-1").Table("recon-items").scan()["Items"]
     return {
         "Records": [
-            {"eventName": "INSERT", "dynamodb": {"NewImage": {k: ser.serialize(v) for k, v in it.items()}}}
+            {
+                "eventName": "INSERT",
+                "dynamodb": {"NewImage": {k: ser.serialize(v) for k, v in it.items()}},
+            }
             for it in items
         ]
     }
@@ -98,21 +101,43 @@ def _run_flow(*, amount_a: str, amount_b: str) -> str:
     result = reconcile_item(
         payload,
         _catalog=[
-            {"name": "timing", "confidence_threshold": 0.5, "severity": "LOW",
-             "description": "timing", "deterministic_eligible": False}
+            {
+                "name": "timing",
+                "confidence_threshold": 0.5,
+                "severity": "LOW",
+                "description": "timing",
+                "deterministic_eligible": False,
+            }
         ],
-        _classify=lambda c: ("timing", 0.9, "value date off by 1d"),
-        _investigate=lambda it, s: (
-            "apply to fund X",
-            0.83,
-            [ReasoningStep(skill="record-match-review", confidence=0.83,
-                           reasoning="amounts differ", evidence=["bank", "ledger"])],
+        _classify=lambda c: ("timing", "value date off by 1d"),
+        _investigate=lambda it, s: InvestigationResult(
+            resolution="apply to fund X",
+            steps=[
+                ReasoningStep(
+                    skill="record-match-review",
+                    reasoning="amounts differ",
+                    evidence=["bank", "ledger"],
+                )
+            ],
         ),
         _skills=["record-match-review"],
     )
-    persist_proposal(cases=cases, proposal=Proposal(**{k: result[k] for k in (
-        "item_id", "class_id", "classification_confidence", "classification_reasoning",
-        "resolution", "confidence", "steps")}))
+    persist_proposal(
+        cases=cases,
+        proposal=Proposal(
+            **{
+                k: result[k]
+                for k in (
+                    "item_id",
+                    "class_id",
+                    "classification_reasoning",
+                    "resolution",
+                    "confidence",
+                    "steps",
+                )
+            }
+        ),
+    )
 
     stored = cases.get("i-1")
     assert stored["classification_reasoning"] == "value date off by 1d"

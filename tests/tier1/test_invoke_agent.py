@@ -91,7 +91,7 @@ def test_dispatch_serializes_decimal_attributes(monkeypatch):
     monkeypatch.setattr(
         "backend.tier1.invoke_agent.boto3.client", lambda service: _FakeLambda()
     )
-    # Uses the REAL _dispatch (json.dumps path) — this crashed before the fix.
+    # Uses the REAL _dispatch (json.dumps path), which is where a raw Decimal blows up.
     invoke_recon_agent(agent_arn="arn:aws:...:runtime/recon", item=item, cases=cases)
     import json as _json
 

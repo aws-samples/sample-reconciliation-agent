@@ -21,7 +21,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 process.env.CASES_TABLE = "recon-dev-cases";
 process.env.GRAPH_MAILBOX = "shared@operator.example";
-process.env.RECON_NOTIFY_EMAIL = "ops@operator.example";
+// An ID, not an address. The route holds no address at all — it resolves this id against the contacts
+// table on every send, which is what the mock below stands in for.
+process.env.NOTIFY_CONTACT_ID = "notify-primary";
 process.env.RECON_GATEWAY_URL = "https://gw.example/mcp";
 process.env.EMAIL_CONFIRMATION_TOKEN = "tok-123";
 
@@ -29,6 +31,7 @@ const ddbSend = vi.fn();
 const callGatewayTool = vi.fn();
 const authorizeRequest = vi.fn();
 const recordLessonMemoryEvent = vi.fn();
+const resolveContactAddress = vi.fn();
 
 vi.mock("@aws-sdk/client-dynamodb", () => ({
   DynamoDBClient: vi.fn().mockImplementation(() => ({ send: ddbSend })),
@@ -42,6 +45,19 @@ vi.mock("@/lib/gatewayMcp", () => ({ callGatewayTool }));
 vi.mock("@/lib/api-auth", () => ({ authorizeRequest }));
 vi.mock("@/lib/reconMemory", () => ({ recordLessonMemoryEvent }));
 vi.mock("@/lib/rescoreAgreement", () => ({ rescoreAgreement: vi.fn() }));
+// Mocked rather than left real: the real reader would issue its GetItem through the DynamoDB mock
+// above and read back whichever case row was last seeded, so the notification's recipient would
+// silently depend on unrelated fixtures. A real class for ContactUnavailable because a deactivated
+// contact has to travel as a notification failure, not as a 502.
+vi.mock("@/lib/contactStore", () => ({
+  ContactUnavailable: class ContactUnavailable extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = "ContactUnavailable";
+    }
+  },
+  resolveContactAddress,
+}));
 vi.mock("@/lib/emailDraftStore", () => ({
   DraftConflict: class DraftConflict extends Error {},
   editDraft: vi.fn(),
@@ -108,6 +124,7 @@ function statusTransitions(verdicts: boolean[]): void {
 beforeEach(() => {
   vi.clearAllMocks();
   authorizeRequest.mockResolvedValue({ ok: true, subject: "analyst@x.com" });
+  resolveContactAddress.mockResolvedValue("ops@operator.example");
   callGatewayTool.mockResolvedValue({
     structuredContent: { transitioned: true },
   });
@@ -122,6 +139,23 @@ describe("POST /api/recon/cases/[id] — approve, resolve, notify", () => {
     // No `notification_error` key at all on the happy path — the UI branches on its presence.
     expect(await res.json()).toEqual({ status: "RESOLVED" });
     expect(transitions()).toEqual(["APPROVED", "RESOLVED"]);
+    // The recipient came from resolving the configured contact id as an internal_notification, not
+    // from any address the route holds. A `counterparty` kind here would let internal status mail
+    // reach an outside party.
+    expect(resolveContactAddress).toHaveBeenCalledWith({
+      contactId: "notify-primary",
+      kind: "internal_notification",
+    });
+    const [, mail] = callGatewayTool.mock.calls.find(
+      ([, args]) =>
+        (args as Record<string, unknown>).sendPurpose === "notification",
+    ) as [
+      string,
+      { message: { toRecipients: { emailAddress: { address: string } }[] } },
+    ];
+    expect(mail.message.toRecipients).toEqual([
+      { emailAddress: { address: "ops@operator.example" } },
+    ]);
   });
 
   it("still resolves when the resolution notification fails, and says so", async () => {
@@ -205,11 +239,11 @@ describe("POST /api/recon/cases/[id] — approve, resolve, notify", () => {
     ).toHaveLength(0);
   });
 
-  it("resolves without a notification when the mail is not configured", async () => {
-    // A deployment with no notify address is a supported configuration, and it must not be the
+  it("resolves without a notification when no notify contact is configured", async () => {
+    // A deployment that seeded no contact is a supported configuration, and it must not be the
     // reason a case fails to close.
-    const notify = process.env.RECON_NOTIFY_EMAIL;
-    process.env.RECON_NOTIFY_EMAIL = "";
+    const notify = process.env.NOTIFY_CONTACT_ID;
+    process.env.NOTIFY_CONTACT_ID = "";
     vi.resetModules();
     const { POST: freshPost } =
       await import("@/app/api/recon/cases/[id]/route");
@@ -231,6 +265,35 @@ describe("POST /api/recon/cases/[id] — approve, resolve, notify", () => {
         ([, args]) => (args as Record<string, unknown>).sendPurpose,
       ),
     ).toHaveLength(0);
-    process.env.RECON_NOTIFY_EMAIL = notify;
+    expect(resolveContactAddress).not.toHaveBeenCalled();
+    process.env.NOTIFY_CONTACT_ID = notify;
+  });
+
+  it("resolves and reports the reason when the notify contact was deactivated", async () => {
+    // Deactivating the contact in the Config tab must stop the mail WITHOUT stranding the case: the
+    // resolution stands, and the failed courtesy mail is reported rather than swallowed. This is the
+    // whole point of resolving an id at send time instead of baking an address into the deployment.
+    seedCase();
+    const { ContactUnavailable } = await import("@/lib/contactStore");
+    resolveContactAddress.mockRejectedValue(
+      new ContactUnavailable(
+        "contact notify-primary is deactivated and cannot be sent to",
+      ),
+    );
+
+    const res = await postCase({ action: "approve" });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      status: "RESOLVED",
+      notification_error:
+        "contact notify-primary is deactivated and cannot be sent to",
+    });
+    // No send was attempted at all — the address never existed to address it to.
+    expect(
+      callGatewayTool.mock.calls.filter(
+        ([, args]) => (args as Record<string, unknown>).sendPurpose,
+      ),
+    ).toHaveLength(0);
   });
 });

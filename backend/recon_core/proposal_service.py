@@ -1,8 +1,7 @@
 """Shared proposal-service primitives used by BOTH agent backends.
 
-The runtime container (Strands loop) and the harness worker previously carried duplicate
-implementations of the ledger-reference derivation. This module is the single home for the
-trust-relevant rule:
+The runtime container (Strands loop) and the harness worker both derive the ledger reference, and
+this module is its single home so the two cannot disagree about a trust-relevant rule:
 
 **The ledger reference is never model-supplied.** It is derived from the references the
 ``search_ledger`` tool actually returned during the investigation: exactly ONE distinct
@@ -51,3 +50,39 @@ def derive_reference(references: Iterable[str]) -> Optional[str]:
     if len(distinct) == 1:
         return next(iter(distinct))
     return None
+
+
+def judge_cited_evidence(
+    *,
+    notice_rows: list[dict],
+    guidance_results: list[dict],
+    workflow_types_table: str = "",
+    ddb=None,
+) -> tuple[str, str]:
+    """Decide whether a proposal's cited evidence may be written from, for either backend.
+
+    Shared rather than duplicated because the two backends must reach the SAME verdict for the same
+    investigation. A divergence would surface only much later, as a gateway denial on whichever backend
+    happened to run that item — the hardest class of bug this platform can produce.
+
+    Shape adaptation stays with the caller, as it already does for :func:`derive_reference`: each backend
+    knows how its own tool outputs are packed, and this function only wants the rows.
+
+    :param notice_rows: notice rows from every ``search_notices`` call in the investigation.
+    :param guidance_results: retrieval results from every guidance call, each with its ``metadata``.
+    :param workflow_types_table: the workflow-types table, for resolving whether an operator enabled
+        correspondence as an evidence source. Empty means "do not ask", which resolves to NOT enabled —
+        appropriate for a caller with no configured table, and never a silent pass.
+    :param ddb: injectable DynamoDB resource (tests).
+    :returns: ``(verdict, reason)``.
+    """
+    from backend.recon_core.evidence_quality import decide_evidence_quality, kb_evidence_enabled
+
+    # Only asked when guidance was actually cited AND no notice was: in every other case the answer
+    # cannot change the verdict, and this saves a table read on the common path.
+    enabled = False
+    if guidance_results and not notice_rows and workflow_types_table:
+        enabled = kb_evidence_enabled(table_name=workflow_types_table, ddb=ddb)
+    return decide_evidence_quality(
+        notices=notice_rows, kb_documents=guidance_results, kb_evidence_enabled=enabled
+    )

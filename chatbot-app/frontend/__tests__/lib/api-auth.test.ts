@@ -166,7 +166,48 @@ describe("authorizeRequest", () => {
       req(`Bearer ${await token()}`),
       config,
     );
-    expect(result).toEqual({ ok: true, mode: "okta", subject: "00uTESTuser" });
+    expect(result).toEqual({
+      ok: true,
+      mode: "okta",
+      subject: "00uTESTuser",
+      // No `groups` claim in the token, so no groups. An empty list is the honest answer and the one
+      // that denies admin — inferring membership from an absent claim is the failure this guards.
+      groups: [],
+    });
+  });
+
+  it("reads group memberships from the claim the deployment names", async () => {
+    // Okta and Entra disagree on the claim name and an app can be configured to release it under any
+    // name at all, so the name is deployment configuration rather than a constant in this file.
+    const saved = process.env.AUTH_GROUPS_CLAIM;
+    process.env.AUTH_GROUPS_CLAIM = "appRoles";
+    try {
+      const signed = await token({ appRoles: ["recon-admin", "recon-viewer"] });
+      const result = await authorizeRequest(req(`Bearer ${signed}`), config);
+      expect(result).toMatchObject({
+        ok: true,
+        groups: ["recon-admin", "recon-viewer"],
+      });
+    } finally {
+      if (saved === undefined) delete process.env.AUTH_GROUPS_CLAIM;
+      else process.env.AUTH_GROUPS_CLAIM = saved;
+    }
+  });
+
+  it("ignores non-string entries in the groups claim", async () => {
+    const signed = await token({ groups: ["recon-admin", 7, null] });
+    const result = await authorizeRequest(req(`Bearer ${signed}`), config);
+    // A provider that emits a group object rather than a name must not produce `"[object Object]"` as a
+    // group someone could then be granted by, so unusable entries are dropped rather than coerced.
+    expect(result).toMatchObject({ ok: true, groups: ["recon-admin"] });
+  });
+
+  it("reports no groups when the claim is not a list", async () => {
+    const signed = await token({ groups: "recon-admin" });
+    const result = await authorizeRequest(req(`Bearer ${signed}`), config);
+    // A single-string claim is tempting to split on commas. Not doing so is deliberate: guessing a
+    // delimiter is how "recon-admin,x" or "recon-administrators" turns into admin by accident.
+    expect(result).toMatchObject({ ok: true, groups: [] });
   });
 
   it("accepts a lowercase bearer scheme (RFC 6750 is case-insensitive)", async () => {
@@ -291,6 +332,23 @@ describe("authorizeRequest", () => {
       ok: true,
       mode: "anonymous",
       subject: "anonymous",
+      // No RECON_ADMIN_GROUP in the test environment, so no group to grant.
+      groups: [],
     });
+  });
+
+  it("grants the configured admin group in anonymous mode", async () => {
+    // `RECON_ALLOW_ANONYMOUS_API=true` already opens the whole BFF, so withholding the group here would
+    // buy no safety and would make the Config tab impossible to work on locally.
+    const saved = process.env.RECON_ADMIN_GROUP;
+    process.env.RECON_ADMIN_GROUP = "recon-admin";
+    try {
+      expect(
+        await authorizeRequest(req(), { mode: "anonymous" }),
+      ).toMatchObject({ ok: true, groups: ["recon-admin"] });
+    } finally {
+      if (saved === undefined) delete process.env.RECON_ADMIN_GROUP;
+      else process.env.RECON_ADMIN_GROUP = saved;
+    }
   });
 });

@@ -1,0 +1,683 @@
+####################################################################################
+# CI/CD for the internal GitLab remote — verification on every commit, then plan and apply
+# on the default branch.
+#
+#   verify  every MR and the default branch: python, frontend, terraform, secret scan
+#   test    every MR and the default branch: semgrep-sast, from GitLab's own bundled template
+#   plan    default branch only: a full `terraform plan`, kept as an artifact
+#   deploy  default branch only: `terraform apply`, automatic, serialised
+#
+# "Every MR and the default branch" is exact, not shorthand — see the workflow: block below. A
+# feature branch pushed with no open merge request runs nothing at all.
+#
+# Stages are a barrier, so verify and test must both pass before anything reaches AWS.
+#
+# THE APPLY IS AUTOMATIC AND UNATTENDED. One apply drives CodeBuild image builds, replaces
+# the AgentCore Runtime, attaches the Cedar policy, re-seeds the S3 prompts/skills/KB corpus
+# and rolls the ECS service — so a merge to the default branch reaches the live dev platform
+# with nobody in the loop. That is a deliberate choice; the guards that remain are:
+#
+#   * the verify and test stages block the plan, and the plan blocks the apply;
+#   * `resource_group` serialises applies, so two merges cannot race one Terraform state — and
+#     because a resource_group only orders PIPELINE JOBS against each other, the S3 backend also
+#     sets `use_lockfile = true`, which is what stops a pipeline apply and someone's local
+#     ./infra/scripts/deploy-recon.sh from corrupting the state between them;
+#   * the plan is archived as an artifact, so an unexpected change is auditable afterwards;
+#   * `terraform destroy` appears in NO job — tearing the platform down stays a local,
+#     deliberate act (see infra/scripts/deploy-recon.sh);
+#   * the deploy jobs refuse to start unless every required CI variable is set, because a
+#     MISSING terraform.tfvars does not fail — it silently flips graph_enabled to false and
+#     plans the DESTRUCTION of the Microsoft Graph gateway target, OAuth provider and
+#     callback SSM parameter. Unattended, that would delete working infrastructure;
+#   * and because that check can only prove the variable is PRESENT, not that it is complete,
+#     the apply plans to a file and REFUSES TO PROCEED if the plan deletes anything. Automatic
+#     means automatic for additions and changes only. Deleting requires a human to run the
+#     manual terraform:apply:allow-destroy job, which is what "approval" means here.
+#     Replacements are exempt — an ordinary apply replaces the AgentCore Runtime every time.
+#
+# Required CI/CD variables (Settings > CI/CD > Variables). None can be committed: the first
+# two embed the AWS account ID, and the repo's pre-push guard rejects any 12-digit run in a
+# tracked file.
+#
+#   AWS_CREDS_TARGET_ROLE  arn:aws:iam::<account-id>:role/<ci-role> — read by the runner's
+#                          AWS Credential Vendor hook, see below.
+#   TF_STATE_BUCKET        recon-dev-tfstate-<account-id>  — what backend.hcl holds locally.
+#   RECON_TFVARS           type "File", contents of infra/environments/recon/terraform.tfvars.
+#                          It carries the Entra client secret and the IDP MCP credentials, but it
+#                          CANNOT be masked — GitLab only masks single-line values and a tfvars
+#                          file is multi-line. Mark it Protected instead.
+#
+# AWS AUTH IS THE RUNNER FLEET'S CREDENTIAL-VENDOR HOOK, NOT OIDC. Do not "fix" this to
+# id_tokens / AssumeRoleWithWebIdentity. Two independent reasons:
+#
+#   1. It cannot work. This GitLab instance's OIDC discovery and JWKS endpoints sit behind an
+#      SSO gateway that public AWS STS cannot authenticate through, so STS can never fetch the
+#      key to verify the token. The failure is an opaque InvalidIdentityToken.
+#   2. It is not permitted. Internal security policy does not allow registering IAM OIDC
+#      identity providers; the credential vendor is the sanctioned substitute.
+#
+# How the vendor works: set AWS_CREDS_TARGET_ROLE (and AWS_DEFAULT_REGION, below — if either
+# is unset the hook does nothing at all) and it writes temporary credentials to a standard AWS
+# credentials file before this before_script runs. Nothing to call, no token to handle.
+#
+# The role is documented, not provisioned — this pipeline creates no IAM. Its trust policy must
+# trust the fleet's jump role for BOTH sts:AssumeRole and sts:TagSession, and must condition on
+# the injected session tags so that only this project can assume it — otherwise any job on the
+# shared fleet could assume a role that can apply to this account. The role also needs
+# MaxSessionDuration >= 3600s, because the vendor always requests a 1-hour session.
+#
+# Consult the internal runner-fleet documentation for the trust-policy template, the jump-role
+# principal and the tag names. Those specifics are internal, and this file is published to a
+# public repository, so they are deliberately not reproduced here.
+#
+# NOTE: scope the CI variables to ALL environments. terraform:apply declares an `environment:`
+# but terraform:plan does not, so an environment-scoped AWS_CREDS_TARGET_ROLE would silently
+# fail to reach the plan job.
+####################################################################################
+
+####################################################################################
+# The SAST job is NOT defined in this file. `include: - template:` is a special include type that
+# resolves the path out of the GitLab installation's own template library, server-side, when the
+# config is compiled — so `semgrep-sast` appears in the pipeline without being written anywhere
+# below, and its definition tracks the instance's GitLab version rather than this repo. To see
+# what it currently expands to, use CI/CD > Editor > "Full configuration", or POST the config to
+# /projects/:id/ci/lint and read `merged_yaml`.
+#
+# Security/, not Jobs/: the Jobs/SAST.gitlab-ci.yml variant is the Auto DevOps wrapper — it pulls
+# in this same template and layers Auto DevOps `rules` on top, which would fight the explicit
+# branch gating used everywhere else here.
+#
+# The template defines seventeen jobs, one per analyzer, and each one self-disables through its
+# own `exists:` rule. For this repo (Python + TypeScript) exactly one instantiates: semgrep-sast.
+# Most of the rest are tombstones that only `exit 1` if something ever forces them to run.
+####################################################################################
+
+include:
+  - template: Security/SAST.gitlab-ci.yml
+
+stages:
+  - verify
+  # Every job in the bundled security templates hard-codes `stage: test`, and a job naming a
+  # stage that is not declared is a CONFIG error — the whole pipeline fails to compile, it does
+  # not skip the job. Declaring the stage they expect is far more durable than overriding
+  # `stage:` on each analyzer, which would break the moment a GitLab upgrade adds an eighteenth.
+  # The extra stage costs no wall-clock: semgrep-sast gets `needs: []` below, so it starts at
+  # once and runs alongside verify while still gating plan.
+  - test
+  - plan
+  - deploy
+
+variables:
+  AWS_DEFAULT_REGION: us-east-1
+  TF_ENV_DIR: infra/environments/recon
+  TERRAFORM_VERSION: "1.15.4"
+  GITLEAKS_VERSION: "8.30.1"
+  # Keep the pip cache inside the project directory; GitLab can only cache paths under it.
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+# Merge-request pipelines, plus branch pipelines on the default branch. Nothing else.
+#
+# The obvious formulation — run on any branch, but suppress the branch pipeline when an MR is
+# already open ($CI_OPEN_MERGE_REQUESTS) — has a race, and it cost us a duplicate run. That
+# variable reflects the state of the world at the moment the pipeline is created, so pushing a
+# branch BEFORE opening its MR gives you a branch pipeline (legitimately: no MR existed yet),
+# and creating the MR seconds later adds a second pipeline for the identical commit. Two full
+# runs, and the expensive job here is `frontend` at ~8.5 minutes.
+#
+# Enumerating what should run, instead of subtracting what should not, removes the ordering
+# question entirely: an MR pipeline, or the default branch, or nothing.
+#
+# The trade-off, stated plainly: pushing a feature branch with NO open merge request now runs no
+# CI at all. That is the accepted cost of an MR-only model and it is the right one here, because
+# every change to this repo goes through an MR anyway — and a branch with no MR has no reviewer
+# waiting on a green check. Open the MR as part of the push and CI runs immediately:
+#
+#   git push -o merge_request.create -o merge_request.target=main \
+#            -o merge_request.remove_source_branch origin <branch>
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - when: never
+
+####################################################################################
+# verify — no AWS access, no credentials, runs on everything
+####################################################################################
+
+python:
+  stage: verify
+  image: python:3.12-slim
+  interruptible: true
+  variables:
+    # The moto-backed tests build real boto3 clients before moto intercepts them, so botocore
+    # raises NoRegionError without a region and refuses to sign without credentials. These are
+    # deliberate dummies: moto answers every call, and a junk key means any test that escapes
+    # moto fails loudly instead of reaching a real account.
+    AWS_ACCESS_KEY_ID: testing
+    AWS_SECRET_ACCESS_KEY: testing
+    AWS_SESSION_TOKEN: testing
+  cache:
+    key:
+      files:
+        - requirements-dev.txt
+        - agent-blueprint/recon-agent/requirements.txt
+    paths:
+      - .cache/pip
+  script:
+    # Both files: tests/ imports the same backend modules the agent container runs, so the
+    # runtime requirements are needed for the suite to import at all.
+    - pip install -r agent-blueprint/recon-agent/requirements.txt -r requirements-dev.txt
+    # `ruff check` only. `ruff format --check` reports 34 pre-existing files; fixing those is
+    # its own change, not a CI prerequisite.
+    - ruff check .
+    # Expect 15 skips: 11 in tests/integration/, which needs RECON_GATEWAY_URL plus dev-account
+    # credentials (one also needs EMAIL_CONFIRMATION_TOKEN) that CI does not have, plus 4 skills
+    # that prescribe no required evidence steps.
+    - python -m pytest -q
+
+frontend:
+  stage: verify
+  image: node:22
+  interruptible: true
+  cache:
+    key:
+      files:
+        - chatbot-app/frontend/package-lock.json
+    paths:
+      - chatbot-app/frontend/node_modules
+  script:
+    - cd chatbot-app/frontend
+    - npm ci
+    - npx tsc --noEmit
+    # The whole suite: 62 files, 874 tests.
+    - npx vitest run
+    # The real gate — it compiles every route, catching breakage both the unit tests and tsc
+    # miss. `npm run lint` is deliberately absent (ESLint is broken repo-wide), and
+    # `npm run verify` points at a verify-build.sh that does not exist.
+    - npm run build
+
+terraform:validate:
+  stage: verify
+  image:
+    name: hashicorp/terraform:1.15.4
+    # The image's entrypoint is terraform itself, which would swallow the script.
+    entrypoint: [""]
+  interruptible: true
+  script:
+    - terraform fmt -check -recursive infra/
+    # Validation only means something from the ENVIRONMENT directory. Running it in infra/
+    # passes vacuously — there is no root module there, so it checks nothing.
+    - cd "$TF_ENV_DIR"
+    # -backend=false skips S3 backend initialisation, so this needs no credentials and no
+    # backend.hcl. .terraform.lock.hcl is gitignored too, so providers resolve fresh every
+    # run; the `~> 6.55, != 6.57.0` constraint in providers.tf is the only thing keeping this
+    # off 6.57.0, which corrupts request bodies under parallel refresh. Do not relax it.
+    - terraform init -backend=false -input=false
+    - terraform validate
+
+secret-scan:
+  stage: verify
+  image: alpine:3.21
+  interruptible: true
+  variables:
+    # GitLab clones 20 commits deep by default; a history scan needs all of them.
+    GIT_DEPTH: 0
+  script:
+    - apk add --no-cache curl git
+    - curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz -C /usr/local/bin gitleaks
+    - gitleaks version
+    # `git`, not `dir`: this remote holds the real history, and a secret removed from the
+    # working tree still leaks from the commit that introduced it. (The public GitHub mirror
+    # gets a squashed tree with no useful history, so it scans the tree instead.)
+    #
+    # This job installs no project dependencies on purpose — scanning after `npm ci` walks
+    # node_modules and reports ~30 findings from vendored minified JS.
+    #
+    # .gitleaks.toml carries the triaged allowlist (vendored DCV SDK, fake test fixtures).
+    # --redact keeps a real finding out of the job log.
+    - gitleaks git . --config .gitleaks.toml --redact --no-banner
+
+# Static analysis. The job body — image, script, SAST report artifact — comes from
+# Security/SAST.gitlab-ci.yml (see the header); only what has to fit this pipeline is set here.
+# Nothing else in the pipeline does security static analysis: `ruff check` and `tsc --noEmit` are
+# lint and type checks, not vulnerability rules.
+semgrep-sast:
+  stage: test
+  # Start immediately rather than waiting out the verify barrier. The frontend job takes ~9
+  # minutes and SAST does not depend on it, so without this the extra stage would serialise
+  # behind it. `plan` is still gated either way: it is in a later stage, so it waits for all of
+  # `test` no matter what started when.
+  needs: []
+  interruptible: true
+  # The template's own rule is `if: $CI_COMMIT_BRANCH` and nothing else, which means the job
+  # would NEVER run on a merge request — CI_COMMIT_BRANCH is unset in an MR pipeline, and an MR
+  # pipeline is the ONLY kind this project runs on a feature branch. Scanning would then silently
+  # skip exactly the place a reviewer looks. Matching the two rules in `workflow:` fixes that.
+  #
+  # The template's $SAST_DISABLED escape hatch is deliberately dropped: this stage gates an
+  # unattended apply, so turning the scan off should require a reviewed change to this file, not
+  # a CI variable somebody can set. The `exists:` guards are dropped for the same reason they
+  # would never fire — this repo always has Python and TypeScript in it.
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+  # The template ships allow_failure: true. false here means an analyzer CRASH stops the
+  # pipeline — but it does NOT mean findings do, because the analyzer exits 0 either way. That
+  # is what sast-gate below is for.
+  allow_failure: false
+  variables:
+    # $DEFAULT_SAST_EXCLUDED_PATHS is the template's own "spec, test, tests, tmp"; interpolating
+    # it keeps those, since setting SAST_EXCLUDED_PATHS REPLACES rather than appends. The
+    # additions mirror .semgrepignore. The analyzer does also read .semgrepignore directly (the
+    # job log accounts for the two separately), but this variable is the documented, supported
+    # knob, so the exclusions worth relying on are stated here: vendored, generated or build
+    # output only — the Amazon DCV web client, the embed example, the Next.js build dir.
+    #
+    # `**/__tests__` is not redundant with the template's "test, tests". Each entry becomes an
+    # --exclude glob matching a whole path component, so `tests` matches a directory named
+    # exactly `tests` and does NOT match `__tests__` — which is what this frontend uses, and why
+    # the first run reported a finding inside a test file.
+    SAST_EXCLUDED_PATHS: "$DEFAULT_SAST_EXCLUDED_PATHS, **/__tests__, chatbot-app/frontend/public/dcv-sdk, chatbot-app/frontend/public/embed-example.js, chatbot-app/frontend/.next, node_modules, cdk.out, .venv"
+  artifacts:
+    # Overriding `artifacts:` replaces the template's whole block, so `reports:` has to be
+    # restated — dropping it would unwire the report from GitLab's own vulnerability handling.
+    # `paths:` is the addition. A report-type artifact is neither restored into a dependent job's
+    # workspace nor downloadable through the API (the artifacts endpoint 404s on a job that
+    # produced only a report), so without it sast-gate could not read the file and no human could
+    # retrieve it either. `access: developer` keeps it off the wider instance.
+    access: developer
+    expire_in: 1 week
+    when: always
+    reports:
+      sast: gl-sast-report.json
+    paths:
+      - gl-sast-report.json
+
+# The actual gate. semgrep-sast cannot be one: the analyzer exits 0 whether it found nothing or
+# fifty things — findings travel in the report, and converting them to a pass/fail is normally
+# GitLab Ultimate's scan-result policies, which this project does not rely on. So this job reads
+# the report and decides. Without it, adding SAST would have looked like a gate while gating
+# nothing, which is worse than not having it.
+sast-gate:
+  stage: test
+  image: python:3.12-slim
+  interruptible: true
+  # Same rules as semgrep-sast, or the gate would be absent exactly when the scan runs.
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+  # artifacts: true is the point of the dependency — it pulls gl-sast-report.json into this
+  # workspace. Same stage as semgrep-sast, which `needs:` permits.
+  needs:
+    - job: semgrep-sast
+      artifacts: true
+  variables:
+    # Medium and below are reported but do not block. Raising the bar means triaging the 40
+    # Medium findings first, not loosening this.
+    SAST_GATE_BLOCK_SEVERITIES: "Critical,High"
+  script:
+    - |
+      python3 - "$SAST_GATE_BLOCK_SEVERITIES" <<'PY'
+      """Turn semgrep's SAST report into a pass/fail gate.
+
+      Reads gl-sast-report.json from the semgrep-sast job, drops findings triaged in
+      .sast-allowlist, prints what is left, and exits non-zero if anything blocking survives.
+      """
+
+      import collections
+      import json
+      import sys
+
+      ALLOWLIST_PATH = ".sast-allowlist"
+      REPORT_PATH = "gl-sast-report.json"
+
+      blocking: set[str] = {name.strip() for name in sys.argv[1].split(",") if name.strip()}
+      if not blocking:
+          raise SystemExit(
+              "SAST_GATE_BLOCK_SEVERITIES is empty. Refusing to run a gate that cannot fail."
+          )
+
+
+      def load_allowlist(path: str) -> set[tuple[str, str]]:
+          """Parse the triaged allowlist.
+
+          Args:
+              path: repo-relative path to the allowlist file.
+
+          Returns:
+              The set of (semgrep rule id, repo-relative file path) pairs to ignore.
+          """
+          pairs: set[tuple[str, str]] = set()
+          with open(path, encoding="utf-8") as handle:
+              for number, raw in enumerate(handle, start=1):
+                  line = raw.split("#", 1)[0].strip()
+                  if not line:
+                      continue
+                  fields = line.split()
+                  # Loudly: a malformed entry that quietly allowlisted nothing would be
+                  # indistinguishable from a clean scan.
+                  if len(fields) != 2:
+                      raise SystemExit(f"{path}:{number}: expected '<rule-id> <path>', got {line!r}")
+                  pairs.add((fields[0], fields[1]))
+          return pairs
+
+
+      def rule_ids(finding: dict) -> set[str]:
+          """Return the semgrep rule ids a finding was reported under.
+
+          Args:
+              finding: one entry from the report's "vulnerabilities" list.
+
+          Returns:
+              Every identifier value of type "semgrep_id".
+          """
+          return {i["value"] for i in finding["identifiers"] if i["type"] == "semgrep_id"}
+
+
+      allowed: set[tuple[str, str]] = load_allowlist(ALLOWLIST_PATH)
+
+      # Deliberately no .get() fallback: if the report schema ever loses "vulnerabilities" this
+      # must break loudly rather than silently pass every pipeline from then on.
+      with open(REPORT_PATH, encoding="utf-8") as handle:
+          findings: list[dict] = json.load(handle)["vulnerabilities"]
+
+      seen: set[tuple[str, str]] = {
+          (rule, f["location"]["file"]) for f in findings for rule in rule_ids(f)
+      }
+      live: list[dict] = [
+          f for f in findings
+          if not any((rule, f["location"]["file"]) in allowed for rule in rule_ids(f))
+      ]
+
+      print(
+          f"{len(findings)} finding(s): {len(findings) - len(live)} triaged in {ALLOWLIST_PATH}, "
+          f"{len(live)} live."
+      )
+      for severity, count in collections.Counter(
+          f.get("severity", "Unknown") for f in live
+      ).most_common():
+          print(f"  {severity:9} {count}")
+
+      # Stale entries are reported, not fatal — an allowlist nobody prunes is one nobody reads.
+      stale: set[tuple[str, str]] = allowed - seen
+      if stale:
+          print(f"\n{len(stale)} allowlist entr(ies) matched nothing and can be deleted:")
+          for rule, path in sorted(stale):
+              print(f"  {rule} {path}")
+
+      print(f"\nBlocking severities: {', '.join(sorted(blocking))}")
+      offenders: list[dict] = [f for f in live if f.get("severity") in blocking]
+      if not offenders:
+          print("No untriaged finding at a blocking severity. Gate passed.")
+          raise SystemExit(0)
+
+      print(f"\n{len(offenders)} finding(s) must be fixed, or triaged in {ALLOWLIST_PATH}:")
+      for finding in offenders:
+          location = finding["location"]
+          print(f"  [{finding.get('severity')}] {location.get('file')}:{location.get('start_line')}")
+          print(f"      {finding.get('name', '?')}")
+          print(f"      rule: {', '.join(sorted(rule_ids(finding))) or '(no semgrep_id)'}")
+      raise SystemExit(1)
+      PY
+
+####################################################################################
+# plan / deploy — default branch only, AWS Credential Vendor into AWS
+####################################################################################
+
+# Shared toolchain for both Terraform jobs. The apply is not a pure Terraform run: provisioners
+# shell out to the AWS CLI (the CodeBuild triggers for the agent and frontend images), python3 +
+# pip (Lambda staging vendors wheels for the Lambda platform), and rsync/zip (Lambda staging,
+# frontend source upload). All of it has to be on the runner.
+#
+# Nothing here needs boto3 or a plan-time `data "external"` any more: the harness and the two
+# OAuth2 credential providers are CloudFormation stacks whose Outputs Terraform reads directly.
+# jq is still required, but by this file's own destroy guard rather than by Terraform.
+.terraform_aws:
+  image: python:3.12-slim
+  # No id_tokens block and no credential handling here on purpose: the runner's credential
+  # vendor hook has already written a credentials file and symlinked it to $HOME/.aws by the
+  # time before_script runs, so both the Terraform AWS provider and the AWS CLI discover it at
+  # the default location. See the header for why this is not OIDC.
+  #
+  # This relies on $HOME/.aws not already existing in the image — the hook's symlink is skipped
+  # if it does. python:3.12-slim runs as root with a bare /root, so it does not. If the image
+  # ever changes, point the SDKs at the files explicitly with AWS_SHARED_CREDENTIALS_FILE and
+  # AWS_CONFIG_FILE under $CI_BUILDS_DIR/.awscredentialvendor/ instead.
+  before_script:
+    # Fail before touching AWS if configuration is missing. A missing RECON_TFVARS is the
+    # dangerous one: Terraform would not error, it would plan the destruction of the Graph
+    # gateway target, OAuth provider and callback SSM parameter.
+    - |
+      set -eu
+      for required in AWS_CREDS_TARGET_ROLE TF_STATE_BUCKET RECON_TFVARS; do
+        eval "value=\${$required:-}"
+        if [ -z "$value" ]; then
+          echo "ERROR: CI variable $required is not set. Refusing to run: an incomplete" >&2
+          echo "       configuration plans DESTRUCTIVE changes rather than failing." >&2
+          exit 1
+        fi
+      done
+      if [ ! -s "$RECON_TFVARS" ]; then
+        echo "ERROR: RECON_TFVARS ($RECON_TFVARS) is empty or unreadable. It must be a" >&2
+        echo "       File-type CI variable holding terraform.tfvars." >&2
+        exit 1
+      fi
+    - apt-get update -qq
+    # jq is not optional: the destroy guard in the apply job below parses `terraform show -json`
+    # with it, and that guard is the only thing standing between a truncated RECON_TFVARS and an
+    # unattended deletion. Without jq the guard's `set -eu` fails the job on exit 127 — safe, but
+    # it reads as a tooling error in the middle of a deploy. zip/rsync are for Lambda staging, git
+    # for the frontend source upload.
+    - apt-get install -y -qq --no-install-recommends curl unzip rsync zip jq ca-certificates git
+    - curl -sSfL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" -o /tmp/terraform.zip
+    - unzip -q /tmp/terraform.zip -d /usr/local/bin
+    - curl -sSfL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+    - unzip -q /tmp/awscliv2.zip -d /tmp
+    - /tmp/aws/install
+    # Prove the credential vendor actually ran, and that it landed on the INTENDED role, before
+    # anything touches AWS — so a trust-policy problem reads as an auth error here instead of
+    # surfacing later as a confusing Terraform failure.
+    #
+    # This assertion is load-bearing, not paranoia: WHEN VENDING FAILS THE JOB IS NOT FAILED.
+    # The hook logs its error, deletes the credentials directory and lets the job continue. So
+    # without a check, an unattended apply would carry on unauthenticated — or worse, under
+    # whatever credentials the runner image happened to have. Nor is a bare
+    # `get-caller-identity` enough: it succeeds under ANY valid credentials, so it has to be
+    # compared against the role we actually intended to assume.
+    - |
+      set -eu
+      caller_arn="$(aws sts get-caller-identity --query Arn --output text)"
+      echo "Running as: $caller_arn"
+      # arn:aws:iam::<acct>:role/Foo  ->  Foo, which appears in the caller ARN as
+      # arn:aws:sts::<acct>:assumed-role/Foo/<session>.
+      target_role_name="${AWS_CREDS_TARGET_ROLE##*/}"
+      case "$caller_arn" in
+        *":assumed-role/${target_role_name}/"*) ;;
+        *)
+          echo "ERROR: expected to be running as $AWS_CREDS_TARGET_ROLE but the caller is" >&2
+          echo "       $caller_arn. Either the AWS Credential Vendor hook did not run for" >&2
+          echo "       this job, or it assumed a different role. Refusing to deploy." >&2
+          exit 1
+          ;;
+      esac
+    # A backend block cannot read variables, so the state bucket name normally arrives through
+    # the gitignored backend.hcl. Rebuild it from the CI variable.
+    - printf 'bucket = "%s"\n' "$TF_STATE_BUCKET" > "$TF_ENV_DIR/backend.hcl"
+    # data.archive_file.lambda reads .build/staging at PLAN time, but the provisioner that
+    # fills it only runs at APPLY time and .build/ is gitignored — so a fresh clone cannot
+    # plan until the staging exists. stage.sh is the same script the provisioner calls.
+    #
+    # The trailing arguments mirror the defaults in
+    # infra/modules/lambda-package/variables.tf (lambda_platform, lambda_python_version, then
+    # every entry of runtime_dependencies). Keep them in step with that file: a mismatch here
+    # vendors the wrong wheels into the zip instead of failing. This list was short by PyYAML
+    # for a while, and nothing caught it, because the zip only rebuilds when the sources change
+    # and the last rebuild happened to run locally where the full list is passed.
+    - ./infra/modules/lambda-package/stage.sh
+      "infra/modules/lambda-package/.build/staging"
+      "$CI_PROJECT_DIR/backend"
+      "manylinux2014_x86_64"
+      "3.12"
+      "pydantic==2.13.0"
+      "PyYAML==6.0.3"
+      "extract-msg==0.56.1"
+      "reportlab==5.0.1"
+      "red-black-tree-mod==1.22"
+
+terraform:plan:
+  extends: .terraform_aws
+  stage: plan
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - cd "$TF_ENV_DIR"
+    - terraform init -input=false -backend-config=backend.hcl
+    - terraform plan -input=false -var-file="$RECON_TFVARS" -out=recon.tfplan
+    # Human-readable copy, so the archived plan can be read without a Terraform install.
+    - terraform show -no-color recon.tfplan > recon.plan.txt
+    # Surface deletions here, one stage BEFORE anything applies, so a reviewer watching the
+    # pipeline sees them without opening an artifact. This is reporting only — the guard that
+    # actually refuses to proceed lives in the apply job, against the plan it will really apply.
+    - |
+      set -eu
+      destroyed="$(terraform show -json recon.tfplan \
+        | jq -r '[.resource_changes[]? | select(.change.actions == ["delete"]) | .address] | .[]')"
+      destroy_count="$(printf '%s' "$destroyed" | grep -c . || true)"
+      if [ "$destroy_count" -gt 0 ]; then
+        echo "NOTE: this plan destroys $destroy_count resource(s). terraform:apply will refuse to"
+        echo "      proceed; approving means running terraform:apply:allow-destroy by hand."
+        printf '%s\n' "$destroyed" | sed 's/^/  - DESTROY: /'
+      fi
+  artifacts:
+    # ONLY the rendered text, never recon.tfplan. A binary plan file stores every variable
+    # value in the clear, including the ones declared `sensitive = true` — so archiving it
+    # would publish the Entra client secret and the IDP MCP credentials to anyone who can
+    # read this project's jobs. `terraform show` redacts them, so the .txt is safe.
+    # Nothing needs the binary anyway: the apply jobs produce and consume their own plan file.
+    expire_in: 1 week
+    when: always
+    paths:
+      - $TF_ENV_DIR/recon.plan.txt
+
+# Shared by the automatic apply and the manual destroy-approving apply below. The ONLY difference
+# between the two is $ALLOW_DESTROY and when they run, so the apply itself lives here once.
+.terraform_apply:
+  extends: .terraform_aws
+  stage: deploy
+  # Serialise: two merges landing together must not apply onto one state concurrently. Both apply
+  # jobs share the group, so the manual override cannot race the automatic job either.
+  resource_group: recon-dev-terraform
+  environment:
+    name: recon-dev
+  # Capped at the credential lifetime, NOT at how long an apply can take. Credential Vendor
+  # credentials are already the end of a role chain (runner -> jump role -> this role), so they
+  # cannot be refreshed or extended and expire at ~1h. A longer timeout would not buy a longer
+  # apply — it would only let the job run on past expiry and fail mid-apply on ExpiredToken,
+  # with state and reality partly diverged.
+  #
+  # A cold apply is dominated by CodeBuild building and pushing the agent and frontend images
+  # and CAN exceed an hour. Consequence: the first apply into a fresh account should be run
+  # locally (./infra/scripts/deploy-recon.sh apply), not through this pipeline. Incremental
+  # applies on an already-deployed stack fit comfortably. Re-running the job after a timeout is
+  # safe — Terraform has persisted the state it got through — but it is not free. The in-job
+  # plan below adds a minute or two to that budget.
+  timeout: 1h
+  # Cancelling mid-apply would leave state and reality disagreeing.
+  interruptible: false
+  script:
+    - cd "$TF_ENV_DIR"
+    - terraform init -input=false -backend-config=backend.hcl
+    # Plan to a FILE first, inspect it, then apply that exact file. Two reasons this is not the
+    # same as `terraform apply -var-file=...`:
+    #
+    #  1. It is what makes the destroy guard below meaningful. A guard that reads
+    #     terraform:plan's artifact would be checking a plan produced by a DIFFERENT job, which
+    #     can legitimately differ (see that job's comment on zip-hash reproducibility) — so the
+    #     thing inspected has to be the thing applied, produced here.
+    #  2. Applying the saved plan removes the plan/apply divergence entirely, because both now
+    #     happen in one job against one staging directory on one runner. The cross-job hash
+    #     problem that stops us applying terraform:plan's file does not exist within a job.
+    #
+    # terraform:plan's artifact remains the human-readable audit record; this file is transient.
+    - terraform plan -input=false -var-file="$RECON_TFVARS" -out=apply.tfplan
+    - |
+      set -eu
+      # Defence in depth for the override job. ALLOW_DESTROY=yes is only ever meant to be set by
+      # terraform:apply:allow-destroy, whose whole safety argument is that a human pressed play.
+      # $CI_JOB_MANUAL is set by GitLab, not by this file, so it re-checks that claim against the
+      # runner's own view of how the job started. If a config mistake ever made that job
+      # automatic, this turns a silent unattended deletion into a failed job.
+      if [ "${ALLOW_DESTROY:-no}" = "yes" ] && [ "${CI_JOB_MANUAL:-false}" != "true" ]; then
+        echo "ERROR: ALLOW_DESTROY=yes but CI_JOB_MANUAL is not true, so this job was not" >&2
+        echo "       started by a human. Refusing to apply with deletions permitted." >&2
+        exit 1
+      fi
+      # PURE deletes only. A replace is delete+create, and replacement is ROUTINE here — an
+      # ordinary apply replaces the AgentCore Runtime every time — so treating replacements as
+      # destructive would block every deploy and the guard would be turned off within a week.
+      destroyed="$(terraform show -json apply.tfplan \
+        | jq -r '[.resource_changes[]? | select(.change.actions == ["delete"]) | .address] | .[]')"
+      replaced="$(terraform show -json apply.tfplan \
+        | jq -r '[.resource_changes[]? | select((.change.actions | index("delete")) and (.change.actions | index("create"))) | .address] | .[]')"
+      # `grep -c .` exits 1 on empty input, which set -e would treat as fatal.
+      destroy_count="$(printf '%s' "$destroyed" | grep -c . || true)"
+      replace_count="$(printf '%s' "$replaced" | grep -c . || true)"
+      echo "Plan: $destroy_count resource(s) destroyed, $replace_count replaced."
+      if [ "$replace_count" -gt 0 ]; then
+        printf '%s\n' "$replaced" | sed 's/^/  ~ replace: /'
+      fi
+      if [ "$destroy_count" -gt 0 ]; then
+        printf '%s\n' "$destroyed" | sed 's/^/  - DESTROY: /'
+        if [ "${ALLOW_DESTROY:-no}" != "yes" ]; then
+          echo "" >&2
+          echo "ERROR: this plan destroys $destroy_count resource(s) and nothing has approved" >&2
+          echo "       that. Refusing to apply." >&2
+          echo "" >&2
+          echo "       An unattended apply that deletes infrastructure is the failure this" >&2
+          echo "       guard exists for. The known way to reach it is a missing or truncated" >&2
+          echo "       RECON_TFVARS: graph_enabled silently defaults to false and the Graph" >&2
+          echo "       gateway target, OAuth provider and callback SSM parameter are planned" >&2
+          echo "       for destruction. Check that variable before approving anything." >&2
+          echo "" >&2
+          echo "       If the deletions above are intended, read terraform:plan's" >&2
+          echo "       recon.plan.txt artifact, then run the manual" >&2
+          echo "       'terraform:apply:allow-destroy' job in this same pipeline." >&2
+          exit 1
+        fi
+        echo "ALLOW_DESTROY=yes — the deletions above were approved by running this job."
+      fi
+    - terraform apply -input=false -auto-approve apply.tfplan
+    # Names the two things Terraform cannot do: registering the Okta redirect URIs and
+    # pointing the IDP solution's PostProcessingLambdaHookFunctionArn at the recon hook.
+    - terraform output post_deploy_checklist
+
+# The normal path: automatic, and refuses to delete anything.
+terraform:apply:
+  extends: .terraform_apply
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  variables:
+    ALLOW_DESTROY: "no"
+
+# The override. Identical apply, with deletions permitted, reachable only by a human pressing play
+# — which is the approval. It exists in every default-branch pipeline and is almost never used.
+#
+# `allow_failure: true` is required, not cosmetic: a `when: manual` job with allow_failure false
+# puts the whole pipeline in `blocked` instead of `success`, so every ordinary merge would look
+# like it were waiting for someone. The cost is that if this job is played and FAILS, the pipeline
+# badge still reads success — so judge an override apply by the job, never by the badge.
+terraform:apply:allow-destroy:
+  extends: .terraform_apply
+  # `when: manual` is stated BOTH at job level and in the rule, deliberately. Rule-level `when`
+  # normally wins and job-level applies when a matching rule omits it — but the consequence of
+  # getting that precedence wrong here is an unattended apply that auto-approves deletions, so
+  # neither reading is left to be correct on its own. `ci/lint`'s job list reports this one as
+  # `on_success`, which appears to be a reporting artifact of rule-level `when` rather than the
+  # real behaviour; the script's $CI_JOB_MANUAL assertion is what makes that ambiguity harmless.
+  when: manual
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+  allow_failure: true
+  variables:
+    ALLOW_DESTROY: "yes"

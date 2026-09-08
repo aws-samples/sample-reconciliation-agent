@@ -7,6 +7,11 @@ NEVER on the document filename/reference. It auto-clears only on a unique surviv
 
 from backend.recon_core.schema import ReconItem
 from backend.tier1.gl_match import (
+    GL_AMBIGUOUS,
+    GL_NO_BORROWER,
+    GL_NO_ENTRY_TYPE,
+    GL_QUERY_FAILED,
+    GL_ZERO,
     _derive_entry_type,
     extract_candidate_amounts,
     gl_lookup,
@@ -78,7 +83,7 @@ def test_derive_entry_type_from_class():
 
 def test_gl_lookup_matches_on_borrower_entry_type_and_amount():
     fake = _FakeInvoker([_row("GL-1", "2052425.70")])
-    matched = gl_lookup(ITEM, invoker=fake)
+    matched = gl_lookup(ITEM, invoker=fake).row
     assert matched is not None
     assert matched["entry_id"] == "GL-1"
     # Looked up by the borrower (account name), NOT the document reference.
@@ -89,33 +94,85 @@ def test_gl_lookup_matches_on_borrower_entry_type_and_amount():
 def test_gl_lookup_entry_type_mismatch_refutes_even_when_amount_matches():
     # Right amount + right borrower but wrong direction (DEBIT vs the item's CREDIT) -> no match.
     fake = _FakeInvoker([_row("GL-1", "2052425.70", entry_type="DEBIT")])
-    assert gl_lookup(ITEM, invoker=fake) is None
+    assert gl_lookup(ITEM, invoker=fake).row is None
 
 
 def test_gl_lookup_ambiguous_multiple_rows_escalates():
     # Two GL rows both match borrower + CREDIT + an item amount -> ambiguous -> escalate (None).
     rows = [_row("GL-1", "2052425.70"), _row("GL-2", "400000.00")]
-    assert gl_lookup(ITEM, invoker=_FakeInvoker(rows)) is None
+    assert gl_lookup(ITEM, invoker=_FakeInvoker(rows)).row is None
 
 
 def test_gl_lookup_no_amount_match_returns_none():
-    assert gl_lookup(ITEM, invoker=_FakeInvoker([_row("GL-9", "999.99")])) is None
-    assert gl_lookup(ITEM, invoker=_FakeInvoker([])) is None
+    assert gl_lookup(ITEM, invoker=_FakeInvoker([_row("GL-9", "999.99")])).row is None
+    assert gl_lookup(ITEM, invoker=_FakeInvoker([])).row is None
 
 
 def test_gl_lookup_missing_borrower_returns_none():
     item = _item()
     item.attributes["idp_attributes"].pop("BorrowerName")
-    assert gl_lookup(item, invoker=_FakeInvoker([_row("GL-1", "2052425.70")])) is None
+    assert gl_lookup(item, invoker=_FakeInvoker([_row("GL-1", "2052425.70")])).row is None
 
 
 def test_gl_lookup_underivable_entry_type_returns_none():
     item = _item(idp_class=None)
-    assert gl_lookup(item, invoker=_FakeInvoker([_row("GL-1", "2052425.70")])) is None
+    assert gl_lookup(item, invoker=_FakeInvoker([_row("GL-1", "2052425.70")])).row is None
 
 
 def test_gl_lookup_fail_soft_on_invoker_error():
     def boom(_payload):
         raise RuntimeError("athena down")
 
-    assert gl_lookup(ITEM, invoker=boom) is None  # never blocks the pipeline
+    assert gl_lookup(ITEM, invoker=boom).row is None  # never blocks the pipeline
+
+
+# ---------------------------------------------------------------------------------
+# Task 7: the GL failure reason travels with the result instead of only being logged
+# ---------------------------------------------------------------------------------
+
+
+def test_single_match_returns_the_row_and_no_reason():
+    got = gl_lookup(ITEM, invoker=_FakeInvoker([_row("GL-1", "2052425.70")]))
+    assert got.row["entry_id"] == "GL-1" and got.reason is None
+
+
+def test_two_matches_report_ambiguous():
+    """The load-bearing distinction: candidates WERE found and uniqueness rejected them.
+
+    "the ledger has two plausible entries" sends the agent to disambiguate between known rows;
+    "the ledger has nothing" sends it to look for a missing posting. Collapsing both to None (the
+    old behaviour) forced the agent to rediscover which case it was in.
+    """
+    rows = [_row("GL-1", "2052425.70"), _row("GL-2", "400000.00")]
+    got = gl_lookup(ITEM, invoker=_FakeInvoker(rows))
+    assert got.row is None and got.reason == GL_AMBIGUOUS
+
+
+def test_no_matching_row_reports_zero():
+    got = gl_lookup(ITEM, invoker=_FakeInvoker([]))
+    assert got.row is None and got.reason == GL_ZERO
+
+
+def test_missing_borrower_reports_no_borrower():
+    item = _item()
+    item.attributes["idp_attributes"].pop("BorrowerName")
+    got = gl_lookup(item, invoker=_FakeInvoker([_row("GL-1", "2052425.70")]))
+    assert got.reason == GL_NO_BORROWER
+
+
+def test_underivable_entry_type_reports_no_entry_type():
+    """A missing borrower and an unmapped document class are separate upstream problems.
+
+    They shared one exit before, so the pair also pins that the borrower check runs first.
+    """
+    item = _item(idp_class="SomethingElse")
+    got = gl_lookup(item, invoker=_FakeInvoker([_row("GL-1", "2052425.70")]))
+    assert got.reason == GL_NO_ENTRY_TYPE
+
+
+def test_invoker_failure_reports_query_failed_without_raising():
+    def boom(_payload):
+        raise RuntimeError("lambda unavailable")
+
+    got = gl_lookup(ITEM, invoker=boom)
+    assert got.row is None and got.reason == GL_QUERY_FAILED

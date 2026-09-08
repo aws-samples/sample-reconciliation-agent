@@ -1,0 +1,28 @@
+{
+  "document_class": {
+    "type": "cancellation_notice"
+  },
+  "split_document": {
+    "page_indices": [
+      0
+    ]
+  },
+  "classification": "cancellation_notice",
+  "page_ids": [
+    "1"
+  ],
+  "confidence": 1.0,
+  "inference_result": {
+    "notice_date": "2026-03-04",
+    "notice_date_source_raw": "04-Mar-2026",
+    "counterparty": "CINDERMOOR LOGISTICS HOLDINGS",
+    "fund": "TIDELANTERN SENIOR LOAN FUND, LP",
+    "facility": "CINDERMOOR REVOLVING CREDIT FACILITY $200MM",
+    "global_amount": "8500000.00",
+    "activity_type": "Cancelled",
+    "agent_bank": "Meridian Agency Services LLC",
+    "agent_contact_name": "DANA WHITFIELD",
+    "agent_email": "cancellations@meridian-agent.example",
+    "agent_telephone": ""
+  }
+}

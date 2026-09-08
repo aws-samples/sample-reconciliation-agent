@@ -30,6 +30,8 @@ def build_query(
     reference: Optional[str] = None,
     borrower: Optional[str] = None,
     facility: Optional[str] = None,
+    fund_code: Optional[str] = None,
+    loanx_id: Optional[str] = None,
     min_amount=None,
     max_amount=None,
     date_from: Optional[str] = None,
@@ -49,6 +51,12 @@ def build_query(
         where.append(f"upper(borrower) LIKE '%{_esc(borrower).upper()}%'")
     if facility:
         where.append(f"upper(facility) LIKE '%{_esc(facility).upper()}%'")
+    # fund_code and loanx_id are CODES, not free text: exact equality, not a LIKE substring match.
+    # A substring match on codes would make FUND-DL-I also match FUND-DL-II.
+    if fund_code:
+        where.append(f"fund_code = '{_esc(fund_code)}'")
+    if loanx_id:
+        where.append(f"loanx_id = '{_esc(loanx_id)}'")
     if min_amount is not None:
         where.append(f"amount >= {_num(min_amount, 'min_amount')}")
     if max_amount is not None:
@@ -106,8 +114,8 @@ def _apply_status_overlay(rows: list[dict], *, ddb=None) -> list[dict]:
 def handle(event, _context, *, athena=None, sleeper=time.sleep, ddb=None):
     """Run a GL query and return the matching entries (with any status overlay merged in).
 
-    Event (tool input): {reference?, borrower?, facility?, min_amount?, max_amount?,
-    date_from?, date_to?, limit?}. Returns {"rows": [...], "count": n}.
+    Event (tool input): {reference?, borrower?, facility?, fund_code?, loanx_id?, min_amount?,
+    max_amount?, date_from?, date_to?, limit?}. Returns {"rows": [...], "count": n}.
 
     :param athena: injectable Athena client (tests); real client by default.
     :param sleeper: injectable sleep for the poll loop (tests pass a no-op).
@@ -118,6 +126,8 @@ def handle(event, _context, *, athena=None, sleeper=time.sleep, ddb=None):
         reference=event.get("reference"),
         borrower=event.get("borrower"),
         facility=event.get("facility"),
+        fund_code=event.get("fund_code"),
+        loanx_id=event.get("loanx_id"),
         min_amount=event.get("min_amount"),
         max_amount=event.get("max_amount"),
         date_from=event.get("date_from"),

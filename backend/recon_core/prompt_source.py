@@ -2,10 +2,10 @@
 
 The policy text (role, skills-are-procedures, workflow, autonomy semantics, principles) lives in
 exactly ONE editable artifact — ``s3://<assets>/system-prompt.md`` — and BOTH Tier-2 backends read
-it. Previously each backend owned a full copy, and the copies drifted: the runtime copy said
-"skills are NOT categories" while the harness copy still framed classification as picking one, and
-a config version deployed for the harness left the runtime untouched. Drift here is invisible until
-an agent behaves differently depending on which backend happened to be active.
+it. A per-backend copy is the failure mode this design exists to prevent: two copies drift in ways
+nobody notices (one saying "skills are NOT categories" while the other still frames classification as
+picking one), and a config version deployed for one backend leaves the other untouched. The symptom is
+an agent that behaves differently depending on which backend happened to be active.
 
 What is NOT shared is each backend's calling contract — the harness needs the ``submit_proposal``
 field list and the prefixed gateway tool names, which are meaningless to the runtime (it calls

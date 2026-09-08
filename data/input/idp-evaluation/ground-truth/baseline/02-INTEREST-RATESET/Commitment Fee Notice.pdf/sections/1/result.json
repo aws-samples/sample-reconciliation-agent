@@ -1,0 +1,37 @@
+{
+  "document_class": {
+    "type": "commitment_fee_notice"
+  },
+  "split_document": {
+    "page_indices": [
+      0,
+      1,
+      2
+    ]
+  },
+  "classification": "commitment_fee_notice",
+  "page_ids": [
+    "1",
+    "2",
+    "3"
+  ],
+  "confidence": 1.0,
+  "inference_result": {
+    "notice_date": "2026-01-27",
+    "notice_date_source_raw": "27-Jan-2026",
+    "value_date": "2026-01-30",
+    "counterparty": "Mistfell Foods Corp.",
+    "fund": "EVERGREEN FLOATING RATE INCOME FUND, A SERIES OF EVERGREEN INVESTMENT TRUST II",
+    "facility": "USD 450M Revolving Credit Facility",
+    "amount": "224.10",
+    "global_amount": "312500.00",
+    "fee_amount": "224.10",
+    "fee_percentage": "0.500000",
+    "currency": "USD",
+    "activity_type": "Commitment Fee",
+    "cusip": "SYN00023C",
+    "agent_bank": "Tarnsmoor Trust Bank, N.A.",
+    "agent_contact_name": "AGENCY SERVICES",
+    "agent_email": "uslenderrelations@tarnsmoortrustbank.example"
+  }
+}

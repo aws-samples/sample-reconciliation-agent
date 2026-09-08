@@ -14,8 +14,8 @@ human review**. Analysts approve or correct every human-reviewed proposal; corre
 as lessons and fed back to the agent. The AI Engineer can tune the agent live — skills, system prompt,
 autonomy threshold, backend — and monitor a continuous evaluation pipeline.
 
-The humans interact with a Next.js web app (Okta OIDC login) with seven tabs: **Dashboard**,
-**Queue**, **Case detail**, **Skills**, **Lessons**, **Evals**, **Config**.
+The humans interact with a Next.js web app (Okta OIDC login) with eight tabs: **Dashboard**,
+**Queue**, **Case detail**, **Documents**, **Skills**, **Lessons**, **Evals**, **Config**.
 
 ### Terms
 
@@ -25,7 +25,7 @@ The humans interact with a Next.js web app (Okta OIDC login) with seven tabs: **
 - **The worker** — the agent-worker Lambda (`backend/tier1/agent_worker.py`, and in harness mode
   `backend/harness_agent/worker.py`): the **dispatch + HITL driver**. It selects the backend,
   assembles prompts and the trace, services the harness `submit_proposal` pause/resume, computes
-  the composite confidence, executes the Policy-gated ledger write through the gateway when the
+  the evidence-completeness score, executes the Policy-gated ledger write through the gateway when the
   decision is "execute", and contains failures (a case is never stranded `IN_PROGRESS`).
 - **The gateway trust layer** — enforcement lives in the AgentCore Gateway, uniformly for agent
   and human callers: Cedar **Policy** gates the ledger write on confidence (agents) or principal
@@ -90,29 +90,29 @@ Reconciliation Analyst
 
 ### Step-by-Step Flow
 
-| Step | User Action                                         | System Response                                                                                                                                                                                |
-| ---- | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1    | Analyst opens the Queue tab                         | System lists open exceptions (`PENDING` / `IN_PROGRESS` / `PROPOSED`) with per-row: item id, source, the break characterization (its class), status, and a confidence meter for proposed cases |
-| 2    | Analyst filters/sorts to `PROPOSED` cases           | System narrows the list to cases awaiting a human decision                                                                                                                                     |
-| 3    | Analyst scans confidence meters                     | Low-confidence and IDP-penalized items are visually distinguishable, so the analyst can prioritize judgment calls                                                                              |
-| 4    | Analyst multi-selects several routine cases         | System enables the bulk-action controls with the selection count                                                                                                                               |
-| 5    | Analyst applies a bulk status update with a comment | System updates every selected case, writes one audit record per transition to the append-only audit table, and refreshes the queue                                                             |
-| 6    | Analyst clicks a single case row                    | System navigates to Case detail (`/recon/case/[id]`) — continues as CUJ 2 or CUJ 3                                                                                                             |
+| Step | User Action                                         | System Response                                                                                                                                                                                                                            |
+| ---- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1    | Analyst opens the Queue tab                         | System lists open exceptions (`PENDING` / `IN_PROGRESS` / `PROPOSED`) with per-row: item id, source, the break characterization (its class), status, and a confidence meter for proposed cases — the number is the computed Evidence Score |
+| 2    | Analyst filters/sorts to `PROPOSED` cases           | System narrows the list to cases awaiting a human decision                                                                                                                                                                                 |
+| 3    | Analyst scans the Evidence Score meters             | Cases whose investigation obtained less of the evidence their skill prescribes are visually distinguishable, so the analyst can prioritize judgment calls                                                                                  |
+| 4    | Analyst multi-selects several routine cases         | System enables the bulk-action controls with the selection count                                                                                                                                                                           |
+| 5    | Analyst applies a bulk status update with a comment | System updates every selected case, writes one audit record per transition to the append-only audit table, and refreshes the queue                                                                                                         |
+| 6    | Analyst clicks a single case row                    | System navigates to Case detail (`/recon/case/[id]`) — continues as CUJ 2 or CUJ 3                                                                                                                                                         |
 
 ### UI Representation
 
 ```
 +---------------------------------------------------------------------------+
-|  Recon  |  Dashboard  [Queue]  Skills  Evals  Lessons  Config    J.Doe ▾   |
+|  Recon | Dashboard [Queue] Documents Skills Evals Lessons Config  J.Doe ▾  |
 +---------------------------------------------------------------------------+
 |  Open Exceptions (7)                     Filter: [PROPOSED ▾]  [Search…]   |
 |  +-----------------------------------------------------------------------+|
 |  |[ ]| Item ID          | Class                 | Status      | Confidence||
 |  |---|------------------|-----------------------|-------------|-----------||
-|  |[✓]| idp-8f3c21       | record-match-review   | PROPOSED    | ▓▓▓▓░ 0.82||
-|  |[✓]| idp-77aa04       | document-cross-ref…   | PROPOSED    | ▓▓▓░░ 0.71||
-|  |[ ]| api-batch042-17  | record-match-review   | PROPOSED    | ▓▓▓▓░ 0.88||
-|  |[ ]| idp-91d2c8       | unknown               | PROPOSED    | ▓▓░░░ 0.44||
+|  |[✓]| idp-8f3c21       | record-match-review   | PROPOSED    | ▓▓▓▓░ 0.83||
+|  |[✓]| idp-77aa04       | document-cross-ref…   | PROPOSED    | ▓▓▓░░ 0.60||
+|  |[ ]| api-batch042-17  | record-match-review   | PROPOSED    | ▓▓▓░░ 0.67||
+|  |[ ]| idp-91d2c8       | unknown               | PROPOSED    | ░░░░░ 0.00||
 |  |[ ]| idp-3e0b55       | —                     | IN_PROGRESS | —         ||
 |  +-----------------------------------------------------------------------+|
 |  2 selected   [Bulk update ▾]  Comment: [___________________]  [Apply]    |
@@ -122,7 +122,7 @@ Reconciliation Analyst
 ### Acceptance Criteria
 
 - [ ] Queue shows only open lifecycle states (`PENDING`, `IN_PROGRESS`, `PROPOSED`) — terminal cases do not appear
-- [ ] Each `PROPOSED` row shows the classified skill name and the composite confidence as a meter
+- [ ] Each `PROPOSED` row shows the classified skill name and the evidence-completeness score as a meter
 - [ ] Multi-select enables bulk status updates, and a comment can be attached to the bulk action
 - [ ] Every status transition (single or bulk) produces an append-only audit record
 - [ ] Clicking a row opens the case detail page for that item
@@ -132,11 +132,16 @@ Reconciliation Analyst
 
 | Item ID         | Source                          | Class                    | Status      | Confidence |
 | --------------- | ------------------------------- | ------------------------ | ----------- | ---------- |
-| idp-8f3c21      | IDP (custodian payment advice)  | record-match-review      | PROPOSED    | 0.82       |
-| idp-77aa04      | IDP (draw notice)               | document-cross-reference | PROPOSED    | 0.71       |
-| api-batch042-17 | Intake API (structured dataset) | record-match-review      | PROPOSED    | 0.88       |
-| idp-91d2c8      | IDP (unrecognized fax cover)    | unknown                  | PROPOSED    | 0.44       |
+| idp-8f3c21      | IDP (custodian payment advice)  | record-match-review      | PROPOSED    | 0.83 (5/6) |
+| idp-77aa04      | IDP (draw notice)               | document-cross-reference | PROPOSED    | 0.60 (3/5) |
+| api-batch042-17 | Intake API (structured dataset) | record-match-review      | PROPOSED    | 0.67 (4/6) |
+| idp-91d2c8      | IDP (unrecognized fax cover)    | unknown                  | PROPOSED    | 0.00 (0/0) |
 | idp-3e0b55      | IDP (payment advice)            | —                        | IN_PROGRESS | —          |
+
+The score is a rational fraction of the matched skill's REQUIRED evidence steps, so the values a row
+can show are fixed by that skill: `record-match-review` declares six required steps and can therefore
+only score 0.00, 0.17, 0.33, 0.50, 0.67, 0.83 or 1.00. `unknown` declares none, so it is unscoreable
+and reported as 0.00 — a case classified there always escalates.
 
 ### Error / Edge Cases
 
@@ -166,41 +171,42 @@ Reconciliation Analyst
 ### Preconditions
 
 - The Tier-2 agent has completed its loop for the item: classification, skill-driven
-  investigation, and a proposal with composite confidence **below** the auto-resolve threshold
+  investigation, and a proposal whose evidence-completeness score is **below** the auto-resolve threshold
   (otherwise it would have executed autonomously — see CUJ 4)
 - For IDP-sourced items: the ingest hook embedded the IDP results (section classification,
   extracted fields, page-preview images) into the recon item at ingest
 
 ### Step-by-Step Flow
 
-| Step | User Action                                   | System Response                                                                                                                                                                                                                        |
-| ---- | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1    | Analyst opens the case                        | System shows the case header (status `PROPOSED`, class, composite confidence vs. threshold) and the IDP document split view: section tabs on one side ⇄ page images + extracted field values on the other                              |
-| 2    | Analyst inspects the source document          | Split view lets the analyst flip document sections and compare page images against the extracted fields the agent relied on                                                                                                            |
-| 3    | Analyst reads characterization + reasoning    | System shows the break characterization, which skill(s) the agent invoked, the model's reasoning, and the confidence breakdown (self-consistency / evidence grounding / self-report, with the IDP low-confidence penalty when applied) |
-| 4    | Analyst expands the agent trace               | System renders each investigation step as a typed reasoning step: tool called (`search_ledger`, `search_guidance`, `get_results`, `listSharedMailboxMessages`…), inputs/outputs, reasoning, and cited evidence                         |
-| 5    | Analyst checks the proposed resolution        | System shows the structured `proposed_action` — e.g. set ledger draw `DRW-2026-00417` to `Confirmed` — with the ledger reference that was **derived by the worker from `search_ledger` results**, never free-typed by the model        |
-| 6    | Analyst clicks **Approve** (optional comment) | System transitions `PROPOSED → APPROVED`, executes the resolution path, sends the notification email via Microsoft Graph (from the shared mailbox, through the gateway tool), and closes the case as `RESOLVED`                        |
-| 7    | (parallel)                                    | System records the decision as a `USER_APPROVED` lesson in the lessons ledger **and** as an AgentCore Memory event, so future classifications weight this outcome                                                                      |
+| Step | User Action                                   | System Response                                                                                                                                                                                                                                         |
+| ---- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | Analyst opens the case                        | System shows the case header (status `PROPOSED`, class, Evidence Score vs. threshold) and the IDP document split view: section tabs on one side ⇄ page images + extracted field values on the other                                                     |
+| 2    | Analyst inspects the source document          | Split view lets the analyst flip document sections and compare page images against the extracted fields the agent relied on                                                                                                                             |
+| 3    | Analyst reads characterization + reasoning    | System shows the break characterization, which skill(s) the agent invoked, the model's reasoning, and the **Evidence Behind the Score** table — one row per evidence step the matched skill prescribes, and what the agent's tool calls returned for it |
+| 4    | Analyst expands the agent trace               | System renders each investigation step as a typed reasoning step: tool called (`search_ledger`, `search_guidance`, `get_results`, `listSharedMailboxMessages`…), inputs/outputs, reasoning, and cited evidence                                          |
+| 5    | Analyst checks the proposed resolution        | System shows the structured `proposed_action` — e.g. set ledger draw `DRW-2026-00417` to `Confirmed` — with the ledger reference that was **derived by the worker from `search_ledger` results**, never free-typed by the model                         |
+| 6    | Analyst clicks **Approve** (optional comment) | System transitions `PROPOSED → APPROVED`, executes the resolution path, sends the notification email via Microsoft Graph (from the shared mailbox, through the gateway tool), and closes the case as `RESOLVED`                                         |
+| 7    | (parallel)                                    | System records the decision as a `USER_APPROVED` lesson in the lessons ledger **and** as an AgentCore Memory event, so future classifications weight this outcome                                                                                       |
 
 ### UI Representation
 
 ```
 +---------------------------------------------------------------------------+
 |  ← Back to Queue      Case idp-8f3c21          Status: PROPOSED            |
-|  Class: record-match-review        Overall Confidence: 0.82 (threshold .95)|
+|  Class: record-match-review          Evidence Score: 83% (threshold .85)   |
 +---------------------------------------------------------------------------+
 |  Document (IDP)                      |  Agent Analysis                     |
 |  [Advice] [Remittance] [Terms]       |  Classification: record-match-review|
 |  +-------------------------------+   |  Reasoning: amounts differ by fee…  |
-|  |                               |   |  Confidence: cons .84 · grnd .78 ·  |
-|  |   [page image preview]        |   |              self .85 · IDP ×0.9    |
-|  |                               |   |-------------------------------------|
-|  +-------------------------------+   |  Agent Trace                        |
-|  Extracted fields                    |  1. search_ledger(ref=INV-2081…) ✓  |
-|  Amount:    EUR 1,250,000.00         |     → 1 match: DRW-2026-00417       |
-|  Value date: 2026-07-18              |  2. search_guidance("fee deduct…") ✓|
-|  Reference: INV-2081-EU              |  3. Evidence: advice line 12 …      |
+|  |                               |   |  5 of 6 required evidence steps     |
+|  |   [page image preview]        |   |  unsatisfied: fund_alias_match      |
+|  |                               |   |  Skill: record-match-review         |
+|  +-------------------------------+   |-------------------------------------|
+|  Extracted fields                    |  Agent Trace                        |
+|  Amount:    EUR 1,250,000.00         |  1. search_ledger(ref=INV-2081…) ✓  |
+|  Value date: 2026-07-18              |     → 1 match: DRW-2026-00417       |
+|  Reference: INV-2081-EU              |  2. search_guidance("fee deduct…") ✓|
+|                                      |  3. Evidence: advice line 12 …      |
 |                                      |-------------------------------------|
 |                                      |  Proposed Resolution                |
 |                                      |  set_draw_status(DRW-2026-00417,    |
@@ -213,7 +219,7 @@ Reconciliation Analyst
 ### Acceptance Criteria
 
 - [ ] Case detail shows the IDP split view (section tabs ⇄ page images + extracted fields) for IDP-sourced items
-- [ ] Classification, reasoning, and the composite-confidence breakdown are visible
+- [ ] Classification, reasoning, and the evidence-completeness breakdown are visible
 - [ ] The agent trace lists every tool call with inputs, outputs, reasoning, and cited evidence
 - [ ] The proposed action displays the worker-derived ledger reference (0 or >1 candidate matches ⇒ no action is proposed)
 - [ ] **Approve** transitions the case `PROPOSED → APPROVED → RESOLVED` and sends the notification email from the shared mailbox via the Microsoft Graph gateway tool
@@ -227,14 +233,17 @@ Reconciliation Analyst
 Case `idp-8f3c21` — custodian payment advice for EUR 1,250,000.00; general ledger shows
 EUR 1,249,850.00 on draw `DRW-2026-00417` (custodian fee deducted at source). Agent classifies
 `record-match-review`, cites the fee line on the advice, proposes `set_draw_status(DRW-2026-00417,
-Confirmed)` with composite confidence 0.82 — below the 0.85 threshold, so it halts for review.
+Confirmed)` and scores 0.83 — five of the skill's six required evidence steps returned data, with
+`fund_alias_match` unsatisfied. That is the highest partial a six-step skill can reach, and it is
+still below the 0.85 threshold, so the case halts for review. This is the live shape of the score
+rather than a rounded illustration: 0.83 is 5/6 and nothing sits between it and 1.00.
 
 ### Error / Edge Cases
 
 - **Notification email fails** (gateway or Graph error): the failure is surfaced to the analyst; the approval decision and audit trail are not silently lost
 - **Case already decided** (another analyst, or auto-resolved between page load and click): the action fails safely and the page shows the current status instead of double-applying
 - **No clean ledger action** (agent found 0 or multiple candidate references): the proposal shows investigation findings without an executable action; approval closes the case without a ledger write
-- **IDP flagged low-confidence fields**: the ×0.9 penalty is visible in the confidence breakdown so the analyst knows to scrutinize the extracted values
+- **IDP flagged low-confidence fields**: the extraction pipeline's own alert count is shown beside the Evidence Score — it is a **different quantity** and does not change the score, but it tells the analyst to scrutinize the extracted values, and a non-zero count is what lets the gateway interceptor refuse an unattended write outright
 
 ---
 
@@ -419,7 +428,13 @@ AI Engineer
 - The gateway tools the skill will reference exist (e.g. `search_ledger`, `search_guidance`,
   `get_results`, `search_correspondence`, `set_draw_status`). Reference the **model-callable** name:
   the mailbox read is `search_correspondence` (the sanitized wrapper), never the raw
-  `listSharedMailboxMessages`, whose `$`-prefixed OData arguments cannot be offered to a model. There
+  `listSharedMailboxMessages`, whose `$`-prefixed OData arguments cannot be offered to a model. The
+  knowledge-base read is the one tool whose gateway name is not its short name — it is
+  `managed-kb___Retrieve` (Bedrock's own operation, reached through a managed connector), and the
+  container runtime offers it as `search_guidance` as well. A skill that narrows the retrieval should
+  say which metadata facets to filter on (`doc_type`, `break_class`, `skill`, `message_id`, a date
+  bound) rather than spelling out filter JSON, because the two backends take different argument
+  shapes. There
   is no send tool to reference on either backend — a skill that needs a counterparty email declares
   `tools: []` and tells the model to write the message into `submit_proposal`'s `email_draft`, which
   an analyst then approves on the case.
@@ -461,7 +476,7 @@ tools: [search_ledger, search_correspondence]
 - [ ] The agent picks up the updated skill library within ~60 s (runtime) / next session (harness) with **no redeploy**
 - [ ] The `unknown` fallback skill cannot be deleted
 - [ ] The system prompt is editable through the same live mechanism
-- [ ] Classification below the global threshold (`DEFAULT_CLASS_THRESHOLD` 0.6) still falls back to `unknown`
+- [ ] Classification naming no catalog entry still falls back to `unknown` (which declares no evidence steps and so always escalates)
 
 ### Sample Data
 
@@ -536,10 +551,18 @@ AI Engineer
 
 ### Sample Data
 
-`auto_resolve_threshold = 0.85` → agent auto-resolved case `idp-9a11e0` (composite 0.888, single
-matched reference `DRW-2026-00417`); after raising to 0.95, an identical-confidence case halts at
-`PROPOSED` — 0.95 is above what the composite can reach at the model's typical self-report, which
-is exactly why the seeded default is 0.85 (see README, "What the composite can actually reach").
+`auto_resolve_threshold = 0.85` → agent auto-resolved case `idp-9a11e0` (Evidence Score 1.00 — all
+four of `ledger-status-resolution`'s required steps returned data — single matched reference
+`DRW-2026-00417`); a sibling case that missed one step scored 0.75 and halted at `PROPOSED`.
+
+Moving the threshold has a **coarse** effect, because the score is a rational fraction of one skill's
+required steps. For a four-step skill the only reachable values are 0.00, 0.25, 0.50, 0.75 and 1.00,
+so any threshold in (0.75, 1.00] — including both 0.85 and 0.95 — demands complete evidence and
+behaves identically. Raising 0.85 → 0.95 is therefore not a small tightening; it is a no-op for every
+skill declaring six or fewer required steps. The meaningful moves are downward (0.75 would let a
+four-step skill auto-resolve on partial evidence) or disabling auto-resolve outright. 0.85 is seeded
+because it demands complete evidence for every skill shipped today while leaving headroom for a
+future skill with seven or more required steps, where 6/7 ≈ 0.857 would clear.
 
 ### Error / Edge Cases
 

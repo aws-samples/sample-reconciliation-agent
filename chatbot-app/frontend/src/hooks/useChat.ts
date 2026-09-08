@@ -81,9 +81,8 @@ interface UseChatReturn {
   currentModelId: string;
   currentTemperature: number;
   updateModelConfig: (modelId: string, temperature?: number) => void;
-  // Legacy swarm progress — kept as an optional passthrough from session state
-  // so history playback still renders old SwarmProgress panels. Swarm mode
-  // itself has been removed from the product.
+  // Swarm progress — an optional passthrough from session state, present only when a
+  // session carries it. The chat UI does not drive swarm mode; this renders what is there.
   swarmProgress?: {
     isActive: boolean;
     currentNode: string;

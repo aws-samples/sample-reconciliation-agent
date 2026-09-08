@@ -1,0 +1,36 @@
+{
+  "document_class": {
+    "type": "paydown_notice"
+  },
+  "split_document": {
+    "page_indices": [
+      0,
+      1
+    ]
+  },
+  "classification": "paydown_notice",
+  "page_ids": [
+    "1",
+    "2"
+  ],
+  "confidence": 1.0,
+  "inference_result": {
+    "notice_date": "2026-09-15",
+    "notice_date_source_raw": "15-Sep-2026",
+    "value_date": "2026-09-15",
+    "counterparty": "Mistfell Foods Corp.",
+    "fund": "Blue Harbor Loan Fund II, Ltd.",
+    "facility": "INITIAL TERM LOANS",
+    "reference": "MISTFELL FOODS (04/23)",
+    "amount": "618750.00",
+    "global_amount": "275000000.00",
+    "currency": "USD",
+    "activity_type": "Principal Payment",
+    "cusip": "SYN00073L",
+    "agent_bank": "Tarnsmoor Trust Bank, N.A.",
+    "agent_contact_name": "T. OKAFOR",
+    "agent_email": "AGENCY@tarnsmoortrustbank.example",
+    "agent_telephone": "",
+    "notice_comment": "MANDATORY PREPAYMENT FROM EXCESS CASH FLOW LENDERS - THIS PREPAYMENT IS BEING MADE PURSUANT TO SECTION 2.05(b) OF THE CREDIT AGREEMENT (EXCESS CASH FLOW SWEEP) AND IS APPLIED PRO RATA TO THE TERM LOANS."
+  }
+}

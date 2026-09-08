@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
-import { getCase, approveCase, rejectCase } from "@/lib/reconApi";
+import {
+  getCase,
+  approveCase,
+  rejectCase,
+  getLambdaSource,
+} from "@/lib/reconApi";
 
 // There is no signed-in session in the test environment, so stand in for the authorized
 // transport. reconFetch's own header merging is covered in recon-auth.test.ts; what matters here
@@ -85,11 +90,17 @@ describe("reconApi", () => {
     );
   });
 
+  // Two different `confidence` keys survive on this payload and they mean different things — the
+  // point of the assertions below. The case-level one is the ONLY confidence the platform computes:
+  // satisfied/prescribed required evidence steps for the classified skill (0.83 == 5 of 6 on
+  // record-match-review). The step-level one is optional and historical — rows written before
+  // 2026-09-04 carry a number the model reported about itself, nothing reads it, and no new row
+  // sets it. There is deliberately no `classification_confidence` alongside
+  // `classification_reasoning`: the classifier returns a label and a why, never a score.
   it("getCase exposes classification and per-step reasoning/confidence", async () => {
     const caseJson = {
       item_id: "i-1",
       class_id: "timing",
-      classification_confidence: "0.9",
       classification_reasoning: "value date off by 1d",
       confidence: "0.83",
       steps: [
@@ -107,7 +118,41 @@ describe("reconApi", () => {
     );
     const c = await getCase("i-1", "token-abc");
     expect(c.classification_reasoning).toBe("value date off by 1d");
+    expect(c.confidence).toBe("0.83");
     expect(c.steps?.[0].reasoning).toBe("amounts match");
     expect(c.steps?.[0].confidence).toBe("0.83");
+  });
+
+  it("getCase leaves a step's absent confidence absent rather than defaulting it", async () => {
+    // Every step written after 2026-09-04 omits the key. Nothing may substitute a number for it:
+    // a 0 would render as a real self-assessment of zero, which is worse than showing nothing.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          item_id: "i-1",
+          steps: [{ skill: "record-match-review", reasoning: "amounts match" }],
+        }),
+      }),
+    );
+    const c = await getCase("i-1", "token-abc");
+    expect(c.steps?.[0].confidence).toBeUndefined();
+  });
+
+  // The route keys its S3 prefix off ?src=, and "tier1" is its default — passed as no query string
+  // at all. A wrong mapping here shows the operator someone else's code in the read-only viewer.
+  it.each([
+    [undefined, "/api/recon/lambda-src"],
+    ["tier1", "/api/recon/lambda-src"],
+    ["agent", "/api/recon/lambda-src?src=agent"],
+    ["guard", "/api/recon/lambda-src?src=guard"],
+  ])("getLambdaSource(%s) requests %s", async (src, url) => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => [] });
+    vi.stubGlobal("fetch", fetchMock);
+    await getLambdaSource(src as "tier1" | "agent" | "guard" | undefined);
+    expect(fetchMock).toHaveBeenCalledWith(url, expect.anything());
   });
 });

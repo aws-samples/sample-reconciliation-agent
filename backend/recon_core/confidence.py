@@ -1,183 +1,252 @@
-"""Computed composite confidence for agent proposals.
+"""Computed confidence for agent proposals: evidence completeness.
 
-The model's self-reported ("verbalized") confidence is known to be poorly calibrated, so the
-value that drives auto-resolution is a COMPUTED composite of three signals (research:
-consistency-based methods outperform verbalized/logit proxies in black-box settings):
+The value that drives auto-resolution is
 
-- **classification confidence** (weight 0.45): how sure the pipeline is of the break's class.
-- **evidence grounding** (weight 0.35): fraction of cited evidence values that literally
-  appear in the item's data — catches hallucinated support deterministically.
-- **verbalized** (weight 0.20): the model's own stated confidence, kept as a weak signal.
+    confidence = satisfied_required_steps / prescribed_required_steps
 
-If IDP flagged low-confidence extracted fields, the composite is shaved by 10% — the agent is
-reasoning over data IDP itself was unsure about.
+— the fraction of the classified skill's REQUIRED declared evidence steps whose tool call actually
+returned data answering it. A 4-step skill that obtained 3 scores 0.75.
 
-**Backend-agnostic by design.** Both agent backends use the SAME weights and the SAME formula
-(``_composite``); they differ ONLY in the *source* of the classification-confidence signal,
-which is unavoidable because the two backends classify differently:
+Deliberately NOT a weighted composite of classification confidence, evidence grounding and the
+model's verbalized number. Two of those three are the model's assessment of itself, and the third is
+computed from evidence the model chose to cite — so a confident, well-cited, wrong proposal scores
+high. Evidence completeness instead asks a question with a checkable answer: did the investigation
+obtain the data its own skill prescribed?
 
-- **runtime**: k-sample self-consistency (agreement across independent classification samples).
-- **harness**: IDP's per-field extraction confidence, aggregated over the fields IDP actually
-  populated (``backend/idp_hook/explainability.py``). Note the deliberate semantic shift: IDP does
-  **not** emit a ``document_class.confidence``, so on this path the slot measures confidence in the
-  *data the agent reasoned over* rather than in the class label — which is the better fit anyway,
-  since the harness's class label comes from the model (``submit_proposal.class_name``), never from
-  IDP. Both readings are "confidence in the inputs to the proposal", which is what the 0.45 weight
-  buys. See the harness signal + tool-parity design record (D2).
+**What this score does NOT measure.** Coverage is not accuracy. A proposal can satisfy every
+prescribed step and still match the wrong record, scoring 1.0. Whether answers are *right* is
+measured only by the labelled eval set and the Online Evaluation configuration. Nothing in this
+module should ever be read as a correctness signal.
 
-When the classification signal is unavailable, the remaining two weights are renormalized
-identically on both paths (grounding → 0.35/0.55, verbalized → 0.20/0.55 of the composite —
-i.e. 0.636 x grounding + 0.364 x verbalized; see W_* below). This guarantees
-that, given the same classification confidence / grounding / verbalized inputs, both backends
-compute the identical score.
+**Backend-agnostic by construction.** Both agent backends call :func:`score_proposal` with the same
+trace, so their scores are identical rather than merely reconciled — the property
+``tests/recon_core/test_confidence_idp.py`` asserts. The arithmetic deliberately lives here and never
+in a prompt, which is what makes that identity possible.
+
+**Threshold interaction.** The score is a rational fraction, so a 4-step skill can only produce 0.00,
+0.25, 0.50, 0.75 or 1.00. With the auto-resolve threshold at 0.85, no skill with fewer than seven
+required steps can auto-resolve below full evidence (6/7 ≈ 0.857 is the first sub-perfect value that
+clears). That is the intended posture — full evidence for straight-through processing — and it is
+arithmetic rather than a coded control, so it is stated here rather than left to be rediscovered.
+
+**One number, not three.** Two tempting companions are deliberately absent, and neither should be
+added back as a "displayed diagnostic": the model's own verbalized confidence, and a grounding
+fraction measuring how much of the agent's cited evidence appears verbatim in the item data. The
+self-report is not evidence about the investigation. Grounding measures almost nothing, because the
+agent cites evidence as prose ("bank side amount=26772.73, entry_type=CREDIT") that never appears
+literally in the item JSON — it reads as a permanent 0.00 beside cases that satisfied every prescribed
+step. Three numbers side by side, two of which are not scores, is a worse answer than one that is.
 """
 
 import json
-import re
 
-from backend.recon_core.schema import ReasoningStep, ReconItem
-
-# Single shared weight set — identical across both backends.
-W_CLASSIFICATION = 0.45
-W_GROUNDING = 0.35
-W_VERBALIZED = 0.20
-IDP_ALERT_PENALTY = 0.9
-
-# Backwards-compatible aliases (older imports referenced W_CONSISTENCY / W_IDP). The runtime's
-# "consistency" and the harness's "idp" are the SAME classification-confidence slot now.
-W_CONSISTENCY = W_CLASSIFICATION
-W_IDP = W_CLASSIFICATION
-W_GROUNDING_IDP = W_GROUNDING
-W_VERBALIZED_IDP = W_VERBALIZED
-
-# When the classification signal is absent, its 0.45 weight has nothing to carry it, so
-# grounding + verbalized are renormalized to keep the composite spanning [0, 1]. Same on both
-# paths: grounding gets 0.35/(0.35+0.20) = 0.6363…, verbalized gets 0.20/0.55 = 0.3636….
-_NO_CLASS_DENOM = W_GROUNDING + W_VERBALIZED
-W_GROUNDING_NO_CLASS = W_GROUNDING / _NO_CLASS_DENOM
-W_VERBALIZED_NO_CLASS = W_VERBALIZED / _NO_CLASS_DENOM
-# Aliases used by the harness renormalization path — identical values, kept for call-site clarity.
-W_GROUNDING_NO_IDP = W_GROUNDING_NO_CLASS
-W_VERBALIZED_NO_IDP = W_VERBALIZED_NO_CLASS
+from backend.recon_core.schema import EvidenceStep, ReasoningStep
+from backend.recon_core.skill_meta import step_field
 
 
-def _normalize(s: str) -> str:
-    """Lowercase and strip everything except alphanumerics so formatting noise
-    (commas in amounts, spacing, case) doesn't count as a mismatch."""
-    return re.sub(r"[^a-z0-9]", "", s.lower())
+def evidence_completeness(
+    *, prescribed: list[EvidenceStep | dict], steps: list[ReasoningStep]
+) -> tuple[float, dict]:
+    """Fraction of the skill's REQUIRED prescribed steps that obtained data.
 
+    This is the score that drives auto-resolution. It replaces a weighted composite two
+    of whose terms were things the model said about itself; this one is checkable against the trace.
 
-def grounding_fraction(*, evidence: list[str], haystack: str) -> float:
-    """Fraction of cited evidence values that appear (normalized) in ``haystack``.
+    Only required steps are counted. A step reported ``satisfied=False`` and a step never reported at
+    all both count as unsatisfied, but they are listed separately in the returned components because
+    "the agent never looked" and "the agent looked and the data is not there" are different findings
+    for the human reading the case.
 
-    Shared core of evidence grounding. Each evidence string is split on ':'/'=' and its VALUE
-    part (or the whole string) is checked. Empty evidence scores 0.0 — an unverifiable proposal
-    must not look trustworthy.
+    The arithmetic lives here rather than in the prompt so both agent backends produce bit-identical
+    scores for identical traces — the invariant ``tests/recon_core/test_confidence_idp.py`` asserts.
 
-    :param evidence: cited evidence strings.
-    :param haystack: the text the evidence must be grounded in (already RAW; normalized here).
-    :returns: grounded fraction in [0, 1].
+    An id the skill never declared is IGNORED for scoring and reported in ``undeclared_step_ids``
+    rather than raised on. It is a model reporting error, not a declaration error: the skill file is
+    fine, the model just named a step nobody asked for. Raising discarded the whole investigation —
+    on 2026-09-02 a live runtime invocation reported ``account_name_match`` (a name the skill's PROSE
+    invites while its front matter declares ``expected_entry_match``), and ~7 minutes and several
+    hundred tool calls were thrown away, leaving the case stuck in IN_PROGRESS with no proposal and
+    no analyst-visible reason. Ignoring cannot inflate the score, because an undeclared id is by
+    definition not one of ``required_ids`` — the worst it can do is leave a required step
+    unattempted, which lowers the score and is listed for the human. Same call, for the same reason,
+    as :func:`downgrade_unsupported_reports` makes for unsupported satisfied-claims.
+
+    :param prescribed: the loaded skill's ``evidence_steps`` entries, as ``EvidenceStep`` models OR
+        as the JSON dicts :func:`skill_meta.catalog_entry` projects them to. BOTH shapes must be
+        accepted, which is why the fields are read through ``skill_meta.step_field``: the runtime
+        backend loads real skills and gets models, while the harness backend has no skill-loading
+        tool and can only pass the catalog. Reading ``s.required`` directly, as this did until
+        2026-09-02, made every harness proposal die with ``AttributeError: 'dict' object has no
+        attribute 'required'`` the moment its classification started working.
+    :param steps: the agent's reasoning trace for this proposal.
+    :returns: ``(score, components)``; components carries ``prescribed``, ``satisfied``,
+        ``unsatisfied_step_ids``, ``unattempted_step_ids`` and ``undeclared_step_ids`` for the audit
+        trail.
+    :raises ValueError: when ``prescribed`` declares no required step — a zero denominator is a
+        declaration bug, not a score, and the fix is to edit the skill file.
     """
-    hay = _normalize(haystack)
-    if not evidence:
-        return 0.0
-    grounded = 0
-    for ev in evidence:
-        value = re.split(r"[:=]", ev, maxsplit=1)[-1]
-        needle = _normalize(value) or _normalize(ev)
-        if needle and needle in hay:
-            grounded += 1
-    return grounded / len(evidence)
-
-
-def evidence_grounding(*, item: ReconItem, steps: list[ReasoningStep]) -> float:
-    """Fraction of cited evidence values that actually appear in the item's data.
-
-    Each evidence string is split on ':'/'=' and its VALUE part (or the whole string) is
-    checked, normalized, against the normalized item JSON. No evidence at all is scored 0.0 —
-    an unverifiable proposal must not look trustworthy.
-
-    :param item: the reconciliation item (its full JSON is the haystack).
-    :param steps: the agent's reasoning steps carrying cited evidence.
-    :returns: grounded fraction in [0, 1].
-    """
-    haystack = json.dumps(item.model_dump(), default=str)
-    cited: list[str] = [e for s in steps for e in (s.evidence or [])]
-    return grounding_fraction(evidence=cited, haystack=haystack)
-
-
-def _composite(
-    *, classification: float | None, grounding: float, verbalized: float, idp_alerts: int
-) -> float:
-    """The single, backend-agnostic composite formula both paths use.
-
-    :param classification: classification-confidence signal in [0, 1] (runtime: self-consistency;
-        harness: IDP assessment confidence), or None when unavailable → renormalize the other two.
-    :param grounding: evidence-grounding fraction.
-    :param verbalized: the model's stated overall confidence.
-    :param idp_alerts: count of low-confidence IDP fields (any > 0 applies the 10% penalty).
-    :returns: composite confidence, clamped to [0, 1].
-    """
-    if classification is None:
-        c = W_GROUNDING_NO_CLASS * grounding + W_VERBALIZED_NO_CLASS * verbalized
-    else:
-        c = (
-            W_CLASSIFICATION * classification
-            + W_GROUNDING * grounding
-            + W_VERBALIZED * verbalized
+    required_ids = [step_field(s, "id") for s in prescribed if step_field(s, "required")]
+    if not required_ids:
+        raise ValueError(
+            f"skill declares no required evidence steps "
+            f"(ids={[step_field(s, 'id') for s in prescribed]}) — "
+            "evidence completeness has no denominator"
         )
-    if idp_alerts:
-        c *= IDP_ALERT_PENALTY
-    return max(0.0, min(1.0, c))
+    declared = {step_field(s, "id") for s in prescribed}
+
+    # Last report wins: a retried tool call reports the same step twice and the final outcome is the
+    # investigation's conclusion.
+    outcomes: dict[str, bool | None] = {}
+    undeclared: list[str] = []
+    for step in steps:
+        if step.step_id is None:
+            continue  # trace entries that are not evidence steps (skill_load, propose, execute)
+        if step.step_id not in declared:
+            # Recorded, not raised (see the docstring). Kept in report order and de-duplicated so a
+            # retried call does not list the same invented id twice.
+            if step.step_id not in undeclared:
+                undeclared.append(step.step_id)
+            continue
+        outcomes[step.step_id] = step.satisfied
+
+    satisfied = [i for i in required_ids if outcomes.get(i) is True]
+    unsatisfied = [i for i in required_ids if outcomes.get(i) is False]
+    # `is None` covers BOTH no report at all and a report whose outcome is None — an uninterpretable
+    # `satisfied` from `coerce_step_reports`, or a satisfied-claim `downgrade_unsupported_reports`
+    # rewrote. All three mean "no data was obtained and the agent did not say it tried and failed".
+    # Keying on `i not in outcomes` instead would score those steps at 0 while listing them in
+    # neither bucket, leaving the human a checklist that silently omits a step.
+    unattempted = [i for i in required_ids if outcomes.get(i) is None]
+    return len(satisfied) / len(required_ids), {
+        "prescribed": len(required_ids),
+        "satisfied": len(satisfied),
+        "unsatisfied_step_ids": unsatisfied,
+        "unattempted_step_ids": unattempted,
+        # Always present, empty in the normal case: an absent key would render as "no problem" in the
+        # UI whether the check ran or not, and this is the one component that reports a defect in the
+        # AGENT's reporting rather than in the evidence.
+        "undeclared_step_ids": undeclared,
+    }
 
 
-def composite_confidence(
-    *, consistency: float, grounding: float, verbalized: float, idp_alerts: int = 0
-) -> float:
-    """Runtime-path composite: classification signal = k-sample self-consistency.
+def score_proposal(
+    *, skills: list[dict], class_id: str, steps: list[ReasoningStep]
+) -> tuple[float, dict]:
+    """Score a proposal's evidence completeness against the skill it was classified under.
 
-    Thin wrapper over :func:`_composite` so both backends share ONE formula/weights — see the
-    module docstring. Kept for the runtime call site + existing tests.
+    The single entry point both agent backends call, so the two cannot drift: the runtime container
+    and the harness worker resolve the same skill and run the same arithmetic on the same trace.
 
-    :param consistency: classification agreement fraction across samples.
-    :param grounding: evidence-grounding fraction.
-    :param verbalized: the model's stated overall confidence.
-    :param idp_alerts: count of low-confidence IDP fields (any > 0 applies the penalty).
-    :returns: composite confidence, clamped to [0, 1].
+    A skill that declares no ``evidence_steps`` at all is **unscoreable**, not an error: ``unknown``
+    is the classification fallback and is not a break-type skill, so nothing was prescribed and
+    nothing can be evidenced. It scores 0.0 and escalates. A skill that declares steps but marks
+    none required is a different thing — a break-type declaration bug — and raises through
+    :func:`evidence_completeness`.
+
+    :param skills: the skills available to this investigation — ``parse_skill`` records from the
+        runtime backend, or :func:`skill_meta.catalog_entry` projections from the harness backend,
+        which has no skill-loading tool. Both are accepted; see :func:`evidence_completeness`.
+    :param class_id: the classified break type, which is also the driving skill's ``name``.
+    :param steps: the agent's reasoning trace.
+    :returns: ``(score, components)``; components always carries ``skill``, plus either the
+        completeness breakdown or an ``unscoreable`` explanation.
+    :raises ValueError: when ``class_id`` names no loaded skill, or the resolved skill's declaration
+        is malformed.
     """
-    return _composite(
-        classification=consistency,
-        grounding=grounding,
-        verbalized=verbalized,
-        idp_alerts=idp_alerts,
-    )
+    matched = [s for s in skills if s.get("name") == class_id]
+    if not matched:
+        raise ValueError(
+            f"classified skill {class_id!r} was not loaded (loaded: "
+            f"{[s.get('name') for s in skills]}) — the trace describes work against instructions "
+            "that were never in the prompt"
+        )
+    prescribed = matched[0].get("evidence_steps") or []
+    if not prescribed:
+        return 0.0, {
+            "skill": class_id,
+            "unscoreable": f"skill {class_id!r} declares no evidence_steps",
+            "prescribed": 0,
+            "satisfied": 0,
+            "unsatisfied_step_ids": [],
+            "unattempted_step_ids": [],
+            # Same keys on both branches: the UI reads components without knowing which one produced
+            # it, so a key that exists only on the scoreable path becomes an undefined render.
+            "undeclared_step_ids": [],
+        }
+    score, components = evidence_completeness(prescribed=prescribed, steps=steps)
+    return score, {"skill": class_id, **components}
 
 
-def composite_confidence_idp(
-    *,
-    idp_confidence: float | None,
-    grounding: float,
-    verbalized: float,
-    idp_alerts: int = 0,
-) -> float:
-    """Composite confidence for the HARNESS path: classification signal = IDP confidence.
+def downgrade_unsupported_reports(
+    *, steps: list[ReasoningStep], observed_tools: set[str]
+) -> list[ReasoningStep]:
+    """Rewrite ``satisfied=True`` reports that no tool call supports into unattempted.
 
-    IDENTICAL formula and weights to the runtime path (:func:`composite_confidence`) — the only
-    difference is the *source* of the classification-confidence signal (IDP's assessment score
-    instead of self-consistency), which is unavoidable because the harness has no k-sample loop.
-    So ``0.45·idp + 0.35·grounding + 0.20·verbalized``; when IDP confidence is absent (``None``)
-    the classification term drops and grounding/verbalized renormalize exactly as on the runtime
-    path. A low-confidence IDP alert shaves 10% (same as runtime).
+    The per-step outcome is model-supplied, so it is a claim. The recorded tool calls are evidence
+    about the investigation itself, and an investigation that made no tool calls cannot have obtained
+    data — whatever it reports. Rather than raise (which would discard a usable proposal over a
+    reporting error), the unsupported claim is downgraded to ``None``: it scores as unsatisfied and
+    stays visibly distinct from a step the agent said it tried and failed.
 
-    :param idp_confidence: IDP classification confidence in [0, 1], or None when unavailable.
-    :param grounding: evidence-grounding fraction.
-    :param verbalized: the model's stated overall confidence.
-    :param idp_alerts: count of low-confidence IDP fields (any > 0 applies the penalty).
-    :returns: composite confidence, clamped to [0, 1].
+    Deliberately coarse — it fires only when the investigation made **no** data-returning tool call
+    at all. Mapping individual steps to individual tools would require each skill to declare which
+    tool satisfies which step, which the front matter does not carry, and inventing that mapping in
+    Python would put the skill's contract in two places. The coarse check catches the case that
+    actually matters (a proposal fabricated with no lookups) without pretending to more precision
+    than the declaration supports.
+
+    :param steps: the trace, including the ``evidence_step`` entries from ``coerce_step_reports``.
+    :param observed_tools: short names of the tools that actually returned during the investigation.
+    :returns: a new list with unsupported satisfied-claims set to ``satisfied=None``.
     """
-    return _composite(
-        classification=idp_confidence,
-        grounding=grounding,
-        verbalized=verbalized,
-        idp_alerts=idp_alerts,
-    )
+    if observed_tools:
+        return steps
+    return [
+        s.model_copy(update={"satisfied": None})
+        if s.kind == "evidence_step" and s.satisfied is True
+        else s
+        for s in steps
+    ]
+
+
+def coerce_step_reports(*, raw: object, skill: str) -> list[ReasoningStep]:
+    """Normalize the agent's per-step outcome reports into trace steps.
+
+    Defensive by necessity: neither backend enforces the submit argument schema (the harness does not
+    validate inline-function inputs, and the runtime parses a JSON message), so this arrives in
+    whatever shape the model emitted. Every uninterpretable case degrades toward UNATTEMPTED rather
+    than satisfied — a malformed report must never raise the score.
+
+    :param raw: the submitted ``evidence_steps`` field, any shape (list, JSON string, or junk).
+    :param skill: the skill that drove the investigation, recorded as the step's trace label.
+    :returns: one ``kind="evidence_step"`` ReasoningStep per interpretable report; reports without a
+        ``step_id`` are dropped, since guessing which step they meant would fabricate coverage.
+    """
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(raw, list):
+        return []
+
+    out: list[ReasoningStep] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        step_id = str(entry.get("step_id") or "").strip()
+        if not step_id:
+            continue
+        satisfied = entry.get("satisfied")
+        # Only a real bool counts. "yes"/1/"partial" are recorded as not-attempted, which scores the
+        # same as unsatisfied but stays visibly distinct from a step the agent actually reported on.
+        out.append(
+            ReasoningStep(
+                skill=skill,
+                kind="evidence_step",
+                reasoning=str(entry.get("note") or f"evidence step {step_id}"),
+                step_id=step_id,
+                satisfied=satisfied if isinstance(satisfied, bool) else None,
+            )
+        )
+    return out

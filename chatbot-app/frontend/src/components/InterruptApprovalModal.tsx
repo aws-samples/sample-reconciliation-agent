@@ -92,7 +92,7 @@ function InterruptDetails({ name, reason }: { name: string; reason?: Record<stri
     )
   }
 
-  // Email delete (legacy)
+  // Email delete
   if (name.includes('email-delete-approval')) {
     return (
       <div className="space-y-3">

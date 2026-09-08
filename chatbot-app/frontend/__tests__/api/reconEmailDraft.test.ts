@@ -18,13 +18,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 process.env.CASES_TABLE = "recon-dev-cases";
 process.env.COUNTERPARTY_EMAIL_DOMAINS = "counterparty.example";
 process.env.GRAPH_MAILBOX = "shared@operator.example";
-process.env.RECON_NOTIFY_EMAIL = "ops@operator.example";
+process.env.NOTIFY_CONTACT_ID = "notify-primary";
 process.env.RECON_GATEWAY_URL = "https://gw.example/mcp";
 process.env.EMAIL_CONFIRMATION_TOKEN = "tok-123";
 
 const ddbSend = vi.fn();
 const callGatewayTool = vi.fn();
 const authorizeRequest = vi.fn();
+const resolveContactAddress = vi.fn();
 const editDraft = vi.fn();
 const approveDraft = vi.fn();
 const revokeDraftApproval = vi.fn();
@@ -44,6 +45,17 @@ vi.mock("@/lib/gatewayMcp", () => ({ callGatewayTool }));
 vi.mock("@/lib/api-auth", () => ({ authorizeRequest }));
 vi.mock("@/lib/reconMemory", () => ({ recordLessonMemoryEvent: vi.fn() }));
 vi.mock("@/lib/rescoreAgreement", () => ({ rescoreAgreement: vi.fn() }));
+vi.mock("@/lib/contactStore", () => ({
+  // Real class again: the draft route branches on `instanceof` to tell an unsendable contact (400,
+  // the analyst picked badly) from a DynamoDB failure (502, nobody picked badly).
+  ContactUnavailable: class ContactUnavailable extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = "ContactUnavailable";
+    }
+  },
+  resolveContactAddress,
+}));
 vi.mock("@/lib/emailDraftStore", () => ({
   // A real class, because both routes branch on `instanceof DraftConflict` to choose 409 over 502.
   DraftConflict: class DraftConflict extends Error {
@@ -62,6 +74,7 @@ vi.mock("@/lib/emailDraftStore", () => ({
 
 const { marshall } = await import("@aws-sdk/util-dynamodb");
 const { DraftConflict } = await import("@/lib/emailDraftStore");
+const { ContactUnavailable } = await import("@/lib/contactStore");
 const { PUT } = await import("@/app/api/recon/cases/[id]/draft/route");
 const { POST } = await import("@/app/api/recon/cases/[id]/route");
 
@@ -81,14 +94,23 @@ const putDraft = (body: unknown) =>
 const postCase = (body: unknown) =>
   POST(request("http://x/api/recon/cases/i-1", "POST", body), params);
 
-/** A persisted draft, `approved` at revision 3 unless overridden. */
+/**
+ * A persisted draft, `approved` at revision 3 unless overridden.
+ *
+ * `recipient` is null and stays null — no row in this system stores an address. The id below is what
+ * both the send path and the interceptor resolve, separately, to find out where the mail goes.
+ */
 function draft(over: Record<string, unknown> = {}) {
   return {
-    recipient: "ap@counterparty.example",
+    recipient: null,
+    recipient_contact_id: "c-ap-1",
     recipient_hint: "Counterparty AP",
+    template_id: "tpl-short-pay",
+    variables: { invoice: "42" },
     subject: "Invoice 42 — short payment",
     body: "We received 900.00 against invoice 42 for 1000.00.",
     draft_status: "approved",
+    render_error: null,
     revision: 3,
     approved_revision: 3,
     send_attempted_at: null,
@@ -96,6 +118,9 @@ function draft(over: Record<string, unknown> = {}) {
     ...over,
   };
 }
+
+/** The address `c-ap-1` resolves to by default. In the allowlist, so the happy path stays happy. */
+const AP_ADDRESS = "ap@counterparty.example";
 
 /** Seed the case row `getCase` reads. */
 function seedCase(over: Record<string, unknown> = {}) {
@@ -131,18 +156,19 @@ function counterpartySend(): Record<string, unknown> {
 beforeEach(() => {
   vi.clearAllMocks();
   authorizeRequest.mockResolvedValue({ ok: true, subject: "analyst@x.com" });
+  resolveContactAddress.mockResolvedValue(AP_ADDRESS);
   callGatewayTool.mockResolvedValue({
     structuredContent: { transitioned: true },
   });
 });
 
 describe("PUT /api/recon/cases/[id]/draft", () => {
-  it("stores an edit under the verified caller's identity", async () => {
+  it("stores the contact id, not an address, under the verified caller's identity", async () => {
     editDraft.mockResolvedValue(
       draft({ revision: 4, draft_status: "pending" }),
     );
     const res = await putDraft({
-      recipient: "ap@counterparty.example",
+      recipient_contact_id: "c-ap-1",
       subject: "Invoice 42",
       body: "Please confirm.",
       revision: 3,
@@ -153,11 +179,18 @@ describe("PUT /api/recon/cases/[id]/draft", () => {
     // `edited_by` is who wrote text that may leave the operator, so it comes from the token and
     // never from the body — a client claiming to be someone else changes nothing here.
     expect(editDraft).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "i-1", editedBy: "analyst@x.com" }),
+      expect.objectContaining({
+        id: "i-1",
+        recipientContactId: "c-ap-1",
+        editedBy: "analyst@x.com",
+      }),
     );
+    // The address was resolved to check it, then dropped. Persisting it would mean deactivating the
+    // contact tomorrow left this row still pointing at a live address.
+    expect(editDraft.mock.calls[0][0]).not.toHaveProperty("recipient");
   });
 
-  it("rejects a recipient outside the allowlist and writes nothing", async () => {
+  it("refuses a body that supplies an address instead of a contact", async () => {
     const res = await putDraft({
       recipient: "ap@attacker.example",
       subject: "Invoice 42",
@@ -165,67 +198,102 @@ describe("PUT /api/recon/cases/[id]/draft", () => {
       revision: 3,
     });
 
+    // Not "the address is out of policy" but "this field does not exist here". A client cannot
+    // choose the address at all, so there is nothing for an attacker-supplied one to influence.
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toMatch(/not an allowed/i);
-    // The analyst-edit path is where an address supplied by a human enters the system; the whole
-    // point of checking here is that nothing out-of-policy gets persisted to be approved later.
+    expect((await res.json()).error).toMatch(
+      /recipient_contact_id is required/,
+    );
     expect(editDraft).not.toHaveBeenCalled();
   });
 
-  it("rejects an out-of-allowlist recipient on the first save too, not only on a re-edit", async () => {
-    // Criterion 6 reads "on both create and edit", and in the BFF those are ONE route: the agent
-    // persists the draft with `recipient: null` (`email_policy.build_persisted_draft` discards the
-    // address the model proposed), so the analyst's first save is the create — a PUT at revision 0
-    // against a draft that has no recipient yet. There is no second entry point to check, and the
-    // interesting half of the criterion is that the check does not somehow depend on an existing
-    // address being present to compare against.
+  it("saves a draft to a contact outside the send gate, and leaves the gate to the gateway", async () => {
+    // This route does NOT domain-check. `counterparty_email_domains` is a gate and the gateway request
+    // interceptor is the gate: it re-derives the verdict from its own copy on every send, against the
+    // stored text at the approved revision. A second opinion here read a container env var fixed at
+    // task start, so it could only ever agree with the interceptor or be WRONG -- and being wrong meant
+    // refusing a draft the deployment would in fact have sent.
+    //
+    // The draft is still only editable, not sendable: nothing about saving it authorizes a send.
+    resolveContactAddress.mockResolvedValue("ap@attacker.example");
     const res = await putDraft({
-      recipient: "ap@attacker.example",
+      recipient_contact_id: "c-old-1",
       subject: "Invoice 42",
       body: "Please confirm.",
-      revision: 0,
+      revision: 3,
+    });
+
+    expect(res.status).toBe(200);
+    expect(editDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it("still resolves the contact, so an unresolvable one fails here and not at send time", async () => {
+    // The address is resolved even though it is not domain-checked: that is what makes a deactivated or
+    // deleted contact fail now, while an analyst is looking at it, instead of after they approve.
+    resolveContactAddress.mockResolvedValue("ap@notcounterparty.example");
+    const res = await putDraft({
+      recipient_contact_id: "c-look-1",
+      subject: "s",
+      body: "b",
+      revision: 3,
+    });
+    expect(res.status).toBe(200);
+    expect(resolveContactAddress).toHaveBeenCalled();
+  });
+
+  it("rejects a deactivated contact at edit time rather than at send time", async () => {
+    // The whole reason the row stores an id: this refusal is available the moment the analyst picks,
+    // and again independently in the interceptor when the send is attempted. Getting it here means
+    // nobody approves a draft that was never sendable.
+    resolveContactAddress.mockRejectedValue(
+      new ContactUnavailable(
+        "contact c-gone-1 is deactivated and cannot be sent to",
+      ),
+    );
+    const res = await putDraft({
+      recipient_contact_id: "c-gone-1",
+      subject: "s",
+      body: "b",
+      revision: 3,
     });
 
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toMatch(/not an allowed/i);
+    expect((await res.json()).error).toMatch(/deactivated/);
     expect(editDraft).not.toHaveBeenCalled();
-
-    // …and the allowlisted address at the same revision is stored, so the rejection above is the
-    // allowlist talking and not the create shape failing for some unrelated reason.
-    editDraft.mockResolvedValue(
-      draft({ revision: 1, draft_status: "pending", approved_revision: null }),
-    );
-    const ok = await putDraft({
-      recipient: "ap@counterparty.example",
-      subject: "Invoice 42",
-      body: "Please confirm.",
-      revision: 0,
-    });
-
-    expect(ok.status).toBe(200);
-    expect(editDraft).toHaveBeenCalledWith(
-      expect.objectContaining({
-        recipient: "ap@counterparty.example",
-        revision: 0,
-        editedBy: "analyst@x.com",
-      }),
-    );
   });
 
-  it("rejects a lookalike of an allowlisted domain", async () => {
+  it("reports a contacts-table failure as 502, not as a bad choice by the analyst", async () => {
+    resolveContactAddress.mockRejectedValue(
+      new Error("DynamoDB: ProvisionedThroughputExceeded"),
+    );
     const res = await putDraft({
-      recipient: "ap@notcounterparty.example",
+      recipient_contact_id: "c-ap-1",
+      subject: "s",
+      body: "b",
+      revision: 3,
+    });
+
+    expect(res.status).toBe(502);
+    expect(editDraft).not.toHaveBeenCalled();
+  });
+
+  it("requires a recipient_contact_id", async () => {
+    const res = await putDraft({
       subject: "s",
       body: "b",
       revision: 3,
     });
     expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(
+      /recipient_contact_id is required/,
+    );
+    expect(resolveContactAddress).not.toHaveBeenCalled();
     expect(editDraft).not.toHaveBeenCalled();
   });
 
   it("requires the revision rather than defaulting it", async () => {
     const res = await putDraft({
-      recipient: "ap@counterparty.example",
+      recipient_contact_id: "c-ap-1",
       subject: "s",
       body: "b",
     });
@@ -236,7 +304,7 @@ describe("PUT /api/recon/cases/[id]/draft", () => {
 
   it("requires a subject and a body", async () => {
     const res = await putDraft({
-      recipient: "ap@counterparty.example",
+      recipient_contact_id: "c-ap-1",
       subject: "  ",
       body: "b",
       revision: 3,
@@ -250,7 +318,7 @@ describe("PUT /api/recon/cases/[id]/draft", () => {
       new DraftConflict("the draft changed while you were working on it"),
     );
     const res = await putDraft({
-      recipient: "ap@counterparty.example",
+      recipient_contact_id: "c-ap-1",
       subject: "s",
       body: "b",
       revision: 3,
@@ -266,12 +334,14 @@ describe("PUT /api/recon/cases/[id]/draft", () => {
       message: "missing bearer token",
     });
     const res = await putDraft({
-      recipient: "ap@counterparty.example",
+      recipient_contact_id: "c-ap-1",
       subject: "s",
       body: "b",
       revision: 3,
     });
     expect(res.status).toBe(401);
+    // Not even a read of the contacts table on an unauthenticated request.
+    expect(resolveContactAddress).not.toHaveBeenCalled();
     expect(editDraft).not.toHaveBeenCalled();
   });
 });
@@ -348,8 +418,10 @@ describe("POST /api/recon/cases/[id] — approve with a counterparty draft", () 
       action: "approve",
       comment: "confirmed with the desk",
       draft_revision: 3,
-      // A body that tries to redirect the mail. It is ignored: the send is assembled from `armed`.
+      // A body that tries to redirect the mail. It is ignored twice over: the text comes from
+      // `armed`, and the address comes from resolving that row's contact id.
       recipient: "attacker@evil.example",
+      recipient_contact_id: "c-attacker-1",
       subject: "Wire instructions changed",
     });
 
@@ -362,8 +434,14 @@ describe("POST /api/recon/cases/[id] — approve with a counterparty draft", () 
     const message = args.message as Record<string, unknown>;
     expect(message.subject).toBe(armed.subject);
     expect((message.body as { content: string }).content).toBe(armed.body);
+    // The address is the armed row's CONTACT resolved server-side, never the body's field and never
+    // a stored address — `armed.recipient` is null.
+    expect(resolveContactAddress).toHaveBeenCalledWith({
+      contactId: "c-ap-1",
+      kind: "counterparty",
+    });
     expect(message.toRecipients).toEqual([
-      { emailAddress: { address: armed.recipient } },
+      { emailAddress: { address: AP_ADDRESS } },
     ]);
 
     expect(armSend).toHaveBeenCalledWith({
@@ -395,6 +473,49 @@ describe("POST /api/recon/cases/[id] — approve with a counterparty draft", () 
     expect(res.status).toBe(409);
     expect((await res.json()).error).toMatch(/approve or discard the draft/);
     // RESOLVED is terminal, so resolving now would strand the draft unsendable forever.
+    expect(armSend).not.toHaveBeenCalled();
+    expect(gatewayCalls()).toHaveLength(0);
+  });
+
+  it("blocks the case decision while the draft is stuck on a failed render", async () => {
+    // The agent meant to write to the counterparty and the template it cited would not render. If
+    // RESOLVED could be reached from here the case would close with the mail neither sent nor
+    // consciously abandoned, which is the one outcome nobody can spot afterwards.
+    seedCase({
+      proposed_email: draft({
+        draft_status: "render_failed",
+        render_error: "ValueError: template declares no placeholder 'amount'",
+        subject: "",
+        body: "",
+      }),
+    });
+    const res = await postCase({ action: "approve", draft_revision: 3 });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/approve or discard the draft/);
+    expect(armSend).not.toHaveBeenCalled();
+    expect(gatewayCalls()).toHaveLength(0);
+  });
+
+  it("refuses to resolve the case when the approved draft's contact was deactivated", async () => {
+    // Deactivating a contact revokes every approved draft aimed at it, with nobody editing a case.
+    // The refusal lands before the ledger write and before `armSend`, so no `send_attempted_at`
+    // stamp is burned on a send that provably never happened — the analyst repoints the draft at a
+    // live contact instead of clearing an "outcome unknown" warning that would be a lie.
+    seedCase({ proposed_email: draft() });
+    resolveContactAddress.mockRejectedValue(
+      new ContactUnavailable(
+        "contact c-ap-1 is deactivated and cannot be sent to",
+      ),
+    );
+
+    const res = await postCase({ action: "approve", draft_revision: 3 });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      status: "PROPOSED",
+      error: expect.stringContaining("deactivated"),
+    });
     expect(armSend).not.toHaveBeenCalled();
     expect(gatewayCalls()).toHaveLength(0);
   });

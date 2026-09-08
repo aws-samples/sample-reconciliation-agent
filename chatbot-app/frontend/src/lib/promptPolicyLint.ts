@@ -11,7 +11,7 @@
  * defect in our prompt, and it will recur on every run.
  *
  * That text is wrong here twice over: the model holds no tool that changes a downstream system
- * (see agent-blueprint/recon-agent/strands_investigator.py), and a proposal whose composite
+ * (see agent-blueprint/recon-agent/strands_investigator.py), and a proposal whose computed
  * confidence clears the auto-resolve threshold is executed by the platform with no human in the
  * loop (backend/recon_core/auto_resolve.autonomous_execute). An agent told to wait for approval
  * it will never be offered either stalls or narrates a request nobody reads.
@@ -57,6 +57,24 @@ const RULES: PolicyRule[] = [
     pattern: /classification types|skills? catalog(?:ue)?/i,
     message:
       "Treats the skills as a classification taxonomy. Skills are procedures, and several may apply to one item — this is the stale wording the shared-core fix removed.",
+  },
+  {
+    // Every model-reported confidence number was deleted on 2026-09-04, INCLUDING the tool-schema
+    // properties that used to receive one. So this is not a style preference: a prompt asking for a
+    // rating asks for something `submit_proposal` has nowhere to put. Four shapes, all taken from
+    // text that really existed here — the bare interval from step 1, an imperative to state one's
+    // own confidence, the optimizer's "your stated confidence" (which also asserts a composite that
+    // no longer exists), and the two deleted field names, in case an optimizer run resurrects them
+    // from an older baseline.
+    //
+    // The verb list is what keeps this off the live core, which says "Nothing you assert about your
+    // own certainty moves this number" — a NEGATION of the same idea, and the one sentence in the
+    // prompt that must survive this lint. `assert` is deliberately absent below; the fixture test
+    // pins that, so widening the verbs without re-reading the live prompt will fail loudly.
+    pattern:
+      /confidence in \[0,\s*1\]|(?:state|report|rate|give|include)[^.\n]{0,40}\byour\s+(?:own\s+)?(?:confidence|certainty)|your\s+stated\s+confidence|classification_confidence|verbalized_confidence/i,
+    message:
+      "Asks the agent to grade its own certainty. Nothing reads a self-reported number and submit_proposal has no property for one — the score is computed from the evidence steps the agent reports (backend/recon_core/confidence.score_proposal). See docs/plans/2026-09-04-single-confidence-signal-design.md.",
   },
 ];
 

@@ -28,8 +28,14 @@ variable "lessons_table" {
   type        = string
 }
 
+# Kept in the data source even though both backends now use the UNIFIED span destination, i.e.
+# spans land in each agent's own log group (see `event_log_groups`) and no longer here. It stays for
+# two reasons: an agent can be rolled back to the shared destination with
+# UNIFIED_TRACES_DESTINATION_ENABLED=false without also editing this config, and sessions recorded
+# BEFORE the switch are still only readable from `aws/spans`. Listing a log group that receives
+# nothing costs the evaluation config nothing.
 variable "harness_log_group_name" {
-  description = "CloudWatch log group name where OTel spans are delivered (Transaction Search; online eval data source)."
+  description = "Shared span log group retained as a data source for pre-unified sessions and for a rollback to the shared destination. Spans from current sessions arrive in the per-agent groups named by `event_log_groups`."
   type        = string
   default     = "aws/spans"
 }

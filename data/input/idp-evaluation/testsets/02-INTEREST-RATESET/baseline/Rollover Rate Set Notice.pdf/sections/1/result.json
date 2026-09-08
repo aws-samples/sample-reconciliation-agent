@@ -1,0 +1,35 @@
+{
+  "document_class": {
+    "type": "rollover_rate_set_notice"
+  },
+  "split_document": {
+    "page_indices": [
+      0
+    ]
+  },
+  "classification": "rollover_rate_set_notice",
+  "page_ids": [
+    "1"
+  ],
+  "confidence": 1.0,
+  "inference_result": {
+    "notice_date": "2026-01-22",
+    "notice_date_source_raw": "22-Jan-2026",
+    "value_date": "2026-01-26",
+    "counterparty": "NORTHWIND MANUFACTURING LLC",
+    "fund": "DL Fund II",
+    "facility": "NORTHWIND REVOLVING CREDIT FACILITY",
+    "global_amount": "24000000.00",
+    "currency": "USD",
+    "activity_type": "Rollover",
+    "facility_id_source_raw": "SL-204899",
+    "loanx_id": "LX204899XXXX1",
+    "contract_id": "CT-204899-A",
+    "new_contract_id": "CT-204899-B",
+    "agent_bank": "Meridian Agency Services LLC",
+    "agent_contact_name": "Dana Whitfield",
+    "agent_email": "loan.ops@meridian-agent.example",
+    "agent_telephone": "+1-555-0142",
+    "notice_comment": "only rollover notice - no standalone cash movement is expected for this event; interest accrues to the next payment date."
+  }
+}

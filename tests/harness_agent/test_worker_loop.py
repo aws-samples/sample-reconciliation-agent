@@ -7,9 +7,15 @@ from moto import mock_aws
 
 from backend.harness_agent import worker
 from backend.recon_core.cases import CaseStore
-from backend.recon_core.schema import ReconItem
+from backend.recon_core.schema import EvidenceStep, ReconItem
 
-CATALOG = [{"name": "document-cross-reference", "confidence_threshold": 0.7},
+# The skill's `evidence_steps` are the denominator of the proposal's confidence — the number the
+# threshold in `_run` compares against — so the loop tests cannot exercise the execute path without
+# them. `_submit_events` reports both as satisfied, and `_ledger_events` provides the tool call that
+# keeps those claims from being downgraded.
+CATALOG = [{"name": "document-cross-reference", "confidence_threshold": 0.7,
+            "evidence_steps": [EvidenceStep(id="ledger_hit", description="the ledger entry"),
+                               EvidenceStep(id="notice_hit", description="the notice")]},
            {"name": "unknown", "confidence_threshold": 0.0}]
 ITEM = ReconItem(item_id="idp-1", domain="loan-servicing",
                  sides=[{"name": "ledger", "attributes": {"reference": "DDTL-A-0001"}}],
@@ -45,11 +51,17 @@ def _ledger_events():
     ]
 
 
-def _submit_events(status="Cancelled"):
+def _submit_events(status="Cancelled", satisfied=("ledger_hit", "notice_hit")):
+    """Build a submit_proposal stream. `satisfied` selects which prescribed steps are reported as
+    obtained, which is what sets the proposal's confidence: both => 1.0, one => 0.5."""
+    reports = ",".join(
+        '{"step_id":"%s","satisfied":%s}' % (sid, "true" if sid in satisfied else "false")
+        for sid in ("ledger_hit", "notice_hit")
+    )
     body = ('{"class_name":"document-cross-reference","classification_reasoning":"x",'
-            '"classification_confidence":0.9,"resolution":"Mark cancelled",'
-            f'"verbalized_confidence":0.9,"status":"{status}","reason":"pushed",'
-            '"evidence":["reference: DDTL-A-0001"]}')
+            f'"resolution":"Mark cancelled","status":"{status}","reason":"pushed",'
+            '"evidence":["reference: DDTL-A-0001"],'
+            f'"evidence_steps":[{reports}]}}')
     return [
         {"contentBlockStart": {"contentBlockIndex": 1, "start": {"toolUse": {"toolUseId": "t2", "name": "submit_proposal"}}}},
         {"contentBlockDelta": {"contentBlockIndex": 1, "delta": {"toolUse": {"input": body}}}},
@@ -75,8 +87,7 @@ def _run(invoke, threshold=0.9, write_transport=None, write_calls=None):
         return {"content": []}
 
     return worker.run_investigation(
-        item=ITEM, invoke=invoke, cases=cases, catalog=CATALOG,
-        idp_classification_confidence=0.95, threshold=threshold,
+        item=ITEM, invoke=invoke, cases=cases, catalog=CATALOG, threshold=threshold,
         write_transport=write_transport or _default_write,
     ), cases
 
@@ -100,8 +111,9 @@ def test_execute_path_resolves_and_writes_lesson(monkeypatch):
 @mock_aws
 def test_escalate_when_below_threshold_stays_proposed():
     _tables()
-    turns = iter([_ledger_events() + _submit_events(), _write_events()])
-    outcome, _ = _run(lambda _m: next(turns), threshold=0.999)  # composite < threshold
+    # 1 of 2 required evidence steps obtained => 0.5, under the 0.6 threshold.
+    turns = iter([_ledger_events() + _submit_events(satisfied=("ledger_hit",)), _write_events()])
+    outcome, _ = _run(lambda _m: next(turns), threshold=0.6)
     assert outcome == "escalated"
     row = boto3.resource("dynamodb", region_name="us-east-1").Table("recon-cases").get_item(
         Key={"item_id": "idp-1"})["Item"]
@@ -179,11 +191,11 @@ def test_stale_builtin_tool_does_not_shadow_submit_proposal():
 
 
 def _submit_events_malformed():
-    """A submit_proposal missing BOTH `resolution` and `reason` (unrecoverable) — but with a
-    valid class_name + confidence. build_proposal must reject it, yet the degraded persist should
-    PRESERVE the classification + confidence rather than collapse to unknown/0."""
+    """A submit_proposal missing BOTH `resolution` and `reason` (unrecoverable) — but with a valid
+    class_name. build_proposal must reject it, yet the degraded persist should PRESERVE the
+    classification rather than collapse to unknown."""
     body = ('{"class_name":"document-cross-reference","classification_reasoning":"x",'
-            '"classification_confidence":0.9,"evidence":["reference: DDTL-A-0001"]}')
+            '"evidence":["reference: DDTL-A-0001"]}')
     return [
         {"contentBlockStart": {"contentBlockIndex": 1, "start": {"toolUse": {"toolUseId": "t2", "name": "submit_proposal"}}}},
         {"contentBlockDelta": {"contentBlockIndex": 1, "delta": {"toolUse": {"input": body}}}},
@@ -193,17 +205,17 @@ def _submit_events_malformed():
 
 
 @mock_aws
-def test_malformed_proposal_preserves_classification_and_confidence():
+def test_malformed_proposal_preserves_the_classification():
     """Regression (observed live 2026-07-27): a submit_proposal missing `resolution` collapsed the
-    case to unknown/confidence-0, discarding a correct classification. The degraded persist must
-    keep the model's class + IDP confidence."""
+    case to unknown, discarding a correct classification. The degraded persist must keep the model's
+    class — it names the skill whose prescribed steps a re-run would be scored against, so throwing it
+    away costs the human reviewer the one piece of the proposal that was sound."""
     ddb = _tables()
     outcome, _ = _run(lambda _m: _ledger_events() + _submit_events_malformed())
     assert outcome == "escalated"
     row = ddb.Table("recon-cases").get_item(Key={"item_id": "idp-1"})["Item"]
     assert row["status"] == "PROPOSED"
     assert row["class_id"] == "document-cross-reference"      # preserved, NOT "unknown"
-    assert float(row["classification_confidence"]) == 0.95    # IDP confidence preserved, NOT 0
     assert "malformed proposal" in row["resolution"]          # still flagged for the human
 
 
@@ -215,7 +227,7 @@ def test_toolresult_message_uses_text_not_json_content():
     import json
 
     decision = {"decision": "execute", "reference": "DDTL-A-0001",
-                "composite": 0.9812, "threshold": 0.95, "outcome": "executed"}
+                "confidence": 0.9812, "threshold": 0.95, "outcome": "executed"}
     msg = worker._toolresult_message("t-close", decision)
     parts = msg["content"][0]["toolResult"]["content"]
     assert [p for p in parts if "json" in p] == []  # no bare json part → Strands can format it

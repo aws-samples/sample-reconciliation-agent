@@ -35,11 +35,17 @@ const store = await import("@/lib/emailDraftStore");
 /** A draft row as `build_persisted_draft` writes it, overridable per test. */
 function draftRow(over: Record<string, unknown> = {}) {
   return {
-    recipient: "ap@counterparty.example",
+    // Null in every row this system writes; the address lives in the contacts table and is resolved
+    // at send time. Present here because the attribute IS written, as NULL.
+    recipient: null,
+    recipient_contact_id: "c-ap-1",
     recipient_hint: "Counterparty AP",
+    template_id: "tpl-short-pay",
+    variables: { invoice: "42" },
     subject: "Invoice 42",
     body: "Please confirm.",
     draft_status: "approved",
+    render_error: null,
     revision: 3,
     approved_revision: 3,
     edited_by: null,
@@ -110,7 +116,7 @@ describe("emailDraftStore", () => {
     resolveWith(draftRow({ revision: 4, draft_status: "pending" }));
     await store.editDraft({
       id: "i-1",
-      recipient: "ap@counterparty.example",
+      recipientContactId: "c-ap-1",
       subject: "Invoice 42",
       body: "Please confirm.",
       revision: 3,
@@ -119,6 +125,14 @@ describe("emailDraftStore", () => {
 
     const input = updateInput();
     expectExactPlaceholders(input);
+    // A contact id goes in, never an address — that is what makes deactivating a contact tomorrow
+    // revoke this draft without anyone editing the case.
+    expect(input.UpdateExpression).toContain("#pe.#rcid = :rcid");
+    expect(input.ExpressionAttributeValues[":rcid"]).toEqual({ S: "c-ap-1" });
+    expect(input.ExpressionAttributeNames).not.toHaveProperty("#rcpt");
+    // A stale render_error would otherwise sit on the case explaining why text that renders fine
+    // could not be rendered.
+    expect(input.UpdateExpression).toContain("#pe.#rerr = :null");
     // The approval does not survive an edit: were `approved_revision` left at 3 while `revision`
     // moved to 4, the interceptor's equality check is the only thing standing between an analyst's
     // approval and text nobody read.
@@ -132,10 +146,17 @@ describe("emailDraftStore", () => {
     // Pinned to the revision the analyst was editing, and only from a live draft.
     expect(input.ConditionExpression).toContain("#pe.#rev = :rev");
     expect(input.ConditionExpression).toContain("#st = :proposed");
-    expect(input.ConditionExpression).toContain("#pe.#ds IN (:ds0, :ds1)");
+    // pending, approved, render_failed — the three states an analyst can still act on. The last is
+    // editable so a draft whose template would not render has an exit that is not "abandon the case".
+    expect(input.ConditionExpression).toContain(
+      "#pe.#ds IN (:ds0, :ds1, :ds2)",
+    );
+    expect(input.ExpressionAttributeValues[":ds2"]).toEqual({
+      S: "render_failed",
+    });
   });
 
-  it("approves only a pending draft that already has a recipient", async () => {
+  it("approves only a pending draft that already names a recipient contact", async () => {
     resolveWith(draftRow());
     await store.approveDraft({
       id: "i-1",
@@ -147,8 +168,11 @@ describe("emailDraftStore", () => {
     expectExactPlaceholders(input);
     expect(input.ConditionExpression).toContain("#pe.#ds IN (:ds0)");
     expect(input.ExpressionAttributeValues[":ds0"]).toEqual({ S: "pending" });
+    // On the contact id, not on `recipient`. `recipient` is NULL on every row, so the old check on
+    // it would now fail every approve — and `attribute_type(x, "S")` is false for NULL, which is the
+    // sort of failure that surfaces as "the draft changed" and sends nobody anywhere useful.
     expect(input.ConditionExpression).toContain(
-      "attribute_type(#pe.#rcpt, :string)",
+      "attribute_type(#pe.#rcid, :string)",
     );
     // The approval names the revision it approves — this is what the interceptor compares.
     expect(input.UpdateExpression).toContain("#pe.#ar = :rev");
@@ -205,7 +229,7 @@ describe("emailDraftStore", () => {
     await expect(
       store.editDraft({
         id: "i-1",
-        recipient: "ap@counterparty.example",
+        recipientContactId: "c-ap-1",
         subject: "s",
         body: "b",
         revision: 3,
@@ -223,14 +247,29 @@ describe("emailDraftStore", () => {
     ).rejects.toThrow(/the draft is discarded/);
   });
 
-  it("mentions a missing recipient when nothing else explains a failed approve", async () => {
+  it("mentions a missing recipient contact when nothing else explains a failed approve", async () => {
     failCondition();
-    // Everything `diagnose` can see is fine, so the recipient condition is what failed.
+    // Everything `diagnose` can see is fine, so the contact-id condition is what failed.
     diagnoseWith({ proposed_email: draftRow({ draft_status: "pending" }) });
 
     await expect(
       store.approveDraft({ id: "i-1", revision: 3, approvedBy: "a@x.com" }),
-    ).rejects.toThrow(/no recipient yet/);
+    ).rejects.toThrow(/names no recipient yet/);
+  });
+
+  it("lets a failed render be discarded, so a broken template cannot strand a case", async () => {
+    resolveWith(draftRow({ draft_status: "discarded" }));
+    await store.discardDraft({
+      id: "i-1",
+      revision: 3,
+      discardedBy: "analyst@x.com",
+    });
+
+    const input = updateInput();
+    expectExactPlaceholders(input);
+    expect(input.ExpressionAttributeValues[":ds2"]).toEqual({
+      S: "render_failed",
+    });
   });
 
   it("surfaces a non-condition failure as itself", async () => {

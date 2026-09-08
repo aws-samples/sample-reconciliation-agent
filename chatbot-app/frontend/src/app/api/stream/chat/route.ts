@@ -123,7 +123,7 @@ async function processAguiMessagesImages(
         }
         continue
       }
-      // Legacy "image" content parts (Anthropic-style)
+      // "image" content parts (Anthropic-style)
       if (part.type === 'image') {
         const source = part.source
         if (!source || source.type !== 'base64' || !source.data) continue
