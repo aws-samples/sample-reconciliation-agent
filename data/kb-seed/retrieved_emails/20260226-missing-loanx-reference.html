@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>
+      Paydown notice for SL-99001 carries no LoanX ID — facility novated
+      14-Jan-2026
+    </title>
+  </head>
+  <body>
+    <h1>
+      Paydown notice for SL-99001 carries no LoanX ID — facility novated
+      14-Jan-2026
+    </h1>
+
+    <table>
+      <tbody>
+        <tr>
+          <th>From</th>
+          <td>
+            Tarnsmoor Loan Operations &lt;loan.ops@tarnsmoor-trust.example&gt;
+          </td>
+        </tr>
+        <tr>
+          <th>To</th>
+          <td>loan-ops@loanmesa.example</td>
+        </tr>
+        <tr>
+          <th>Cc</th>
+          <td>recon-team@loanmesa.example</td>
+        </tr>
+        <tr>
+          <th>Date</th>
+          <td>Thursday, 26 February 2026 10:15 (UTC)</td>
+        </tr>
+        <tr>
+          <th>Subject</th>
+          <td>
+            Paydown notice for SL-99001 carries no LoanX ID — facility novated
+            14-Jan-2026
+          </td>
+        </tr>
+        <tr>
+          <th>Message-ID</th>
+          <td>MSG-20260226-SL99001</td>
+        </tr>
+        <tr>
+          <th>Attachments</th>
+          <td>20260226-paydown-notice-unmapped-facility.pdf</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>Lenders,</p>
+
+    <p>
+      Attached is the principal paydown notice for Evergreen Specialty Finance
+      Inc. on CINDERMOOR LOGISTICS TL-B $250MM, effective 2026-03-02: global
+      amount USD 2,500,000.00, your share USD 12,500.00, wire reference
+      WIRE-20260302-EVG.
+    </p>
+
+    <p>
+      The notice carries <strong>no LoanX identifier</strong>, and that is
+      expected rather than an omission on our side. This facility was
+      <strong>novated to us from a predecessor agent on 2026-01-14</strong> and
+      LoanX has not yet reissued the identifier against our facility record.
+      Until it does, the notice will keep going out without it.
+    </p>
+
+    <p>Match on the two identifiers the notice does carry:</p>
+
+    <ul>
+      <li>
+        <strong>Facility ID SL-99001</strong> — stable across the novation
+      </li>
+      <li>
+        <strong>Reference WIRE-20260302-EVG</strong> — unique to this payment
+      </li>
+    </ul>
+
+    <p>
+      To be explicit, because this has been misread before: the absence of the
+      LoanX ID is <strong>not</strong> an amount discrepancy and should not be
+      aged as one. Recover the facility from SL-99001, then match on the amount
+      — it will tie to the cent.
+    </p>
+
+    <p>
+      <strong>Do not carry the predecessor agent's LoanX ID forward.</strong>
+      That identifier belongs to the retired facility record, and reusing it
+      will point your position at a facility we no longer administer. Wait for
+      the reissued value.
+    </p>
+
+    <p>
+      For the avoidance of doubt, the identifiers currently in force for this
+      borrower are:
+    </p>
+
+    <ul>
+      <li>
+        CINDERMOOR LOGISTICS TL-B $250MM — Facility ID SL-99001 — LoanX: not yet
+        reissued
+      </li>
+      <li>
+        CINDERMOOR LOGISTICS TL-A $160MM — LoanXid as printed:
+        <code>LX223061XXXX1</code>
+      </li>
+      <li>
+        CINDERMOOR REVOLVING CREDIT FACILITY $200MM — Facility ID SL-204833
+      </li>
+    </ul>
+
+    <p>
+      One trap on that middle line, since it bites every time a new facility is
+      onboarded. A LoanX ID as printed on a notice is
+      <strong>not always the value you match on</strong>. Our notices state the
+      rule themselves: a valid LoanX ID is <code>LX</code> followed by six
+      digits, and where the printed string ends in a run of <code>X</code>s the
+      first eight characters are the valid value. So
+      <code>LX223061XXXX1</code> is <code>LX223061</code>. Matching the printed
+      thirteen-character string against a reference file holding the
+      eight-character one produces a missing-reference break on a facility that
+      is in fact fully mapped.
+    </p>
+
+    <p>
+      We will confirm by email once LoanX reissues the TL-B identifier. Treat
+      that as a mapping update, not a second payment.
+    </p>
+
+    <p>Queries quoting SL-99001 to loan.ops@tarnsmoor-trust.example.</p>
+
+    <p>
+      Tarnsmoor Trust Bank, N.A.<br />
+      Loan Operations — Loan Administration<br />
+      loan.ops@tarnsmoor-trust.example &nbsp;+1-555-0188
+    </p>
+  </body>
+</html>

@@ -39,7 +39,7 @@ interface DocumentInfo {
   tool_type: string;
 }
 
-// Chart info structure from shared_context (legacy)
+// Chart info structure from shared_context
 interface ChartInfo {
   title: string;
   description?: string;
@@ -166,7 +166,7 @@ function SharedContextRenderer({
   // Extract arrays from context
   const documents: DocumentInfo[] = context?.documents || [];
   const images: ImageInfo[] = context?.images || [];
-  const charts: ChartInfo[] = context?.charts || []; // legacy
+  const charts: ChartInfo[] = context?.charts || [];
 
   // If no renderable items, show raw JSON as fallback
   if (documents.length === 0 && images.length === 0 && charts.length === 0) {
@@ -237,7 +237,7 @@ function SharedContextRenderer({
         </div>
       )}
 
-      {/* Charts (legacy) */}
+      {/* Charts */}
       {charts.length > 0 && (
         <div className="flex flex-wrap gap-2">
           {charts.map((chart, idx) => (

@@ -25,17 +25,37 @@ import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
 const REGION = process.env.AWS_REGION ?? "us-east-1";
 const CASES_TABLE = process.env.CASES_TABLE ?? "recon-dev-cases";
 
-/** Draft lifecycle, mirroring `backend/recon_core/email_policy.py`'s DRAFT_* constants. */
-export type DraftStatus = "pending" | "approved" | "discarded" | "sent";
+/**
+ * Draft lifecycle, mirroring `backend/recon_core/email_policy.py`'s DRAFT_* constants.
+ *
+ * `render_failed` is not an analyst action: the agent cited a template whose placeholders and its
+ * payload disagreed, so the draft was persisted visibly broken rather than dropped. It has no approve
+ * path — an operator fixes the template, and the case is re-investigated.
+ */
+export type DraftStatus =
+  "pending" | "approved" | "discarded" | "sent" | "render_failed";
 
 /** The `proposed_email` map as `email_policy.build_persisted_draft` writes it. */
 export interface PersistedDraft {
-  /** Null until an analyst supplies it — the model's address is always discarded. */
-  recipient: string | null;
+  /**
+   * Always null, in every persisted row, forever. The address is resolved from
+   * `recipient_contact_id` at send time — by the BFF to know where to send, and independently by the
+   * gateway interceptor to decide whether to allow. Kept in the type because the attribute is
+   * written (as NULL) and code that reads it should see that it is never an address.
+   */
+  recipient: null;
+  /** Which contact in `recon-contacts` receives this. The authority; the hint below is prose. */
+  recipient_contact_id: string;
   recipient_hint: string;
+  /** Which template produced the subject/body below, and the values substituted into it. */
+  template_id: string;
+  variables: Record<string, string>;
+  /** The RENDERED subject and body. What the analyst approves is what the interceptor compares. */
   subject: string;
   body: string;
   draft_status: DraftStatus;
+  /** Non-null only when `draft_status` is `render_failed`; names why the render failed. */
+  render_error: string | null;
   revision: number;
   /** The revision that was approved; compared against `revision` at send time. */
   approved_revision: number | null;
@@ -79,7 +99,8 @@ const NAMES: Record<string, string> = {
   "#rev": "revision",
   "#ds": "draft_status",
   "#ar": "approved_revision",
-  "#rcpt": "recipient",
+  "#rcid": "recipient_contact_id",
+  "#rerr": "render_error",
   "#subj": "subject",
   "#body": "body",
   "#eb": "edited_by",
@@ -92,8 +113,17 @@ const NAMES: Record<string, string> = {
   "#sent": "sent_at",
 };
 
-/** Statuses a draft can still be acted on from. `sent` and `discarded` are terminal. */
-const LIVE_STATUSES: DraftStatus[] = ["pending", "approved"];
+/**
+ * Statuses a draft can still be acted on from. `sent` and `discarded` are terminal.
+ *
+ * `render_failed` is here so the analyst has a way out of one: editing it writes their own subject and
+ * body and returns it to `pending`, and discarding it records that this case will not write to the
+ * counterparty. Leaving it out would mean the only exit was an operator fixing the template and the
+ * case being re-investigated — with the case blocked in the meantime, since the case decision refuses
+ * to close over an undecided draft. Approving one is still impossible: {@link approveDraft} allows
+ * only `pending`, so the broken text can never be the text that goes out.
+ */
+const LIVE_STATUSES: DraftStatus[] = ["pending", "approved", "render_failed"];
 
 /**
  * Narrow the alias/value maps to what the given expressions actually reference.
@@ -236,15 +266,23 @@ async function mutate({
 }
 
 /**
- * Record an analyst's edit: new recipient/subject/body at the next revision.
+ * Record an analyst's edit: new recipient contact, subject and body at the next revision.
  *
  * The edit REVOKES any approval — `draft_status` returns to `pending` and `approved_revision`,
  * `approved_by` and `approved_at` are cleared. Without that, an approval recorded against the old
  * text would silently carry over to text nobody read, which is the exact substitution this
  * feature exists to prevent.
  *
+ * A contact ID is written, never an address. `recipient` stays NULL for the life of the row; the
+ * address is derived from this id at send time, so pointing the draft at a contact that is later
+ * deactivated makes the approved draft unsendable with no further action.
+ *
+ * `render_error` is cleared as a matter of course: the analyst has just supplied their own subject and
+ * body, so a stale explanation of why the agent's template render failed would sit on the case
+ * contradicting text that renders fine.
+ *
  * @param id - the case id.
- * @param recipient - the analyst-supplied address (already allowlist-checked by the caller).
+ * @param recipientContactId - the contact the analyst picked (already validated by the caller).
  * @param subject - the edited subject.
  * @param body - the edited body.
  * @param revision - the revision the analyst was editing.
@@ -254,14 +292,14 @@ async function mutate({
  */
 export async function editDraft({
   id,
-  recipient,
+  recipientContactId,
   subject,
   body,
   revision,
   editedBy,
 }: {
   id: string;
-  recipient: string;
+  recipientContactId: string;
   subject: string;
   body: string;
   revision: number;
@@ -272,7 +310,8 @@ export async function editDraft({
     revision,
     allowed: LIVE_STATUSES,
     sets: [
-      "#pe.#rcpt = :rcpt",
+      "#pe.#rcid = :rcid",
+      "#pe.#rerr = :null",
       "#pe.#subj = :subj",
       "#pe.#body = :body",
       "#pe.#rev = :next",
@@ -284,7 +323,7 @@ export async function editDraft({
       "#pe.#ea = :ea",
     ],
     values: {
-      ":rcpt": recipient,
+      ":rcid": recipientContactId,
       ":subj": subject,
       ":body": body,
       ":next": revision + 1,
@@ -303,7 +342,7 @@ export async function editDraft({
  * @param revision - the revision the analyst read and approved.
  * @param approvedBy - the verified caller subject.
  * @returns the approved draft.
- * @throws DraftConflict when the draft moved, is not `pending`, or still has no recipient.
+ * @throws DraftConflict when the draft moved, is not `pending`, or names no recipient contact.
  */
 export async function approveDraft({
   id,
@@ -319,9 +358,11 @@ export async function approveDraft({
       id,
       revision,
       allowed: ["pending"],
-      // An address is required to approve, not merely to send: approving is the analyst's
-      // statement that this message is ready to go out, and one without a recipient is not.
-      extraConditions: ["attribute_type(#pe.#rcpt, :string)"],
+      // A recipient contact is required to approve, not merely to send: approving is the analyst's
+      // statement that this message is ready to go out, and one addressed to nobody is not. The
+      // check is on the contact id, because `recipient` is NULL on every row by design and a check
+      // on it would fail every approve.
+      extraConditions: ["attribute_type(#pe.#rcid, :string)"],
       sets: [
         "#pe.#ds = :approved",
         "#pe.#ar = :rev",
@@ -337,13 +378,13 @@ export async function approveDraft({
     });
   } catch (err) {
     // `diagnose` cannot see the recipient condition (it is specific to this action), so name it
-    // here rather than letting a missing address report as a generic "the draft changed".
+    // here rather than letting a missing contact report as a generic "the draft changed".
     if (
       err instanceof DraftConflict &&
       err.message.startsWith("the draft changed")
     ) {
       throw new DraftConflict(
-        `${err.message} (if the draft has no recipient yet, add one before approving)`,
+        `${err.message} (if the draft names no recipient yet, pick one before approving)`,
       );
     }
     throw err;

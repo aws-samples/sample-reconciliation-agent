@@ -37,21 +37,21 @@ describe('imageExtractor', () => {
       expect(result).toEqual([])
     })
 
-    it('should fallback to legacy _blobImage format', () => {
+    it('should fall back to the single _blobImage format', () => {
       const msg = {
-        _blobImage: { format: 'gif', data: 'legacybase64' }
+        _blobImage: { format: 'gif', data: 'singlebase64' }
       }
 
       const result = extractBlobImages(msg, 'any-tool-id')
-      expect(result).toEqual([{ format: 'gif', data: 'legacybase64' }])
+      expect(result).toEqual([{ format: 'gif', data: 'singlebase64' }])
     })
 
-    it('should prioritize _blobImages over legacy _blobImage', () => {
+    it('should prioritize _blobImages over the single _blobImage', () => {
       const msg = {
         _blobImages: {
           'tool-1': { format: 'png', data: 'newformat' }
         },
-        _blobImage: { format: 'gif', data: 'legacyformat' }
+        _blobImage: { format: 'gif', data: 'singleformat' }
       }
 
       const result = extractBlobImages(msg, 'tool-1')

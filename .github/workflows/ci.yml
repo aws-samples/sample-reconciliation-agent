@@ -1,0 +1,158 @@
+####################################################################################
+# CI for the GitHub (aws-samples) remote — verification only, no deploy.
+#
+# This remote is the PUBLISHED SAMPLE. Two properties of it shape this workflow:
+#
+#   1. It receives a squashed commit-tree of main's tree, not main's history. Each release
+#      arrives as a single synthetic commit, so there is no branch or tag convention to
+#      filter on, and a history-based secret scan would have nothing meaningful to walk.
+#      The scan here reads the working tree instead (`gitleaks dir`).
+#   2. It is public and has no AWS account behind it. Every plan/apply stage therefore
+#      lives in .gitlab-ci.yml on the internal remote, and no job here needs credentials.
+#
+# Each job is independent, so a Terraform typo and a failing test both report on the same
+# run instead of one masking the other.
+####################################################################################
+name: CI
+
+# "Every time code is committed": every push on every branch, plus every pull request.
+on:
+  push:
+  pull_request:
+
+# A newer commit on the same ref makes an in-flight run obsolete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Read-only. Nothing in this workflow writes to the repo or assumes a cloud role.
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python — ruff + pytest
+    runs-on: ubuntu-latest
+    env:
+      # The moto-backed tests build real boto3 clients before moto intercepts them, so
+      # botocore raises NoRegionError without a region and refuses to sign without
+      # credentials. These are deliberate dummies: moto answers every call, and a junk key
+      # means any test that escapes moto fails loudly rather than reaching a real account.
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: testing
+      AWS_SECRET_ACCESS_KEY: testing
+      AWS_SESSION_TOKEN: testing
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            agent-blueprint/recon-agent/requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        # Both files: tests/ imports the same backend modules the agent container runs, so
+        # the runtime requirements are needed for the suite to import at all.
+        run: pip install -r agent-blueprint/recon-agent/requirements.txt -r requirements-dev.txt
+
+      - name: Lint
+        # `ruff check` only. `ruff format --check` reports 59 pre-existing files and is not
+        # a gate — fixing that is its own change, not a CI prerequisite.
+        run: ruff check .
+
+      - name: Tests
+        # Expect 11 skips: tests/integration/ needs RECON_GATEWAY_URL plus dev-account
+        # credentials (one also needs EMAIL_CONFIRMATION_TOKEN), which CI does not have.
+        run: python -m pytest -q
+
+  frontend:
+    name: Frontend — types, tests, build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: chatbot-app/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: chatbot-app/frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npx tsc --noEmit
+
+      - name: Tests
+        # The whole suite: 45 files, 668 tests.
+        run: npx vitest run
+
+      - name: Build
+        # The real gate — it compiles every route, which catches breakage the unit tests and
+        # tsc both miss. `npm run lint` is deliberately absent: ESLint is broken repo-wide,
+        # and `npm run verify` points at a verify-build.sh that does not exist.
+        run: npm run build
+
+  terraform:
+    name: Terraform — fmt + validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.4"
+          # The wrapper rewrites stdout to feed step outputs, which garbles multi-line
+          # Terraform output for no benefit here.
+          terraform_wrapper: false
+
+      - name: Format check
+        run: terraform fmt -check -recursive infra/
+
+      - name: Validate
+        working-directory: infra/environments/recon
+        # Validation only means something from the ENVIRONMENT directory. Running it in
+        # infra/ passes vacuously — there is no root module there, so it checks nothing.
+        #
+        # -backend=false skips S3 backend initialisation, so this needs no credentials and
+        # no backend.hcl (gitignored, because the bucket name embeds the account ID).
+        #
+        # .terraform.lock.hcl is gitignored too, so this resolves providers fresh every run.
+        # The `~> 6.55, != 6.57.0` constraint in providers.tf is the only thing keeping it
+        # off 6.57.0, which corrupts request bodies under parallel refresh — do not relax it.
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install gitleaks
+        run: |
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: Scan the working tree
+        # `dir`, not `git`: this remote holds a squashed commit-tree, so there is no history
+        # worth walking. The internal remote scans history instead.
+        #
+        # This job installs NO dependencies on purpose. Scanning after `npm ci` walks
+        # node_modules and reports ~30 findings from vendored minified JS; on a bare
+        # checkout the same scan is clean and takes under a second.
+        #
+        # .gitleaks.toml carries the triaged allowlist (the vendored DCV SDK, fake test
+        # fixtures). Findings are redacted so a real secret never lands in a public log.
+        run: gitleaks dir . --config .gitleaks.toml --redact --no-banner

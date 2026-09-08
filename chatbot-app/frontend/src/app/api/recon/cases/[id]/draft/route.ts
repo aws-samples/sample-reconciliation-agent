@@ -1,36 +1,32 @@
 import { NextResponse } from "next/server";
 import { authorizeRequest } from "@/lib/api-auth";
-import {
-  parseDomainAllowlist,
-  recipientRejectionReason,
-} from "@/lib/emailPolicy";
+import { ContactUnavailable, resolveContactAddress } from "@/lib/contactStore";
 import { DraftConflict, editDraft } from "@/lib/emailDraftStore";
 
 // Same-origin BFF: edit the counterparty email draft on one case.
 //
 // This route exists because the model never picks the recipient — items being reconciled arrive from
 // documents an outside party wrote, so an address the model proposed is attacker-influenceable. The
-// analyst supplies it here, and what they write is checked against the operator's domain allowlist
-// before it is stored.
+// analyst picks a recipient from the operator's own contact list, and the row stores the CONTACT ID,
+// never an address: the address is resolved server-side at send time, which is what makes
+// deactivating a contact revoke an already-approved draft.
 //
 // Every edit bumps `revision` and returns the draft to `pending`, which revokes any approval. The
 // send is authorized by the gateway interceptor against this stored text at this revision, so the
 // only message that can leave is one an analyst read and approved.
 export const runtime = "nodejs";
 
-const ALLOWED_DOMAINS = () =>
-  parseDomainAllowlist(process.env.COUNTERPARTY_EMAIL_DOMAINS ?? "");
-
 /**
- * Replace the draft's recipient, subject and body.
+ * Replace the draft's recipient contact, subject and body.
  *
- * Body: `{recipient, subject, body, revision}` — `revision` is the one the analyst was looking at,
- * and the write fails with 409 if it is no longer current.
+ * Body: `{recipient_contact_id, subject, body, revision}` — `revision` is the one the analyst was
+ * looking at, and the write fails with 409 if it is no longer current.
  *
  * @param req - the request; its Authorization header identifies who is editing.
  * @param params - route params carrying the case id.
- * @returns 200 with the updated draft, 400 on an unusable field, 401/503 when unauthenticated,
- *   409 when the draft moved underneath the caller, 502 on any other write failure.
+ * @returns 200 with the updated draft, 400 on an unusable field or an unsendable contact, 401/503
+ *   when unauthenticated, 409 when the draft moved underneath the caller, 502 on any other write
+ *   failure.
  */
 export async function PUT(
   req: Request,
@@ -48,13 +44,13 @@ export async function PUT(
     return NextResponse.json({ error: auth.message }, { status: auth.status });
 
   const body = (await req.json().catch(() => ({}))) as {
-    recipient?: string;
+    recipient_contact_id?: string;
     subject?: string;
     body?: string;
     revision?: number;
   };
 
-  const recipient = (body.recipient ?? "").trim();
+  const contactId = (body.recipient_contact_id ?? "").trim();
   const subject = (body.subject ?? "").trim();
   const draftBody = (body.body ?? "").trim();
   const revision = Number(body.revision);
@@ -71,18 +67,44 @@ export async function PUT(
       { error: "subject and body are both required" },
       { status: 400 },
     );
+  if (!contactId)
+    return NextResponse.json(
+      { error: "recipient_contact_id is required" },
+      { status: 400 },
+    );
 
-  // Server-side allowlist check. The panel checks the same thing while the analyst types, but that
-  // is a courtesy: this is the write that persists the address, and the interceptor will refuse the
-  // send anyway, so an address rejected here saves the analyst a confusing denial much later.
-  const rejection = recipientRejectionReason(recipient, ALLOWED_DOMAINS());
-  if (rejection)
-    return NextResponse.json({ error: rejection }, { status: 400 });
+  // Resolved only to VALIDATE, and the address is then thrown away rather than stored. Doing it here
+  // buys the analyst a 400 while they are still looking at the form, instead of a gateway denial
+  // after they have approved a draft that was never sendable.
+  let resolved: string;
+  try {
+    resolved = await resolveContactAddress({
+      contactId,
+      kind: "counterparty",
+    });
+  } catch (err) {
+    if (err instanceof ContactUnavailable)
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    return NextResponse.json(
+      { error: (err as Error).message },
+      { status: 502 },
+    );
+  }
+
+  // The address is resolved here ONLY to prove the contact still resolves to one -- a deactivated or
+  // deleted contact must fail now rather than at send time. It is deliberately not domain-checked.
+  //
+  // `counterparty_email_domains` is a GATE, and the gate lives at the gateway interceptor, which
+  // re-derives the verdict from its own copy on every send. Checking it a second time here bought
+  // nothing: the interceptor is the boundary either way, and a second opinion in the BFF could only
+  // ever be the same answer or a WRONG one, because the two read different copies of the variable
+  // and the BFF's is a container env var fixed at task start.
+  void resolved;
 
   try {
     const draft = await editDraft({
       id,
-      recipient,
+      recipientContactId: contactId,
       subject,
       body: draftBody,
       revision,

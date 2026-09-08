@@ -39,8 +39,8 @@ function SummaryPanel() {
         <Eyebrow>Last 7 Days</Eyebrow>
         <Placeholder>
           Couldn&apos;t load evaluation metrics: {error}. Metrics appear once
-          the harness backend has run scored sessions (CloudWatch Transaction
-          Search must be enabled).
+          either backend has run scored sessions (CloudWatch Transaction Search
+          must be enabled).
         </Placeholder>
       </Panel>
     );
@@ -59,9 +59,12 @@ function SummaryPanel() {
       <Panel>
         <Eyebrow>Last 7 Days</Eyebrow>
         <Placeholder>
-          No evaluation data yet. Set the agent backend to Harness (Config tab)
-          and run agent sessions to start scoring; the online evaluator writes
-          per-session metrics here.
+          No evaluation data in the last 7 days. The backend is not the gate —
+          both the runtime and the harness have their own online evaluation
+          config, so sessions on either one are scored. Scores land roughly
+          10–15 minutes after a session closes. Note that analyst_agreement
+          contributes no average until a lesson exists for the item: it
+          abstains, and an abstain publishes a label with no metric datapoint.
         </Placeholder>
       </Panel>
     );

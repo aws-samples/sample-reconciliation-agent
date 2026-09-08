@@ -1,0 +1,72 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 1645 >>
+stream
+BT /F1 9.5 Tf 54 738 Td 13 TL
+(Message Originated From: loan.ops@meridian-agent.example) Tj T*
+() Tj T*
+(                               Meridian Agency Services LLC) Tj T*
+(                                 Loan Operations) Tj T*
+() Tj T*
+(Date: 22-Jan-2026) Tj T*
+(TO: EVERGREEN CREDIT CLO 2020-1, LIMITED) Tj T*
+(ATTN: Dana Whitfield) Tj T*
+(Re: NORTHWIND MANUFACTURING 1L 2022/07/09) Tj T*
+() Tj T*
+(                   ***** Rate Setting *****) Tj T*
+() Tj T*
+(Description: USD Loan Rollover for the Deal NORTHWIND MANUFACTURING 1L) Tj T*
+(2022/07/09. No principal or interest is payable on this event.) Tj T*
+() Tj T*
+(Effective: 26-Jan-2026) Tj T*
+() Tj T*
+(Facility: NORTHWIND REVOLVING CREDIT FACILITY LoanXid: LX204899XXXX1) Tj T*
+(Facility ID: SL-204899) Tj T*
+() Tj T*
+(Contract ID: CT-204899-A) Tj T*
+(New Contract ID: CT-204899-B) Tj T*
+() Tj T*
+(Borrower NORTHWIND MANUFACTURING LLC in Facility NORTHWIND REVOLVING CREDIT) Tj T*
+(FACILITY has the following loans rolling over:) Tj T*
+() Tj T*
+(                                                    Current      Next) Tj T*
+(Pricing Option           Global Amount           Reprice     Reprice) Tj T*
+(Term SOFR 1 Month        24,000,000.00        26-Jan-2026 26-Feb-2026) Tj T*
+() Tj T*
+( Look Back days : 2) Tj T*
+( Spread Adjustment : 0.000000%) Tj T*
+() Tj T*
+(Notice Comment: only rollover notice - no standalone cash movement is) Tj T*
+(expected for this event; interest accrues to the next payment date.) Tj T*
+() Tj T*
+(Portfolio: DL Fund II) Tj T*
+(Agent Bank: Meridian Agency Services LLC) Tj T*
+(Contact: Dana Whitfield  loan.ops@meridian-agent.example  +1-555-0142) Tj T*
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000210 00000 n 
+0000000336 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+2033
+%%EOF

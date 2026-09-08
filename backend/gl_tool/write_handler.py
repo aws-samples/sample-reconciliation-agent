@@ -15,9 +15,9 @@ path — and the gateway is the trust boundary (verified live in ENFORCE mode, 2
     write to an arbitrary ledger row (``backend/gateway_interceptor/handler.py``).
 
 This Lambda therefore keeps only tool-local input validation: the status allowlist (a value
-constraint, not an authorization decision) and the idempotent write itself. The duplicate
-provenance check it used to carry was removed once the interceptor's enforce mode was
-verified — one trust boundary, enforced in one place.
+constraint, not an authorization decision) and the idempotent write itself. It deliberately does NOT
+re-check provenance — that boundary is the interceptor's, enforced in one place, and a second copy here
+would be one more thing to keep in agreement with it.
 """
 
 import os

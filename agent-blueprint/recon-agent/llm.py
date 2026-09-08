@@ -60,9 +60,10 @@ def _object_end(text: str, start: int) -> int | None:
 def _extract_failure(text: str, *, unterminated: bool) -> ValueError:
     """Build the ValueError for an unparseable reply, with enough detail to diagnose it.
 
-    The old message showed only the first 200 characters, which made a reply truncated at the
-    model's token cap indistinguishable from a malformed one — both looked like a short prefix.
-    The length, the explicit unterminated flag and the tail tell them apart at a glance.
+    A prefix of the reply is not enough detail: a reply truncated at the model's token cap and a
+    genuinely malformed one both look like a short prefix, and they need opposite fixes (raise the cap
+    versus fix the prompt). The length, the explicit unterminated flag and the tail tell them apart at
+    a glance.
 
     :param text: raw model reply.
     :param unterminated: True when an opening brace was found but never balanced.
@@ -249,9 +250,31 @@ def strands_json(
     return extract_json(text)
 
 
-def _item_summary(item: ReconItem) -> str:
-    """Compact JSON view of the item for prompts (includes IDP-extracted fields)."""
-    return json.dumps(item.model_dump(), default=str, indent=2)[:8000]
+# Attributes the deterministic tier stamps onto the item before dispatching it. They belong in the
+# INVESTIGATION prompt as an explicit, catalog-validated hint — but NOT in the classification
+# prompt: `consistency` is only an independent signal if the classifier samples without being handed
+# an answer first, and the serialized item would otherwise smuggle the hint in through the back door.
+TIER1_HINT_KEYS = ("tier1_break_type", "tier1_escalation_reason")
+
+
+def _item_summary(item: ReconItem, *, include_tier1_hint: bool) -> str:
+    """Compact JSON view of the item for prompts (includes IDP-extracted fields).
+
+    :param item: the reconciliation item to serialize.
+    :param include_tier1_hint: keep Tier-1's stamped ``tier1_*`` attributes or drop them. Required
+        with no default on purpose — getting it wrong is invisible in the output but silently turns
+        self-consistency into agreement-with-Tier-1, so every call site has to state its intent.
+        False for classification; True for investigation, where the hint is deliberate.
+    :returns: pretty-printed JSON, truncated to 8000 characters.
+    """
+    data = item.model_dump()
+    if not include_tier1_hint:
+        attributes = data.get("attributes")
+        if isinstance(attributes, dict):
+            # Rebuilt rather than popped: model_dump may hand back the item's own nested dict, and
+            # mutating it would strip the hint from the investigation prompt too.
+            data["attributes"] = {k: v for k, v in attributes.items() if k not in TIER1_HINT_KEYS}
+    return json.dumps(data, default=str, indent=2)[:8000]
 
 
 def _lessons_block(lessons: list[str] | None) -> str:
@@ -274,13 +297,19 @@ def classify_with_consistency(
     lessons: list[str] | None = None,
     samples: int = 3,
     caller=None,
-) -> tuple[str, float, str, float]:
+) -> tuple[str, str]:
     """Self-consistency classification: sample the classifier ``samples`` times and majority-vote.
 
     Agreement across independent samples is a far better-calibrated signal than the model's
     stated confidence (consistency-based methods outperform verbalized/logit proxies in
     black-box settings). Sampling runs at temperature 0.7 for diversity, and each sample is an
     independent single-turn Strands call (see ``_default_json_caller``).
+
+    That is why the vote survives while both numbers it used to produce are gone: it is what makes
+    the PICK stable, and the pick selects the scoring denominator. Neither number is returned —
+    the agreement fraction is NOT a gate (design D5: a 3-sample fraction has four possible values
+    and no calibration study behind it, which is exactly how the deleted 0.6 floor started), and the
+    model is no longer asked how sure it is at all.
 
     :param model_id: model or inference-profile id.
     :param system: system prompt text (the shared policy core).
@@ -289,35 +318,34 @@ def classify_with_consistency(
     :param lessons: prior analyst lessons to weight, or None.
     :param samples: how many independent samples to draw.
     :param caller: test seam forwarded to ``strands_json``; production leaves it None.
-    :returns: (majority_class, mean_verbalized_confidence_of_majority, majority_reasoning,
-        consistency = majority_votes / samples).
+    :returns: (majority_class, majority_reasoning) — the reasoning is taken from a sample that voted
+        with the majority, so it explains the class actually returned.
     """
-    types = "\n".join(
-        f"- {c['name']}: {c['description']}" for c in catalog
-    )
+    types = "\n".join(f"- {c['name']}: {c['description']}" for c in catalog)
     prompt = (
         "Classify this reconciliation item into exactly ONE of the types below.\n\n"
-        f"Types:\n{types}\n\nItem:\n{_item_summary(item)}\n"
+        # Tier-1's suggestion is withheld here so the three samples are genuinely independent of it;
+        # the investigation prompt shows it, and the agent is free to disagree there.
+        f"Types:\n{types}\n\nItem:\n{_item_summary(item, include_tier1_hint=False)}\n"
         f"{_lessons_block(lessons)}\n"
         # The reasoning length is bounded on purpose: an unbounded paragraph is what pushes the
         # reply into the token cap, and a truncated reply is unparseable JSON.
-        'Reply with ONLY a JSON object: {"name": "<type name>", "confidence": <0..1>, '
+        'Reply with ONLY a JSON object: {"name": "<type name>", '
         '"reasoning": "<2-3 sentences explaining why, under 500 characters>"}'
     )
-    votes: list[tuple[str, float, str]] = []
+    votes: list[tuple[str, str]] = []
     for _ in range(samples):
         d = strands_json(
             model_id=model_id, system=system, prompt=prompt, temperature=0.7, caller=caller
         )
-        votes.append((str(d["name"]), float(d["confidence"]), str(d["reasoning"])))
+        votes.append((str(d["name"]), str(d["reasoning"])))
     tally: dict[str, int] = {}
-    for name, _, _ in votes:
+    for name, _ in votes:
         tally[name] = tally.get(name, 0) + 1
     majority = max(tally, key=lambda k: tally[k])
     majority_votes = [v for v in votes if v[0] == majority]
-    verbalized = sum(v[1] for v in majority_votes) / len(majority_votes)
-    reasoning = majority_votes[0][2]
-    return majority, verbalized, reasoning, tally[majority] / samples
+    reasoning = majority_votes[0][1]
+    return majority, reasoning
 
 
 def _summarize_tool_output(result) -> str:
@@ -334,6 +362,17 @@ def _matched_reference(rows: list[dict]) -> str | None:
     from backend.recon_core.proposal_service import derive_reference
 
     return derive_reference(str(r.get("reference")) for r in (rows or []) if r.get("reference"))
+
+
+def _matched_notice_id(rows: list[dict] | None) -> str | None:
+    """Derive the single notice_id the search_notices results matched.
+
+    :param rows: notice rows recorded across the investigation.
+    :returns: the sole distinct notice_id, or None when 0 or >1 were observed.
+    """
+    from backend.recon_core.proposal_service import derive_reference
+
+    return derive_reference(str(r.get("notice_id")) for r in (rows or []) if r.get("notice_id"))
 
 
 # Statuses the agent may propose — mirrors set_draw_status's allowlist so the model can't

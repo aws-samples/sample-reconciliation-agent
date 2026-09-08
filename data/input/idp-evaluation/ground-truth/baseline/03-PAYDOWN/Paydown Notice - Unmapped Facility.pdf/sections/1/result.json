@@ -1,0 +1,34 @@
+{
+  "document_class": {
+    "type": "paydown_notice"
+  },
+  "split_document": {
+    "page_indices": [
+      0
+    ]
+  },
+  "classification": "paydown_notice",
+  "page_ids": [
+    "1"
+  ],
+  "confidence": 1.0,
+  "inference_result": {
+    "notice_date": "2026-02-26",
+    "notice_date_source_raw": "26-Feb-2026",
+    "value_date": "2026-03-02",
+    "counterparty": "CINDERMOOR LOGISTICS HOLDINGS INC.",
+    "fund": "Direct Lending Fund I",
+    "facility": "CINDERMOOR LOGISTICS TL-B $250MM",
+    "reference": "WIRE-20260302-EVG",
+    "amount": "12500.00",
+    "global_amount": "2500000.00",
+    "currency": "USD",
+    "activity_type": "Principal Paydown",
+    "facility_id_source_raw": "SL-99001",
+    "agent_bank": "Tarnsmoor Trust Bank, N.A.",
+    "agent_contact_name": "Loan Administration",
+    "agent_email": "loan.ops@tarnsmoor-trust.example",
+    "agent_telephone": "+1-555-0188",
+    "notice_comment": "This facility was novated from a predecessor agent on 14-Jan-2026. The LoanX identifier has not yet been reissued and is omitted from this notice."
+  }
+}

@@ -2,21 +2,32 @@
 
 import { useEffect, useState } from "react";
 import type { EmailDraft } from "@/lib/reconApi";
-import { recipientRejectionReason } from "@/lib/emailPolicy";
+import {
+  contactSelectionRejectionReason,
+  type ContactChoice,
+} from "@/lib/emailPolicy";
 import { Eyebrow, Panel } from "@/components/recon/ui";
 
 // The counterparty email the agent drafted, and the analyst's decision on it.
 //
 // The agent cannot send this mail — it writes the text and stops. What an analyst approves here is
 // what the gateway interceptor will later compare the outgoing message against, byte for byte, so
-// this panel is the only place the message can be decided. Two consequences show up in the markup:
-// the recipient is an input rather than a value (the model's suggestion is discarded on the way in,
-// because the item under reconciliation came from a document an outside party wrote), and every
-// button sends the revision being displayed, so a decision made against text that has since changed
-// is refused instead of applied.
+// this panel is the only place the message can be decided. Three consequences show up in the markup:
 //
-// Presentational: the page owns the API calls, the reload and the error line, which keeps the four
-// draft states cheap to render in a test.
+//  - The recipient is a PICKER over the operator-maintained contact list, and it shows names, not
+//    addresses. The analyst confirms who; the address is looked up from the id at the moment of
+//    sending, so a contact deactivated in the meantime cannot be reached even from an approved draft.
+//    The model's own suggestion (`recipient_hint`) is displayed but never selected — the item under
+//    reconciliation came from a document an outside party wrote, which makes it a poor source of a
+//    recipient.
+//  - Every button sends the revision being displayed, so a decision made against text that has since
+//    changed is refused instead of applied.
+//  - A draft can arrive already broken (`render_failed`), when the template it named was missing a
+//    value or had been deactivated. That state is editable and discardable but has no approve button:
+//    the text on screen is not what would be sent, so there is nothing here to approve.
+//
+// Presentational: the page owns the API calls, the reload and the error line, which keeps the draft
+// states cheap to render in a test.
 
 /** A stored timestamp, trimmed to the minute. Kept as UTC text — not localized — so the record an
  *  analyst reads matches the one in the row and in the audit trail. */
@@ -55,7 +66,7 @@ const BUTTON =
 export function EmailDraftPanel({
   draft,
   caseStatus,
-  allowedDomains,
+  contacts,
   busy = false,
   overrideUnknownSend = false,
   onOverrideChange,
@@ -65,13 +76,20 @@ export function EmailDraftPanel({
   draft: EmailDraft;
   /** The case's status. Only a case still awaiting a decision has an editable draft. */
   caseStatus: string;
-  allowedDomains: string[];
+  /**
+   * The counterparty contacts an analyst may address this to, from the operator's list.
+   *
+   * Names and ids only — see {@link ContactChoice}. An empty list is a real state, not a loading one:
+   * it means no counterparty contact has been configured yet, and the panel says so rather than
+   * offering an empty dropdown.
+   */
+  contacts: ContactChoice[];
   /** Some other action on the case is in flight — every control here is disabled while it is. */
   busy?: boolean;
   overrideUnknownSend?: boolean;
   onOverrideChange?: (value: boolean) => void;
   onSave: (fields: {
-    recipient: string;
+    recipient_contact_id: string;
     subject: string;
     body: string;
     revision: number;
@@ -81,7 +99,7 @@ export function EmailDraftPanel({
     revision: number,
   ) => void;
 }) {
-  const [recipient, setRecipient] = useState(draft.recipient ?? "");
+  const [contactId, setContactId] = useState(draft.recipient_contact_id ?? "");
   const [subject, setSubject] = useState(draft.subject);
   const [body, setBody] = useState(draft.body);
 
@@ -90,17 +108,38 @@ export function EmailDraftPanel({
   // re-render, and so a revision that jumped underneath the analyst replaces what they were typing
   // rather than leaving them editing text that no longer exists.
   useEffect(() => {
-    setRecipient(draft.recipient ?? "");
+    setContactId(draft.recipient_contact_id ?? "");
     setSubject(draft.subject);
     setBody(draft.body);
-  }, [draft.revision, draft.recipient, draft.subject, draft.body]);
+  }, [draft.revision, draft.recipient_contact_id, draft.subject, draft.body]);
 
   const status = draft.draft_status;
   const decided = status === "discarded" || status === "sent";
-  const editable = caseStatus === "PROPOSED" && status === "pending";
-  const rejection = recipientRejectionReason(recipient, allowedDomains);
+  // `render_failed` is editable on purpose: fixing it is the only way forward, and the store returns
+  // an edited draft to `pending`. It is deliberately NOT approvable — see the approve block below.
+  const editable =
+    caseStatus === "PROPOSED" &&
+    (status === "pending" || status === "render_failed");
+  const rejection = contactSelectionRejectionReason({
+    contactId,
+    contacts,
+    kind: "counterparty",
+  });
+  const picked = contacts.find((c) => c.contact_id === contactId);
+  // The agent named a party in the source document, and the analyst picked someone else. Neither is
+  // necessarily wrong — the hint comes from a counterparty's own paperwork — but a silent mismatch is
+  // how mail reaches the wrong desk, so it is said out loud.
+  const hintMismatch =
+    draft.recipient_hint &&
+    picked &&
+    !picked.display_name
+      .toLowerCase()
+      .includes(draft.recipient_hint.trim().toLowerCase()) &&
+    !draft.recipient_hint
+      .toLowerCase()
+      .includes(picked.display_name.trim().toLowerCase());
   const dirty =
-    recipient !== (draft.recipient ?? "") ||
+    contactId !== (draft.recipient_contact_id ?? "") ||
     subject !== draft.subject ||
     body !== draft.body;
   // A send was claimed and never confirmed. The row cannot tell us whether the counterparty
@@ -115,7 +154,9 @@ export function EmailDraftPanel({
         ? "var(--rc-cyan)"
         : status === "discarded"
           ? "var(--rc-ink-faint)"
-          : "var(--rc-amber)";
+          : status === "render_failed"
+            ? "var(--rc-red)"
+            : "var(--rc-amber)";
 
   return (
     <Panel className="rc-rise p-6" scan>
@@ -135,6 +176,25 @@ export function EmailDraftPanel({
           </span>
         </div>
       </div>
+
+      {status === "render_failed" && (
+        <div
+          className="mt-4 rounded border p-3"
+          style={{ borderColor: "var(--rc-amber)", color: "var(--rc-amber)" }}
+        >
+          <p className="rc-mono text-[12px] leading-relaxed">
+            This draft could not be rendered from its template, so the text
+            below is incomplete and cannot be approved. Fix it here and save —
+            saving returns the draft to pending — or discard it and let the case
+            close without a counterparty email.
+          </p>
+          {draft.render_error && (
+            <p className="rc-mono mt-2 text-[12px]">
+              Reason: {draft.render_error}
+            </p>
+          )}
+        </div>
+      )}
 
       {unknownSend && (
         <div
@@ -168,45 +228,62 @@ export function EmailDraftPanel({
       <div className="mt-4 space-y-4">
         <Field
           label="To"
-          hint={
-            allowedDomains.length > 0
-              ? `Allowed domains: ${allowedDomains.join(", ")}`
-              : "No counterparty domains are configured for this deployment, so no address can be used."
-          }
+          hint="The address is not shown, and not stored on the draft. It is read from the contact list when the mail is sent, so whoever the operator has deactivated by then cannot be reached."
         >
           {editable ? (
-            <input
-              value={recipient}
-              onChange={(e) => setRecipient(e.target.value)}
-              disabled={busy}
-              placeholder={
-                draft.recipient_hint
-                  ? `Address for ${draft.recipient_hint}…`
-                  : "name@counterparty.example"
-              }
-              aria-label="Counterparty email recipient"
-              className={INPUT}
-              style={
-                rejection && recipient
-                  ? { borderColor: "var(--rc-red)" }
-                  : undefined
-              }
-            />
+            contacts.length === 0 ? (
+              <p
+                className="rc-mono text-[12px]"
+                style={{ color: "var(--rc-amber)" }}
+              >
+                No counterparty contacts are configured, so this email has no
+                one to go to. An operator adds them on the Config tab.
+              </p>
+            ) : (
+              <select
+                value={contactId}
+                onChange={(e) => setContactId(e.target.value)}
+                disabled={busy}
+                aria-label="Counterparty email recipient"
+                className={INPUT}
+                style={
+                  rejection && contactId
+                    ? { borderColor: "var(--rc-red)" }
+                    : undefined
+                }
+              >
+                <option value="">— choose a recipient —</option>
+                {contacts.map((c) => (
+                  <option key={c.contact_id} value={c.contact_id}>
+                    {c.display_name}
+                  </option>
+                ))}
+              </select>
+            )
           ) : (
             <p className="rc-mono text-[13px] text-[var(--rc-ink)]">
-              {draft.recipient ?? "—"}
+              {picked?.display_name ?? draft.recipient_contact_id ?? "—"}
             </p>
           )}
-          {editable && rejection && recipient && (
+          {editable && rejection && contactId && (
             <p className="rc-mono mt-1 text-[11px] text-[var(--rc-red)]">
               {rejection}
             </p>
           )}
-          {!draft.recipient && draft.recipient_hint && (
+          {!draft.recipient_contact_id && draft.recipient_hint && (
             <p className="rc-mono mt-1 text-[11px] text-[var(--rc-ink-faint)]">
               The agent believes this goes to {draft.recipient_hint}. It does
-              not choose the address — a document from an outside party is not a
-              source of one.
+              not choose the recipient — a document written by an outside party
+              is not a source of one.
+            </p>
+          )}
+          {hintMismatch && (
+            <p
+              className="rc-mono mt-1 text-[11px]"
+              style={{ color: "var(--rc-amber)" }}
+            >
+              The source document named {draft.recipient_hint}, but this is
+              addressed to {picked?.display_name}. Confirm that is intended.
             </p>
           )}
         </Field>
@@ -242,6 +319,25 @@ export function EmailDraftPanel({
         </Field>
       </div>
 
+      {/* Provenance of the wording. Worth showing because the operator who owns the template is not
+          the analyst reading it: naming the template makes "why does it say that" answerable. Once an
+          analyst edits the text it is theirs, and the template is only where it started. */}
+      {draft.template_id && (
+        <p className="rc-mono mt-4 text-[11px] text-[var(--rc-ink-faint)]">
+          Drafted from template {draft.template_id}
+          {draft.variables && Object.keys(draft.variables).length > 0 && (
+            <>
+              {" "}
+              with{" "}
+              {Object.entries(draft.variables)
+                .map(([k, v]) => `${k}=${v}`)
+                .join(", ")}
+            </>
+          )}
+          .
+        </p>
+      )}
+
       {/* Who did what. Kept on the draft itself rather than in the case's audit rows, whose status
           column speaks only in case statuses — none of these actions moves the case. */}
       <div className="rc-mono mt-4 flex flex-wrap gap-x-6 gap-y-1 text-[11px] text-[var(--rc-ink-faint)]">
@@ -269,13 +365,13 @@ export function EmailDraftPanel({
         </p>
       )}
 
-      {caseStatus === "PROPOSED" && status === "pending" && (
+      {editable && (
         <div className="mt-5 flex flex-wrap gap-3">
           <button
             type="button"
             onClick={() =>
               onSave({
-                recipient: recipient.trim(),
+                recipient_contact_id: contactId,
                 subject: subject.trim(),
                 body: body.trim(),
                 revision: draft.revision,
@@ -292,22 +388,27 @@ export function EmailDraftPanel({
           >
             Save changes
           </button>
-          <button
-            type="button"
-            onClick={() => onDecide("approve_draft", draft.revision)}
-            // Unsaved edits must not be approved: approval names a revision, and the text in these
-            // inputs is not yet any revision at all.
-            disabled={busy || dirty || Boolean(rejection)}
-            title={
-              dirty
-                ? "Save your changes first — an approval applies to a stored revision"
-                : (rejection ??
-                  "Approve this text for sending when the case is approved")
-            }
-            className={`${BUTTON} border-[var(--rc-green)] text-[var(--rc-green)] hover:bg-[var(--rc-green)] hover:text-[#04120f]`}
-          >
-            Approve draft
-          </button>
+          {/* No approve button on a render_failed draft. It is not a disabled one either: an analyst
+              cannot fix "approvable" by trying harder, so offering the control would only invite the
+              question of why it does nothing. Saving clears the failure and the button appears. */}
+          {status === "pending" && (
+            <button
+              type="button"
+              onClick={() => onDecide("approve_draft", draft.revision)}
+              // Unsaved edits must not be approved: approval names a revision, and the text in these
+              // inputs is not yet any revision at all.
+              disabled={busy || dirty || Boolean(rejection)}
+              title={
+                dirty
+                  ? "Save your changes first — an approval applies to a stored revision"
+                  : (rejection ??
+                    "Approve this text for sending when the case is approved")
+              }
+              className={`${BUTTON} border-[var(--rc-green)] text-[var(--rc-green)] hover:bg-[var(--rc-green)] hover:text-[#04120f]`}
+            >
+              Approve draft
+            </button>
+          )}
           <button
             type="button"
             onClick={() => onDecide("discard_draft", draft.revision)}

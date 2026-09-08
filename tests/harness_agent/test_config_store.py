@@ -1,12 +1,12 @@
 """Tests for the versioned harness config store.
 
-The regression these lock in: ``apply_overrides`` used to replace the whole system prompt with the
-config document's ``system_prompt``. That produced two live bugs at once — the runtime backend never
-reads config versions, so a "deployed" version changed nothing there; and on the harness the
-version's text REPLACED the composed prompt, silently dropping the appended calling contract
-(submit_proposal field names, prefixed gateway tool names) that the version document does not carry.
-The prompt now travels through the shared core object written at deploy time; this module only
-overrides model + iteration count.
+What these lock in: ``apply_overrides`` must NOT substitute the config document's ``system_prompt``
+for the composed prompt. Doing so breaks two ways at once — the runtime backend never reads config
+versions, so a "deployed" version changes nothing there; and on the harness the version's text
+displaces the composed prompt, silently dropping the appended calling contract (submit_proposal field
+names, prefixed gateway tool names) that the version document does not carry. The prompt travels
+through the shared core object written at deploy time; this module overrides model + iteration count
+only.
 """
 
 from backend.harness_agent.config_store import active_version, apply_overrides, load_config

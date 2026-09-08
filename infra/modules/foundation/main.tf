@@ -122,18 +122,21 @@ resource "aws_dynamodb_table" "lessons" {
 # ---------------------------------------------------------------------------------
 
 # Auto-resolve threshold (Config UI writes it; the agent reads it after each proposal).
-# Composite confidence >= threshold -> unattended approve path; "off" disables.
+# Evidence-completeness score >= threshold -> unattended approve path; "off" disables.
 #
-# 0.85, NOT 0.95. The composite is a weighted sum whose verbalized term (0.20) is supplied by a
-# model that habitually states 0.5-0.6, so 0.95 is arithmetically unreachable: even a perfect
-# classification signal + perfect grounding caps the composite at 0.91 (runtime) / 0.89 (harness)
-# at the modal verbalized 0.55. Across 10 observed cases the best composite was 0.775 and NONE
-# auto-executed. 0.85 still demands a strong result on all three signals simultaneously
-# (roughly classification >=0.93, grounding >=0.9, verbalized >=0.7 together) — it is the
-# conservative end of the reachable band, chosen because no target auto-execute rate was
-# specified. Keep this in step with the recon-agent module's `confidence_threshold`, which
-# templates the Cedar gate. See the harness signal + tool-parity design
-# record (D5/D6) for the achievable-range table.
+# The score is `satisfied / prescribed required steps` for the classified skill — a STEP FUNCTION, not
+# a continuum. The shipped skills prescribe 4 (ledger-status-resolution), 5 (document-cross-reference)
+# and 6 (record-match-review) required steps, whose highest partial scores are 0.75, 0.8 and 0.833. All
+# three are below 0.85, so this default means exactly one thing today: EVERY prescribed step obtained
+# data. That is deliberate and conservative — it is NOT the weighted-composite arithmetic this comment
+# used to describe (a verbalized term capping the sum at 0.89-0.91), which was deleted on 2026-09-04.
+#
+# Before changing it, work out the reachable values for the skills you actually run. The gaps are wide
+# and uneven: 0.8 still means 6-of-6 for record-match-review but drops document-cross-reference to
+# 4-of-5, and 0.75 additionally drops ledger-status-resolution to 3-of-4. A skill whose step count
+# changes silently re-tunes this gate.
+# Keep this in step with the recon-agent module's `confidence_threshold`, which templates the Cedar
+# gate.
 resource "aws_ssm_parameter" "auto_resolve_threshold" {
   name  = "/${var.name_prefix}/auto-resolve-threshold"
   type  = "String"

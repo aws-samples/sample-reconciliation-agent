@@ -26,6 +26,7 @@ USER appuser
 # OTel: ADOT auto-instrumentation must run inside the container — the AgentCore platform
 # does not inject it into custom runtime images. opentelemetry-instrument wires the OTLP
 # exporter from the platform-provided OTEL_* env and emits the gen-ai/strands spans the
-# online evaluators score; without it only the platform Invoke span reaches aws/spans.
+# online evaluators score; without it the agent's `spans` log stream gets nothing and only the
+# platform's own AgentCore.Runtime.Invoke span is recorded (in aws/spans).
 EXPOSE 8080
 CMD ["opentelemetry-instrument", "python", "agent.py"]

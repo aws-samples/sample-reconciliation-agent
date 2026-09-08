@@ -42,11 +42,13 @@ def test_mcp_endpoint_appends_mcp_suffix():
 
 def test_tool_name_mapping_covers_all_agent_tools():
     assert gateway_tool_name("search_ledger") == "general-ledger___search_ledger"
-    assert gateway_tool_name("search_guidance") == "knowledge-base___search_guidance"
+    # The KB is reached through the Gateway's managed bedrock-knowledge-bases connector, so the
+    # operation name is Bedrock's own `Retrieve` -- there is no Lambda target behind it.
+    assert gateway_tool_name("search_guidance") == "managed-kb___Retrieve"
     assert gateway_tool_name("get_results") == "document-extraction___IDPTools___get_results"
     assert gateway_tool_name("set_draw_status") == "set-draw-status___set_draw_status"
-    # Mailbox read routes through the existing microsoft-graph OpenAPI target; there is no
-    # send_notification short name any more (email send is the microsoft-graph OpenAPI op).
+    # Mailbox read routes through the microsoft-graph OpenAPI target. There is no
+    # `send_notification` short name -- email send is a microsoft-graph OpenAPI op too.
     assert (
         gateway_tool_name("search_correspondence")
         == "microsoft-graph___listSharedMailboxMessages"
@@ -204,3 +206,8 @@ def test_classify_handles_a_bare_unwrapped_exception():
     """Not everything arrives wrapped — a direct exception must classify the same way."""
     assert isinstance(classify_transport_error(ToolDenied("denied")), ToolDenied)
     assert isinstance(classify_transport_error(ValueError("bad args")), RuntimeError)
+
+
+def test_search_notices_maps_to_the_notices_target() -> None:
+    """The runtime backend reaches the actual side through the `notices` gateway target."""
+    assert GATEWAY_TOOL_NAMES["search_notices"] == "notices___search_notices"

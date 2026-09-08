@@ -10,6 +10,7 @@ import { recordLessonMemoryEvent, type LessonEvent } from "@/lib/reconMemory";
 import { callGatewayTool } from "@/lib/gatewayMcp";
 import { rescoreAgreement } from "@/lib/rescoreAgreement";
 import { authorizeRequest } from "@/lib/api-auth";
+import { ContactUnavailable, resolveContactAddress } from "@/lib/contactStore";
 import {
   DraftConflict,
   approveDraft,
@@ -37,7 +38,11 @@ export const runtime = "nodejs";
 const REGION = process.env.AWS_REGION ?? "us-east-1";
 const CASES_TABLE = process.env.CASES_TABLE ?? "recon-dev-cases";
 const LESSONS_TABLE = process.env.LESSONS_TABLE ?? "recon-lessons";
-const NOTIFY_EMAIL = process.env.RECON_NOTIFY_EMAIL ?? "";
+// WHO the internal resolution mail goes to, as an id rather than an address. The address lives only
+// in the contacts table and is looked up at the moment of sending, so deactivating that contact stops
+// the notification without a redeploy. An empty value means the deploy seeded no contact, which is
+// the one case where skipping the notification entirely is correct.
+const NOTIFY_CONTACT_ID = process.env.NOTIFY_CONTACT_ID ?? "";
 const GRAPH_MAILBOX = process.env.GRAPH_MAILBOX ?? "";
 const RECON_GATEWAY_URL = process.env.RECON_GATEWAY_URL ?? "";
 const AGENT_RUNTIME_ARN = process.env.AGENT_RUNTIME_ARN ?? "";
@@ -65,11 +70,21 @@ function ddb() {
 // Send the resolution notification FROM the shared mailbox via the egress gateway's
 // microsoft-graph___sendSharedMailboxMail tool (SigV4-signed with the task role — see
 // lib/gatewayMcp). Throws on any gateway/Graph error so approve fails loudly.
+//
+// The recipient is resolved here, from NOTIFY_CONTACT_ID, on every send. A deactivated contact throws
+// ContactUnavailable and the mail does not go out — which is the whole reason the address is not held
+// in an environment variable: an operator revokes a recipient in the Config tab and the next send
+// already obeys. The gateway interceptor resolves the same id independently and compares, so a wrong
+// answer here produces a denial rather than mail to the wrong inbox.
 async function sendResolutionEmail(
   id: string,
   c: Record<string, unknown>,
   approveComment: string,
 ): Promise<void> {
+  const recipient = await resolveContactAddress({
+    contactId: NOTIFY_CONTACT_ID,
+    kind: "internal_notification",
+  });
   await callGatewayTool("microsoft-graph___sendSharedMailboxMail", {
     mailboxAddress: GRAPH_MAILBOX,
     message: {
@@ -82,39 +97,54 @@ async function sendResolutionEmail(
           `Confidence: ${c.confidence ?? ""}\n` +
           (approveComment ? `Approver comment: ${approveComment}\n` : ""),
       },
-      toRecipients: [{ emailAddress: { address: NOTIFY_EMAIL } }],
+      toRecipients: [{ emailAddress: { address: recipient } }],
     },
     saveToSentItems: true,
     // Human-confirmation token: this send only runs after the analyst clicked Approve, so it
     // carries the confirmation the gateway interceptor requires. The agent runtime has no token
     // and thus cannot send email autonomously. Stripped by the interceptor before reaching Graph.
     confirmationToken: process.env.EMAIL_CONFIRMATION_TOKEN ?? "",
-    // What this send IS: internal status mail to the operator's own notify address. The
-    // interceptor checks the sole recipient against RECON_NOTIFY_EMAIL, so this branch cannot
-    // reach anyone outside the operator — mail to a counterparty goes through the `counterparty`
-    // purpose, which requires an approved draft on the case. An absent or unknown purpose is
-    // denied, so this field is not optional. Stripped before reaching Graph.
+    // What this send IS: internal status mail to the operator's own team. The interceptor checks the
+    // sole recipient against the ACTIVE internal_notification contacts in the same table this route
+    // just read, so this branch cannot reach anyone the operator has not listed — mail to a
+    // counterparty goes through the `counterparty` purpose, which requires an approved draft on the
+    // case. An absent or unknown purpose is denied, so this field is not optional. Stripped before
+    // reaching Graph.
+    //
+    // "notification" is the PURPOSE on the wire; "internal_notification" above is the contact KIND.
+    // The two are deliberately different words for different things, and the interceptor only knows
+    // the purpose — renaming this to match the kind denies every notification send.
     sendPurpose: "notification",
   });
 }
 
 // Send the approved counterparty email — the one message in this system that leaves the operator.
 //
-// Every field comes from `draft`, which is the row the conditional arm-write just returned, never
-// from the request: the gateway interceptor re-reads the same row and refuses the send unless the
+// The text comes from `draft`, which is the row the conditional arm-write just returned, never from
+// the request: the gateway interceptor re-reads the same row and refuses the send unless the
 // recipient, subject and body match it exactly at the approved revision. Passing request-supplied
 // text here would simply produce a denial, which is the point — there is no path from an HTTP body
 // to a counterparty's inbox.
+//
+// The ADDRESS is the exception, because no row holds one: `draft.recipient` is NULL for the life of
+// the draft. It is resolved here from `recipient_contact_id`, out of the operator's contact table, so
+// that deactivating a contact makes an already-approved draft unsendable without anyone touching the
+// case. The interceptor resolves the same id again, on its own, and compares the two — so a wrong
+// answer here is a denial, not a misdirected email.
 async function sendCounterpartyEmail(
   id: string,
   draft: PersistedDraft,
 ): Promise<void> {
+  const recipient = await resolveContactAddress({
+    contactId: draft.recipient_contact_id,
+    kind: "counterparty",
+  });
   await callGatewayTool("microsoft-graph___sendSharedMailboxMail", {
     mailboxAddress: GRAPH_MAILBOX,
     message: {
       subject: draft.subject,
       body: { contentType: "Text", content: draft.body },
-      toRecipients: [{ emailAddress: { address: draft.recipient } }],
+      toRecipients: [{ emailAddress: { address: recipient } }],
     },
     saveToSentItems: true,
     confirmationToken: process.env.EMAIL_CONFIRMATION_TOKEN ?? "",
@@ -334,7 +364,16 @@ export async function POST(
       // successfully closed — the same reason auto-resolution refuses these cases outright.
       // `discarded` and `sent` need nothing further: one says the analyst chose not to write, the
       // other that the mail already went (a retried approve lands here and must not re-send).
-      if (draft && draft.draft_status === "pending")
+      //
+      // `render_failed` counts as undecided too. The agent meant to write to the counterparty and the
+      // template it cited would not render, so the case closing silently over it is exactly the
+      // outcome to avoid: the mail was intended, never sent, and nobody said so. The analyst edits it
+      // (supplying their own text) or discards it, and either way the record shows which.
+      if (
+        draft &&
+        (draft.draft_status === "pending" ||
+          draft.draft_status === "render_failed")
+      )
         return NextResponse.json(
           {
             error:
@@ -364,6 +403,29 @@ export async function POST(
             },
             { status: 409 },
           );
+        // Pre-flight the recipient contact, before anything is written. The send resolves it again
+        // for real, from the armed row; this is here because `armSend` stamps `send_attempted_at`
+        // and a failure after that stamp reads as "we do not know whether it went out" and needs a
+        // human override to retry. A contact deactivated hours ago is not an unknown outcome, and
+        // making the analyst clear that flag for it would teach them to click through the one warning
+        // that must stay meaningful.
+        try {
+          await resolveContactAddress({
+            contactId: String(draft?.recipient_contact_id ?? ""),
+            kind: "counterparty",
+          });
+        } catch (contactErr) {
+          const unavailable = contactErr instanceof ContactUnavailable;
+          return NextResponse.json(
+            {
+              error: unavailable
+                ? `this case's email draft cannot be sent: ${(contactErr as Error).message}`
+                : (contactErr as Error).message,
+              status: "PROPOSED",
+            },
+            { status: unavailable ? 409 : 502 },
+          );
+        }
       }
       // Deferred execution: if the escalated case carries a structured proposed_action,
       // perform the write NOW (before resolving). A failure keeps the case PROPOSED and
@@ -419,8 +481,8 @@ export async function POST(
       // approval" and the case was unreachable from the UI forever.
       //
       // Ordering the two this way is safe precisely because this mail is NOT the deliverable: the
-      // interceptor pins its sole recipient to RECON_NOTIFY_EMAIL, so it is internal status mail to
-      // the operator. The outward-facing counterparty send is the deliverable, and it still runs
+      // interceptor pins its sole recipient to an active internal_notification contact, so it is
+      // internal status mail. The outward-facing counterparty send is the deliverable, and it still runs
       // before any status change with the case held at PROPOSED if it fails.
       const resolved = await updateStatus(id, "RESOLVED");
       if (!resolved)
@@ -438,14 +500,17 @@ export async function POST(
       // Best-effort, but never silent: the decision stands and the case is closed, so a failed
       // courtesy mail is reported alongside the resolution instead of masking it or undoing it.
       let notificationError: string | null = null;
-      if (NOTIFY_EMAIL && GRAPH_MAILBOX && RECON_GATEWAY_URL) {
+      if (NOTIFY_CONTACT_ID && GRAPH_MAILBOX && RECON_GATEWAY_URL) {
         try {
           await sendResolutionEmail(id, c, approveComment);
         } catch (notifyErr) {
+          // The contact id, never the address: this string reaches CloudWatch, and a resolved
+          // recipient in a log is a copy of the operator's contact list outside the table that owns
+          // it. A deactivated or missing contact throws here too, so the id is what identifies it.
           notificationError = (notifyErr as Error).message;
           console.error(
-            `[Recon] case ${id} resolved, but the resolution notification to ${NOTIFY_EMAIL} ` +
-              `failed: ${notificationError}`,
+            `[Recon] case ${id} resolved, but the resolution notification to contact ` +
+              `${NOTIFY_CONTACT_ID} failed: ${notificationError}`,
           );
         }
       }
@@ -464,11 +529,18 @@ export async function POST(
     }
 
     if (body.action === "retry") {
-      // Stuck-IN_PROGRESS recovery: re-drive the same item through the agent-worker
-      // (honors the runtime⇄harness backend switch). Status stays IN_PROGRESS.
-      if (c.status !== "IN_PROGRESS")
+      // Recovery for a run that will never finish on its own: re-drive the same item through the
+      // agent-worker (honors the runtime⇄harness backend switch).
+      //   IN_PROGRESS — the run looks stuck but nothing proved it died; status is unchanged.
+      //   FAILED      — the worker proved it died. Move the case back to IN_PROGRESS FIRST, via the
+      //                 guarded status tool, so the queue reflects the re-investigation and a second
+      //                 failure has an IN_PROGRESS row to mark FAILED again. Doing it after the
+      //                 invoke would race the worker's own write.
+      // Uncapped on purpose: every retry is an explicit analyst click, so there is no loop to cap
+      // (unlike reject→reprocess, which the platform drives).
+      if (c.status !== "IN_PROGRESS" && c.status !== "FAILED")
         return NextResponse.json(
-          { error: "retry applies only to IN_PROGRESS cases" },
+          { error: "retry applies only to IN_PROGRESS or FAILED cases" },
           { status: 409 },
         );
       if (!AGENT_WORKER_FUNCTION)
@@ -476,6 +548,18 @@ export async function POST(
           { error: "agent worker is not configured" },
           { status: 500 },
         );
+      if (c.status === "FAILED") {
+        const reopened = await updateStatus(id, "IN_PROGRESS", {
+          comment:
+            (body.comment ?? "").trim() || "retry after a failed investigation",
+          actor: "analyst",
+        });
+        if (!reopened)
+          return NextResponse.json(
+            { error: "case can no longer be retried" },
+            { status: 409 },
+          );
+      }
       const item = (c.item as Record<string, unknown>) ?? { item_id: id };
       const { LambdaClient, InvokeCommand } =
         await import("@aws-sdk/client-lambda");

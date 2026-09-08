@@ -32,38 +32,25 @@ locals {
 # boto3/botocore are provided by the Lambda runtime, so they are NOT vendored. pydantic ships a
 # compiled extension (pydantic_core), so deps are installed as manylinux wheels matching the
 # Lambda architecture (var.lambda_platform) — NOT the build host — via pip --platform.
+#
+# The body lives in stage.sh rather than inline here because CI has to run the same staging
+# before `terraform plan`: data.archive_file.lambda below reads .build/staging at PLAN time,
+# while this provisioner only fills it at APPLY time, so a checkout that has never applied
+# cannot plan. See the header comment in stage.sh.
 resource "terraform_data" "stage" {
   triggers_replace = local.stage_hash
 
   provisioner "local-exec" {
-    command = <<-EOT
-      set -e
-      rm -rf "${local.staging_dir}"
-      mkdir -p "${local.staging_dir}/backend"
-      rsync -a --delete \
-        --exclude '__pycache__' \
-        --exclude '*.pyc' \
-        --exclude '.venv' \
-        --exclude '.build' \
-        --exclude '.ruff_cache' \
-        --exclude '.pytest_cache' \
-        "${var.backend_dir}/" "${local.staging_dir}/backend/"
-      python3 -m pip install \
-        --platform "${var.lambda_platform}" \
-        --python-version "${var.lambda_python_version}" \
-        --implementation cp \
-        --only-binary=:all: \
-        --target "${local.staging_dir}" \
-        ${join(" ", [for d in var.runtime_dependencies : "'${d}'"])}
-      find "${local.staging_dir}" -type d -name '__pycache__' -prune -exec rm -rf {} +
-      find "${local.staging_dir}" -type d -name '*.dist-info' -prune -exec rm -rf {} +
-      # Excluding __pycache__ leaves behind any source directory whose only remaining content WAS
-      # a cache — e.g. a stale untracked backend/<deleted-module>/__pycache__ arrives as an empty
-      # directory and archive_file records it, so the zip differs between two checkouts of the same
-      # commit. Any empty directory here is dead weight regardless: a Python package carries an
-      # __init__.py, and a vendored wheel always ships files. -depth so parents empty out first.
-      find "${local.staging_dir}" -depth -type d -empty -delete
-    EOT
+    command = join(" ", concat(
+      [
+        "'${path.module}/stage.sh'",
+        "'${local.staging_dir}'",
+        "'${var.backend_dir}'",
+        "'${var.lambda_platform}'",
+        "'${var.lambda_python_version}'",
+      ],
+      [for d in var.runtime_dependencies : "'${d}'"],
+    ))
   }
 }
 

@@ -110,7 +110,7 @@ export async function POST(request: NextRequest) {
         deleteSessionMessageFiles(sessionId, eventIds)
         console.log(`[compact] LOCAL - Deleted ${eventIds.length} message files for session ${sessionId}`)
       } else if (!Array.isArray(eventIds)) {
-        // No snapshot provided — delete all (legacy / fallback)
+        // No snapshot provided — delete all
         const { clearSessionMessages } = await import('@/lib/local-session-store')
         clearSessionMessages(userId, sessionId)
         console.log(`[compact] LOCAL - Messages cleared for session ${sessionId}`)

@@ -1,0 +1,60 @@
+# .sast-allowlist — triaged GitLab SAST findings that must not block the pipeline.
+#
+# Read by the `sast-gate` job in .gitlab-ci.yml, which drops matching findings before deciding
+# pass or fail. Format: one `<semgrep-rule-id> <repo-relative-path>` pair per line, whitespace
+# separated; `#` starts a comment. A malformed line is an error, not a skipped line — a typo that
+# silently allowlisted nothing would be indistinguishable from a clean scan.
+#
+# Scope is deliberately narrow. A pair suppresses ONE rule in ONE file: the same rule firing in a
+# file not listed here still fails the pipeline, and every other rule is untouched. Line numbers
+# are deliberately not part of the key — they churn on every edit, and an allowlist that breaks
+# whenever code moves gets widened rather than read.
+#
+# This is the same pattern as .gitleaks.toml and .semgrepignore, for the same reason: findings
+# triaged once should stay triaged, with the reasoning recorded next to the entry.
+#
+# ---------------------------------------------------------------------------------------------
+# nodejs_scan.javascript-ssrf-rule-node_ssrf — 11 findings, triaged 2026-08-25 against pipeline
+# 3296055. All false positives.
+#
+# The rule (njsscan, CWE-918) fires on any fetch() whose URL argument is not a string literal. It
+# does not check where the value came from. SSRF requires the SERVER to be tricked into calling a
+# destination an attacker chose; in every site below the host is not attacker-reachable:
+#
+#   * api-client.ts, agentcore-runtime-client.ts — host is a build-time constant from config
+#     (getApiUrl / AGENTCORE_URL); only a path or an encodeURIComponent'd query value varies.
+#   * useMetadataTracking.ts, ToolExecutionContainer.tsx — browser-side fetches to RELATIVE paths
+#     ('/api/conversation/history?...', '/output/sessions/...'). There is no host to control, and
+#     no server-side request is made at all.
+#   * recon-auth.ts — reconFetch() is a thin auth-header wrapper; its `input` comes from the call
+#     sites above, never from request data.
+#
+# Re-triage trigger: if any of these files starts taking a URL host from request input, delete its
+# line here rather than editing this comment.
+#
+# ---------------------------------------------------------------------------------------------
+# The 40 remaining Medium findings were also read, on 2026-08-25. None needs an entry here — the
+# gate blocks on Critical/High only, so they are reported and not suppressed, which is the right
+# resting state for findings that are false positives but worth re-reading if the code changes:
+#
+#   * 33 eslint.detect-non-literal-fs-filename in local-session-store.ts / local-tool-store.ts.
+#     Both are development-only stores under `.local-store` in process.cwd(), reached only via a
+#     dynamic import behind `if (IS_LOCAL)`. local-tool-store.ts builds no dynamic path at all
+#     (every fs call uses a module-level constant); local-session-store.ts validates session, user
+#     and agent ids against character allowlists and calls isPathWithinBase() before each fs call.
+#   * 2 bandit.B310-1 (urllib urlopen) in backend/recon_core/gateway_client.py and
+#     backend/tier1/ingress_invoke.py. Both assert the URL starts with https:// on the line above
+#     and both already carry `# nosec B310` — GitLab runs a semgrep translation of the bandit rule,
+#     which does not honour bandit's own suppression comment.
+#   * 3 nodejs_scan.javascript-dos-rule-regex_dos in ui/JsonDisplay.tsx and lib/api-auth.ts. The
+#     JsonDisplay ones render in the browser, so the blast radius is the user's own tab; the
+#     api-auth one is `/^Bearer\s+(.+)$/i`, anchored with no nested quantifier.
+#   * 2 nodejs_scan.javascript-crypto-rule-node_insecure_random_generator — retry-backoff jitter
+#     and a React key. Neither value is a secret.
+# ---------------------------------------------------------------------------------------------
+
+nodejs_scan.javascript-ssrf-rule-node_ssrf chatbot-app/frontend/src/lib/api-client.ts
+nodejs_scan.javascript-ssrf-rule-node_ssrf chatbot-app/frontend/src/lib/recon-auth.ts
+nodejs_scan.javascript-ssrf-rule-node_ssrf chatbot-app/frontend/src/lib/agentcore-runtime-client.ts
+nodejs_scan.javascript-ssrf-rule-node_ssrf chatbot-app/frontend/src/hooks/useMetadataTracking.ts
+nodejs_scan.javascript-ssrf-rule-node_ssrf chatbot-app/frontend/src/components/chat/ToolExecutionContainer.tsx

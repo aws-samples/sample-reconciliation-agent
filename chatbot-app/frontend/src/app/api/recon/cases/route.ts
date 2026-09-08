@@ -16,7 +16,9 @@ export const runtime = "nodejs";
 const REGION = process.env.AWS_REGION ?? "us-east-1";
 const CASES_TABLE = process.env.CASES_TABLE ?? "recon-dev-cases";
 const LESSONS_TABLE = process.env.LESSONS_TABLE ?? "recon-lessons";
-const OPEN_STATUSES = ["PENDING", "IN_PROGRESS", "PROPOSED"];
+// FAILED is an OPEN status: the investigation died, so the item still needs a human — surfacing it
+// in the default triage queue is the whole point of having the state.
+const OPEN_STATUSES = ["PENDING", "IN_PROGRESS", "PROPOSED", "FAILED"];
 // Every lifecycle status — the dashboard/history views query across all of them.
 const ALL_STATUSES = [
   "PENDING",
@@ -28,8 +30,11 @@ const ALL_STATUSES = [
   "AUTO_CLEARED",
   "CLOSED_NO_ACTION",
   "AGED",
+  "FAILED",
 ];
-// Statuses an operator may set in bulk from the queue (agent-owned states excluded).
+// Statuses an operator may set in bulk from the queue (agent-owned states excluded). IN_PROGRESS is
+// here so a batch of FAILED cases can be re-opened; the bulk path only writes the status, so the
+// re-drive itself is still the per-case retry action.
 const BULK_STATUSES = ["IN_PROGRESS", "CLOSED_NO_ACTION"];
 
 // GET /api/recon/cases                -> open cases (default; the triage queue)
@@ -58,7 +63,7 @@ export async function GET(req: Request) {
       );
       for (const item of resp.Items ?? []) {
         const row = unmarshall(item);
-        // Legacy rows may carry `item` as a JSON string — normalize for the UI.
+        // A row may carry `item` as a JSON string — normalize for the UI.
         if (typeof row.item === "string") {
           try {
             row.item = JSON.parse(row.item);
@@ -103,10 +108,13 @@ export async function POST(req: Request) {
   }
   // Enforce the configured decision-comment requirement on bulk actions too.
   try {
-    const { SSMClient, GetParameterCommand } = await import("@aws-sdk/client-ssm");
+    const { SSMClient, GetParameterCommand } =
+      await import("@aws-sdk/client-ssm");
     const got = await new SSMClient({ region: REGION }).send(
       new GetParameterCommand({
-        Name: process.env.COMMENT_REQUIREMENT_PARAM ?? "/recon-dev/comment-requirement",
+        Name:
+          process.env.COMMENT_REQUIREMENT_PARAM ??
+          "/recon-dev/comment-requirement",
       }),
     );
     if (

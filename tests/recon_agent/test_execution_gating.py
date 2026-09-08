@@ -10,7 +10,6 @@ def _proposal(*, confidence: float, action) -> Proposal:
     return Proposal(
         item_id="idp-1",
         class_id="document-cross-reference",
-        classification_confidence=0.9,
         classification_reasoning="draw cancellation",
         resolution="Mark cancelled.",
         confidence=confidence,

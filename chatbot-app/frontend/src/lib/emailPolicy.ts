@@ -1,88 +1,125 @@
 /**
- * Counterparty recipient address check — a UX MIRROR, **not** the security control.
+ * Counterparty recipient checks the UI performs — address SHAPE and contact selection.
  *
- * The authority is `backend/recon_core/email_policy.py`, which the gateway request interceptor
- * imports and which sits on the send path and fails closed. This copy exists so the draft panel can
- * tell an analyst "that domain is not allowed" while they type, and so the BFF's draft `PUT` can
- * answer with a clean 400 instead of letting the address travel all the way to a gateway denial at
- * send time.
+ * ⚠️ There is deliberately no domain-allowlist logic in this file, and none anywhere else in the
+ * frontend. `counterparty_email_domains` is a GATE: it is read by the gateway request interceptor
+ * (`backend/recon_core/email_policy.py`), which sits on the send path, fails closed, and re-derives
+ * the verdict from its own copy on every send. That is the only place it is consulted.
  *
- * The distinction matters for how a divergence between the two is triaged: because the interceptor
- * re-derives the verdict from its own allowlist on every send, drift here is a UX bug (a form that
- * accepts something the send will refuse, or nags about something it would allow) and never a
- * bypass. Nothing is authorized by this file. Do not add a caller that treats it as a gate.
+ * It used to be mirrored here as well, for "early feedback", and the mirror was a net loss:
  *
- * Deliberately no shared fixture and no cross-language parity test: a fixture pins agreement only on
- * the cases someone already thought of, and maintaining one implies the two copies are equally
- * trusted. One authority is the cheaper correctness story.
+ *  - The BFF read a container env var fixed at task start, so a narrowed allowlist was enforced by
+ *    the interceptor while the UI still showed the old one -- a control that misreports its own
+ *    configuration.
+ *  - Saving an out-of-domain contact returned a 201 WITH an amber advisory, which read as "the save
+ *    was blocked" when the row had in fact been written. Contact-list membership and send permission
+ *    are different questions, and answering the second on the screen that asks the first taught the
+ *    operator that their edit had failed.
+ *  - The draft `PUT` refused out-of-domain addresses too, so the same rule lived in three places and
+ *    could only ever agree with the interceptor or be wrong.
+ *
+ * Do not reintroduce it. If an analyst needs to know whether an address is sendable, the answer has
+ * to come from the thing that decides.
+ *
+ * {@link storableAddressReason} stays and the contact routes do refuse on it, because it authorizes
+ * nothing: rejecting `"Foo <a@b>"` or `"not an address"` is a shape check, and a malformed string
+ * reaches nobody whatever any allowlist says.
  */
 
 /**
- * Parse the comma-separated allowlist into normalized domains.
+ * The lowercased domain of a bare address, or null when the string is not one.
  *
- * @param raw - e.g. `"example.com, Partner.CO.UK"`. Empty or whitespace-only yields `[]`, which
- *   allows NOTHING — see {@link isRecipientAllowed}.
- * @returns lowercased, trimmed domains with empty entries dropped.
+ * The shape rules of {@link isRecipientAllowed}, minus the allowlist, so the two cannot disagree
+ * about what counts as an address. Split out because storing a contact and being allowed to email
+ * one are different questions: the contact table accepts any address in any domain, and the domain
+ * verdict belongs to the send path.
+ *
+ * @param address - the candidate address.
+ * @returns the domain part, lowercased, or null when `address` is empty, framed (`Foo <a@b>`),
+ *   quoted, multi-part, or has no dotted domain.
  */
-export function parseDomainAllowlist(raw: string): string[] {
-  return (raw ?? "")
-    .split(",")
-    .map((part) => part.trim().toLowerCase())
-    .filter((part) => part.length > 0);
-}
-
-/**
- * Whether `address` is a bare address in one of the allowlisted domains.
- *
- * Mirrors the Python authority's rules, including the two that are easy to get wrong:
- *  - the domain match is EXACT, not a suffix match, so `notevil.com` does not satisfy `evil.com`;
- *  - an empty allowlist allows nothing, because a misconfigured control must close the door.
- *
- * The decorated form `Foo <a@b.com>` is rejected rather than unwrapped: the interceptor compares the
- * raw address it finds in the Graph payload, so accepting a decorated form here would put the two
- * layers into disagreement about what the recipient is.
- *
- * @param address - the candidate recipient address.
- * @param allowlist - normalized domains from {@link parseDomainAllowlist}.
- * @returns true only when the address is well-formed and its domain is allowlisted.
- */
-export function isRecipientAllowed(
-  address: string,
-  allowlist: string[],
-): boolean {
-  if (allowlist.length === 0) return false;
+export function addressDomain(address: string): string | null {
   const candidate = (address ?? "").trim().toLowerCase();
-  if (!candidate) return false;
+  if (!candidate) return null;
   // Reject framing/whitespace/quoting outright rather than trying to unwrap it.
-  if (/[ \t\r\n<>,;"']/.test(candidate)) return false;
+  if (/[ \t\r\n<>,;"']/.test(candidate)) return null;
   const parts = candidate.split("@");
-  if (parts.length !== 2) return false;
+  if (parts.length !== 2) return null;
   const [local, domain] = parts;
-  if (!local || !domain || !domain.includes(".")) return false;
-  return allowlist.includes(domain);
+  if (!local || !domain || !domain.includes(".")) return null;
+  return domain;
 }
 
 /**
- * A short reason the address is unusable, or `null` when it is fine — for inline form feedback.
+ * Why `address` is not a storable address, or null when it is one.
  *
- * Split from the boolean so the panel can say WHY without re-deriving it, and so the empty-input
- * case reads as "nothing typed yet" rather than as an error the moment the field renders.
+ * Shape only — nothing about domains, kinds or allowlists. This is the one address check the contact
+ * routes still REFUSE on, because a string that is not an address cannot be corrected later by
+ * widening an allowlist: it will simply never reach anybody.
  *
- * @param address - what the analyst has typed so far.
- * @param allowlist - normalized domains from {@link parseDomainAllowlist}.
- * @returns a human-readable reason, or null when the address is allowed.
+ * @param address - the operator's input.
+ * @returns a human-readable reason, or null when the address is well-formed.
  */
-export function recipientRejectionReason(
-  address: string,
-  allowlist: string[],
-): string | null {
+export function storableAddressReason(address: string): string | null {
   const candidate = (address ?? "").trim();
-  if (!candidate) return "Enter the counterparty's email address.";
-  if (allowlist.length === 0)
-    return "No counterparty domains are configured, so no address can be used yet.";
-  if (isRecipientAllowed(candidate, allowlist)) return null;
-  const domain = candidate.toLowerCase().split("@")[1];
-  if (!domain || !candidate.includes("@") || candidate.split("@").length !== 2)
-    return "Enter a single plain address, e.g. name@example.com.";
-  return `${domain} is not an allowed counterparty domain (allowed: ${allowlist.join(", ")}).`;
+  if (!candidate) return "email is required";
+  if (addressDomain(candidate) === null)
+    return `${candidate} is not a single plain email address (expected one address of the form name@example.com, with no display name, quotes or angle brackets)`;
+  return null;
+}
+
+/**
+ * The fields a contact picker needs, and deliberately not one more.
+ *
+ * No `email`. The picker never sees an address: the analyst confirms WHO, and the id they pick is
+ * resolved server-side at send time. Typed structurally rather than importing `Contact` from
+ * `lib/contactStore` so this file stays free of the DynamoDB client and usable in a client component.
+ */
+export interface ContactChoice {
+  contact_id: string;
+  display_name: string;
+  kind: string;
+  active: boolean;
+}
+
+/**
+ * A short reason the picked CONTACT cannot receive this send, or `null` when it can.
+ *
+ * The three refusals mirror `resolve_address` in `backend/contacts/store.py` — unknown id,
+ * deactivated, wrong kind — with the same caveat as everything else in this file: it is inline form
+ * feedback, and the server decides. It exists because the draft form now picks a contact instead of
+ * typing an address, so {@link recipientRejectionReason} can no longer say anything about the
+ * selection, and a form with no feedback at all would be a regression against what the address field
+ * used to give the analyst.
+ *
+ * The fourth refusal `resolve_address` raises on — a contact with no address stored — has no mirror
+ * here on purpose: this side never receives the address, so it cannot tell a blank one from a withheld
+ * one, and guessing would mean nagging about a contact that sends perfectly well.
+ *
+ * @param contactId - the id the analyst picked; empty means nothing picked yet.
+ * @param contacts - the choices the picker was populated from.
+ * @param kind - what this send is for, e.g. `"counterparty"`.
+ * @returns a human-readable reason, or null when the selection is usable.
+ */
+export function contactSelectionRejectionReason({
+  contactId,
+  contacts,
+  kind,
+}: {
+  contactId: string;
+  contacts: readonly ContactChoice[];
+  kind: string;
+}): string | null {
+  const picked = (contactId ?? "").trim();
+  if (!picked) return "Choose who this email goes to.";
+  const contact = contacts.find((c) => c.contact_id === picked);
+  // Unknown rather than absent: the list is loaded, so an id not in it is a stale selection — most
+  // often a contact an operator deactivated and removed from the analyst's active-only list.
+  if (!contact)
+    return `No contact answers to ${picked}. It may have been removed — pick another.`;
+  if (!contact.active)
+    return `${contact.display_name} is deactivated and cannot be sent to.`;
+  if (contact.kind !== kind)
+    return `${contact.display_name} is a ${contact.kind} contact, which cannot receive a ${kind} email.`;
+  return null;
 }

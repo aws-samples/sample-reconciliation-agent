@@ -9,7 +9,12 @@ variable "region" {
 }
 
 variable "harness_config_dir" {
-  description = "Path to the blueprint dir containing harness_config.py (shared config source)."
+  description = <<-EOT
+    Path to the blueprint dir holding harness_config.py and its derived harness_config.json.
+    Terraform reads the JSON (tools, allowedTools, maxIterations, lifecycle timeouts); the .py
+    remains the authored source of truth. Regenerate with
+    `python3 infra/scripts/gen_harness_config_json.py`.
+  EOT
   type        = string
 }
 
@@ -65,7 +70,7 @@ variable "vpc_security_group_ids" {
 # ---------------------------------------------------------------------------------
 # Harness OTel configuration (environmentVariables on the harness definition).
 # Recommended by aws-samples/sample-ac-harness-observability; see
-# the harness OTel-observability design record for why two of the sample's
+# the note in modules/tier1/main.tf for why two of the sample's
 # settings default to OFF here.
 # ---------------------------------------------------------------------------------
 

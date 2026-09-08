@@ -97,7 +97,6 @@ def _proposal_kwargs(item_id: str) -> dict:
     return {
         "item_id": item_id,
         "class_id": "timing-difference",
-        "classification_confidence": Decimal("0.9"),
         "classification_reasoning": "value dates differ by one business day",
         "resolution": "monitor",
         "confidence": Decimal("0.8"),
@@ -130,6 +129,25 @@ def test_attach_proposal_writes_onto_an_existing_case():
 
 
 @mock_aws
+def test_attach_proposal_writes_no_classification_confidence() -> None:
+    """A stored number nobody computes and no screen renders is worse than absent.
+
+    The next reader assumes it means something. The only confidence on a case is ``confidence`` —
+    the evidence-completeness score computed by ``recon_core.confidence.score_proposal``. Rows
+    written before 2026-09-04 still carry the old attribute; nothing backfills or removes it.
+
+    :returns: None.
+    """
+    _make_tables()
+    cases = _store()
+    cases.open(_item(), status=CaseStatus.IN_PROGRESS, tier=2)
+    cases.attach_proposal(**_proposal_kwargs("i-1"))
+    row = _raw_table("recon-cases").get_item(Key={"item_id": "i-1"})["Item"]
+    assert "classification_confidence" not in row
+    assert row["confidence"] == Decimal("0.8")
+
+
+@mock_aws
 def test_set_status_refuses_to_create_a_case_row():
     """set_status on an unknown case is a loud KeyError, not a row with only a status."""
     _make_tables()
@@ -148,6 +166,101 @@ def test_redrive_refuses_an_unknown_case():
     cases = _store()
     with pytest.raises(KeyError, match="not found"):
         cases.redrive(_item("ghost"), reprocess_cap=3)
+
+
+@mock_aws
+def test_mark_failed_writes_status_reason_and_timestamp_together():
+    """FAILED, the reason and the failure time land in ONE write, plus an audit row.
+
+    Splitting the write would leave a window where the case reads FAILED with no reason — which is
+    precisely the information the analyst needs in order to decide whether to retry.
+    """
+    _make_tables()
+    cases = _store()
+    cases.open(_item(), status=CaseStatus.IN_PROGRESS, tier=2)
+
+    assert cases.mark_failed("i-1", reason="MaxTokensReachedException: output cap hit")
+
+    row = cases.get("i-1")
+    assert row["status"] == CaseStatus.FAILED.value
+    assert row["failure_reason"] == "MaxTokensReachedException: output cap hit"
+    assert row["failed_at"]
+    # created_at is the status-index RANGE key; a FAILED case must stay queryable from the GSI.
+    assert row["created_at"]
+    assert [r["status"] for r in _audit_rows("i-1")] == ["IN_PROGRESS", "FAILED"]
+
+
+@mock_aws
+def test_mark_failed_never_overwrites_a_case_that_already_reached_a_verdict():
+    """A run that persisted its proposal and then errored on the way out keeps the proposal.
+
+    The proposal is the real result; recording the trailing error as a failure would throw away work
+    the analyst can act on and put the case back in the retry queue for nothing.
+    """
+    _make_tables()
+    cases = _store()
+    cases.open(_item(), status=CaseStatus.IN_PROGRESS, tier=2)
+    assert cases.transition("item_id", "i-1", CaseStatus.PROPOSED)
+
+    assert cases.mark_failed("i-1", reason="boom on the way out") is False
+
+    row = cases.get("i-1")
+    assert row["status"] == CaseStatus.PROPOSED.value
+    assert "failure_reason" not in row
+
+
+@mock_aws
+def test_mark_failed_refuses_an_unknown_case():
+    """A failure for an item with no case row raises rather than upserting a statusless orphan."""
+    _make_tables()
+    cases = _store()
+    with pytest.raises(KeyError, match="not found"):
+        cases.mark_failed("ghost", reason="boom")
+    assert "Item" not in _raw_table("recon-cases").get_item(Key={"item_id": "ghost"})
+
+
+@mock_aws
+def test_mark_failed_truncates_a_huge_reason_and_says_so():
+    """Reasons come from exception text; the case row is read on every queue render."""
+    _make_tables()
+    cases = _store()
+    cases.open(_item(), status=CaseStatus.IN_PROGRESS, tier=2)
+
+    assert cases.mark_failed("i-1", reason="x" * 5000)
+
+    stored = cases.get("i-1")["failure_reason"]
+    assert len(stored) < 1000
+    assert stored.endswith("(truncated, see worker logs)")
+
+
+@mock_aws
+def test_mark_failed_records_something_when_the_error_had_no_text():
+    """An empty reason must not persist as an empty panel that reads like a rendering bug."""
+    _make_tables()
+    cases = _store()
+    cases.open(_item(), status=CaseStatus.IN_PROGRESS, tier=2)
+
+    assert cases.mark_failed("i-1", reason="   ")
+
+    assert cases.get("i-1")["failure_reason"] == "investigation failed with no error text"
+
+
+@mock_aws
+def test_a_failed_case_can_be_retried_back_into_progress():
+    """The retry path an analyst drives: FAILED -> IN_PROGRESS through the guarded transition."""
+    _make_tables()
+    cases = _store()
+    cases.open(_item(), status=CaseStatus.IN_PROGRESS, tier=2)
+    assert cases.mark_failed("i-1", reason="boom")
+
+    assert cases.transition("item_id", "i-1", CaseStatus.IN_PROGRESS, note="analyst: retry")
+
+    assert cases.get("i-1")["status"] == CaseStatus.IN_PROGRESS.value
+    assert [r["status"] for r in _audit_rows("i-1")] == [
+        "IN_PROGRESS",
+        "FAILED",
+        "IN_PROGRESS",
+    ]
 
 
 @mock_aws

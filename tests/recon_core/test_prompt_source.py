@@ -1,9 +1,9 @@
 """Tests for the shared prompt core + per-backend calling contract composition.
 
-The regression these lock in: each Tier-2 backend used to own a full copy of the system prompt, and
-the copies drifted (one said "skills are NOT categories", the other framed classification as
-picking one). The policy half must now come from ONE object, with only the harness's calling
-contract appended.
+What these lock in: the policy half of the prompt must come from ONE object, with only the harness's
+calling contract appended. A per-backend copy drifts invisibly — one saying "skills are NOT
+categories" while the other frames classification as picking one — and the drift only shows up as an
+agent that behaves differently depending on which backend ran the item.
 """
 
 import pytest

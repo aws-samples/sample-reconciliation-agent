@@ -1,0 +1,35 @@
+{
+  "document_class": {
+    "type": "consolidated_payment_advice"
+  },
+  "split_document": {
+    "page_indices": [
+      0,
+      1,
+      2
+    ]
+  },
+  "classification": "consolidated_payment_advice",
+  "page_ids": [
+    "1",
+    "2",
+    "3"
+  ],
+  "confidence": 1.0,
+  "inference_result": {
+    "notice_date": "2026-02-27",
+    "notice_date_source_raw": "27-Feb-2026",
+    "value_date": "2026-03-02",
+    "counterparty": "CINDERMOOR LOGISTICS HOLDINGS, INC.",
+    "fund": "Tidelantern Senior Loan Fund, LP",
+    "reference": "CINDERMOOR LOGISTICS HOLDINGS, INC. $850MM 3/15/2021",
+    "amount": "26322.73",
+    "currency": "USD",
+    "activity_type": "Consolidated Payment",
+    "loanx_id": "LX223061XXXX1",
+    "agent_bank": "Meridian Agency Services LLC",
+    "agent_email": "loan.ops@meridian-agent.example",
+    "agent_telephone": "212-555-3380",
+    "notice_comment": "Kindly apply funds accordingly."
+  }
+}

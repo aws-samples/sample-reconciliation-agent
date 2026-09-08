@@ -4,7 +4,7 @@ import { parseSkill, validateSkill } from "@/lib/skillFrontmatter";
 const VALID = `---
 name: timing-break
 description: Value date differs.
-tools: [search_ledger, search_guidance]
+tools: [general-ledger___search_ledger, managed-kb___Retrieve]
 model: us.amazon.nova-2-lite-v1:0
 ---
 Compare the two sides.`;
@@ -13,7 +13,10 @@ describe("skillFrontmatter", () => {
   it("parses metadata (tools list + model) + body", () => {
     const p = parseSkill(VALID);
     expect(p.name).toBe("timing-break");
-    expect(p.tools).toEqual(["search_ledger", "search_guidance"]);
+    expect(p.tools).toEqual([
+      "general-ledger___search_ledger",
+      "managed-kb___Retrieve",
+    ]);
     expect(p.model).toBe("us.amazon.nova-2-lite-v1:0");
     expect(p.body).toContain("Compare");
   });

@@ -119,6 +119,29 @@ variable "okta_client_id" {
   default     = ""
 }
 
+# The group whose members may change platform configuration — the auto-resolve threshold, the agent
+# backend, the Tier-1 switch, and the list of addresses the platform may email.
+#
+# Terraform cannot create this group: there is no Cognito user pool in this deployment, so membership
+# comes from the identity provider's group claim and an operator adds people to it in Okta or Entra. The
+# empty default therefore means "nobody yet", which is the safe reading — the routes refuse every caller
+# until the group is named here.
+variable "recon_admin_group" {
+  description = "OIDC group whose members may change platform configuration. Empty means nobody can."
+  type        = string
+  default     = ""
+}
+
+# Which claim carries group memberships. Okta releases them as `groups` when the app is configured to;
+# Entra uses `groups` or `roles` depending on the app registration. Wrong name means an empty group list,
+# which reads as "not an admin" rather than as a misconfiguration — so if the Config tab is missing for
+# someone who should have it, check this before checking the group name.
+variable "auth_groups_claim" {
+  description = "JWT claim carrying OIDC group memberships (Okta: groups; Entra: groups or roles)."
+  type        = string
+  default     = "groups"
+}
+
 # Pinning this is what stops the callback URL drifting (live-QA P0-1). Left empty, the frontend
 # derives the URI from whatever origin the browser is on — which is a generated *.cloudfront.net
 # domain that changes whenever the distribution is recreated, so the URI registered on the Okta
@@ -177,16 +200,96 @@ variable "lessons_table_arn" {
 
 # --- Approve email + reprocess re-invocation ---
 
-variable "notify_email" {
-  description = "Recipient address for approval notifications, sent from the shared mailbox via the microsoft-graph gateway tool. Empty disables the email step."
+# --- Contacts + email templates (Config tab CRUD; recipient resolution on send) ---
+
+variable "contacts_table" {
+  description = "Contacts table name. The BFF reads it to resolve an approved draft's recipient_contact_id to an address at send time, and writes it from the Config tab. There is no configured recipient address anywhere in this module -- storing one would survive an operator deactivating the contact."
   type        = string
   default     = ""
 }
 
-variable "counterparty_email_domains" {
-  description = "Domains an analyst may address a counterparty email draft to, joined into COUNTERPARTY_EMAIL_DOMAINS. Empty allows nothing. The BFF checks this when persisting the draft; the gateway interceptor checks it again on the send, so this copy is early feedback rather than the boundary."
-  type        = list(string)
-  default     = []
+variable "contacts_table_arn" {
+  description = "ARN of the contacts table, for the task role's read+write grant."
+  type        = string
+  default     = ""
+}
+
+variable "templates_table" {
+  description = "Email-templates table name. The BFF renders an approved draft from the stored template and writes the table from the Config tab."
+  type        = string
+  default     = ""
+}
+
+variable "templates_table_arn" {
+  description = "ARN of the email-templates table, for the task role's read+write grant."
+  type        = string
+  default     = ""
+}
+
+variable "workflow_types_table" {
+  description = "Workflow-types table name. The Config tab reads and writes it; nothing else does. Empty disables the panel rather than pointing it at a table named \"\"."
+  type        = string
+  default     = ""
+}
+
+variable "workflow_types_table_arn" {
+  description = "ARN of the workflow-types table, for the task role's read+write grant."
+  type        = string
+  default     = ""
+}
+
+variable "uploads_table" {
+  description = "Name of the upload-submissions table the upload route writes and the Documents tab reads."
+  type        = string
+  default     = ""
+}
+
+variable "uploads_table_arn" {
+  description = "ARN of the same table."
+  type        = string
+  default     = ""
+}
+
+variable "uploads_table_index_arn" {
+  description = "ARN of its by_recency index. A Query on an index needs its OWN ARN in the grant; the table ARN alone answers AccessDenied and the Recent uploads table renders an error instead of rows."
+  type        = string
+  default     = ""
+}
+
+variable "idp_input_bucket" {
+  description = "The document pipeline's input bucket. An extraction-routed upload is put here."
+  type        = string
+  default     = ""
+}
+
+variable "idp_input_bucket_arn" {
+  description = "ARN of the same bucket, for the object-path PutObject grant."
+  type        = string
+  default     = ""
+}
+
+variable "email_preprocess_function_name" {
+  description = "Name of the pre-processor the upload route invokes for a .msg or .eml."
+  type        = string
+  default     = ""
+}
+
+variable "email_preprocess_function_arn" {
+  description = "ARN of the same function, for the scoped lambda:InvokeFunction grant."
+  type        = string
+  default     = ""
+}
+
+variable "idp_appsync_endpoint" {
+  description = "HTTPS GraphQL endpoint of the document pipeline's AppSync API, from that stack's outputs. The Documents tab reads it server-side as the task role. Empty leaves the tab reporting that it is not configured, which is the honest outcome -- a defaulted endpoint would sign a request to nowhere and read like the pipeline being down."
+  type        = string
+  default     = ""
+}
+
+variable "idp_appsync_api_arn" {
+  description = "ARN of that same AppSync API (arn:aws:appsync:REGION:ACCOUNT:apis/API_ID), used to build the field-scoped read grant below. Empty grants nothing."
+  type        = string
+  default     = ""
 }
 
 variable "graph_mailbox" {
@@ -317,4 +420,16 @@ variable "email_confirmation_token" {
   type        = string
   default     = ""
   sensitive   = true
+}
+
+variable "intake_function_name" {
+  description = "Intake Lambda name the BFF invokes for manual payload submission ('' disables the queue's Create New action)."
+  type        = string
+  default     = ""
+}
+
+variable "intake_function_arn" {
+  description = "Intake Lambda ARN, for the scoped lambda:InvokeFunction grant."
+  type        = string
+  default     = ""
 }

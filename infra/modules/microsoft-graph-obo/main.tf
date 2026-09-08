@@ -1,19 +1,33 @@
-# Microsoft Graph via AgentCore Gateway with OBO (On-Behalf-Of) token exchange.
+# Microsoft Graph via AgentCore Gateway, with OBO (On-Behalf-Of) token exchange available.
 #
-# Why null_resource + AWS CLI?
-# The hashicorp/aws v6.x provider does NOT model:
-#   - customOauth2ProviderConfig.onBehalfOfTokenExchangeConfig
-#   - clientAuthenticationMethod=CLIENT_SECRET_POST
-#   - JWT_AUTHORIZATION_GRANT
-#   - TOKEN_EXCHANGE outbound grant on gateway targets
-#   - openApiSchema.inlinePayload string payload + customParameters.requested_token_use
+# ⚠️ SPLIT IMPLEMENTATION, and the split is not arbitrary.
 #
-# The CLI accepts these via --oauth2-provider-config-input and
-# --credential-provider-configurations JSON. We use null_resource provisioners
-# triggered by content hashes; deletes call delete-oauth2-credential-provider /
-# delete-gateway-target.
+# The GATEWAY TARGET is native: aws 6.62.0 models `mcp { open_api_schema { inline_payload } }` and
+# `credential_provider_configuration { oauth { grant_type, custom_parameters, scopes } }`, which is
+# everything the TOKEN_EXCHANGE + requested_token_use configuration needs.
 #
-# Reference: ~/Downloads/obo_token_exchange_microsoft.ipynb.
+# The CREDENTIAL PROVIDER is CloudFormation. `aws_bedrockagentcore_oauth2_credential_provider`
+# models client_id/client_secret/oauth_discovery and nothing else — it has no
+# `client_authentication_method` and no `on_behalf_of_token_exchange_config`, both of which this
+# module requires (CLIENT_SECRET_POST, and JWT_AUTHORIZATION_GRANT in obo mode).
+# AWS::BedrockAgentCore::OAuth2CredentialProvider models both.
+#
+# Both used to be null_resource provisioners shelling out to the AWS CLI, which meant an apply
+# needed the CLI plus jq on whatever machine ran Terraform — and a `data "external"` read the
+# provider ARN and callback URL back at PLAN time, so even a plan did.
+#
+# The client secret now lives in Secrets Manager and is referenced by the template
+# (ClientSecretConfig + ClientSecretSource=EXTERNAL) rather than embedded in it. Inlining it would
+# have put the plaintext into the CloudFormation template, readable by anyone holding
+# cloudformation:GetTemplate — a far wider grant than the state bucket.
+#
+# ⚠️ EXTERNAL does need a grant on the secret, and reaching READY does NOT prove otherwise. Provider
+# creation and target validation both succeed without one; the grant is only exercised later, when the
+# gateway MINTS an outbound token, and it is the GATEWAY's role that reads the secret rather than this
+# module's. Missing it fails every call with `Failed to fetch outbound oauth token. Access denied when
+# retrieving the provided secret`. The grant therefore lives on the gateway role in
+# `modules/recon-agent` (matched by secret NAME, because this module depends on that one for
+# `gateway_id` and an ARN reference back would be a cycle).
 
 locals {
   is_cc         = var.auth_mode == "client_credentials"
@@ -23,7 +37,8 @@ locals {
   # signed-in user for an app-only token to resolve against).
   schema_path    = local.is_cc ? "${path.module}/openapi-schema-app.json" : "${path.module}/openapi-schema.json"
   openapi_schema = file(local.schema_path)
-  schema_hash    = sha256(local.openapi_schema)
+  # (No schema hash any more: it existed only to trigger the retired provisioner. The native target
+  # diffs on the payload itself, so a schema edit is an ordinary in-place update.)
   # MSAL.js issues v2.0 tokens (issuer https://login.microsoftonline.com/{tenant}/v2.0).
   # The OBO discovery URL must point at the v2.0 metadata so AgentCore Identity
   # POSTs the swap to /oauth2/v2.0/token and validates JWKS for v2 tokens. Same endpoint
@@ -35,221 +50,169 @@ locals {
   # inbound assertion for a Graph token). client_credentials: no such config — the provider
   # just holds app credentials; the GRANT TYPE (CLIENT_CREDENTIALS vs TOKEN_EXCHANGE) is
   # selected on the gateway TARGET's credential config instead (see gateway_target below).
+  # PascalCase because this goes into a CloudFormation template, not a boto3 call.
   obo_config = local.is_cc ? {} : {
-    onBehalfOfTokenExchangeConfig = { grantType = "JWT_AUTHORIZATION_GRANT" }
+    OnBehalfOfTokenExchangeConfig = { GrantType = "JWT_AUTHORIZATION_GRANT" }
   }
 
-  oauth_provider_payload = var.enabled ? jsonencode(merge(
+  # The secret is referenced, never embedded — see the header. JsonKey selects the field inside the
+  # Secrets Manager JSON document, so the secret can carry more than one value later without
+  # changing this wiring.
+  client_secret_json_key = "client_secret"
+
+  oauth_provider_config = merge(
     {
-      customOauth2ProviderConfig = merge(
-        {
-          clientId     = var.client_id
-          clientSecret = var.client_secret
-          oauthDiscovery = {
-            discoveryUrl = local.discovery_url
-          }
-          clientAuthenticationMethod = "CLIENT_SECRET_POST"
-        },
-        local.obo_config,
-      )
+      ClientId = var.client_id
+      OauthDiscovery = {
+        DiscoveryUrl = local.discovery_url
+      }
+      ClientAuthenticationMethod = "CLIENT_SECRET_POST"
+      ClientSecretSource         = "EXTERNAL"
+      ClientSecretConfig = {
+        SecretId = var.enabled ? aws_secretsmanager_secret.client_secret[0].arn : ""
+        JsonKey  = local.client_secret_json_key
+      }
     },
-  )) : ""
-
-  # Triggers a re-create when any input that the API actually validates
-  # changes. client_secret is excluded from the visible hash but its presence
-  # is captured indirectly via the provider name so the resource still updates
-  # when the secret rotates (set REWRITE_SECRETS=1 to force).
-  provider_trigger_hash = sha256(join("|", [
-    var.tenant_id,
-    var.client_id,
-    local.discovery_url,
-    var.auth_mode,
-  ]))
-
-  target_trigger_hash = sha256(join("|", [
-    local.schema_hash,
-    var.client_id,
-    join(",", local.oauth_scopes),
-    var.auth_mode,
-  ]))
+    local.obo_config,
+  )
 }
 
 # ============================================================
 # OAuth2 Credential Provider — CustomOauth2 with OBO config
 # ============================================================
 
-resource "null_resource" "oauth_provider" {
+# The Entra app client secret, referenced by the CloudFormation template rather than embedded in it.
+#
+# Terraform state holds this value either way (it is a `sensitive` variable used as a resource
+# argument), but a template does NOT have to: cloudformation:GetTemplate is a much broader grant
+# than read access to the state bucket, and templates are readable for the life of the stack.
+resource "aws_secretsmanager_secret" "client_secret" {
+  #checkov:skip=CKV_AWS_149:Encrypted at rest with the AWS-managed Secrets Manager key; a customer-managed CMK adds key-management overhead not warranted for a demo integration credential.
+  #checkov:skip=CKV2_AWS_57:Rotation is not applicable — rotating this requires issuing a new secret in the Entra app registration, which is a manual tenant-side action.
   count = var.enabled ? 1 : 0
-
-  triggers = {
-    provider_name = local.provider_name
-    aws_region    = var.aws_region
-    config_hash   = local.provider_trigger_hash
-  }
-
-  provisioner "local-exec" {
-    when    = create
-    command = <<-EOT
-      set -euo pipefail
-      NAME='${local.provider_name}'
-      REGION='${var.aws_region}'
-      CONFIG=$(cat <<'CFG'
-${local.oauth_provider_payload}
-CFG
-)
-      if aws bedrock-agentcore-control get-oauth2-credential-provider \
-            --name "$NAME" --region "$REGION" >/dev/null 2>&1; then
-        echo "[microsoft-graph-obo] provider exists; updating $NAME" >&2
-        aws bedrock-agentcore-control update-oauth2-credential-provider \
-          --name "$NAME" \
-          --region "$REGION" \
-          --credential-provider-vendor CustomOauth2 \
-          --oauth2-provider-config-input "$CONFIG" >/dev/null
-      else
-        echo "[microsoft-graph-obo] creating provider $NAME" >&2
-        aws bedrock-agentcore-control create-oauth2-credential-provider \
-          --name "$NAME" \
-          --region "$REGION" \
-          --credential-provider-vendor CustomOauth2 \
-          --oauth2-provider-config-input "$CONFIG" >/dev/null
-      fi
-    EOT
-  }
-
-  provisioner "local-exec" {
-    when       = destroy
-    on_failure = continue
-    command    = <<-EOT
-      set -euo pipefail
-      aws bedrock-agentcore-control delete-oauth2-credential-provider \
-        --name '${self.triggers.provider_name}' \
-        --region '${self.triggers.aws_region}' >/dev/null 2>&1 || true
-    EOT
-  }
+  name  = "${var.project_name}-graph-oauth"
 }
 
-# Read the provider ARN + callback URL after create/update.
-data "external" "oauth_provider_info" {
-  count      = var.enabled ? 1 : 0
-  depends_on = [null_resource.oauth_provider]
+resource "aws_secretsmanager_secret_version" "client_secret" {
+  count     = var.enabled ? 1 : 0
+  secret_id = aws_secretsmanager_secret.client_secret[0].id
+  # A JSON document, not a bare string, because ClientSecretConfig addresses the value by JsonKey.
+  secret_string = jsonencode({ (local.client_secret_json_key) = var.client_secret })
+}
 
-  program = ["bash", "-c", <<-EOT
-    set -euo pipefail
-    out=$(aws bedrock-agentcore-control get-oauth2-credential-provider \
-            --name '${local.provider_name}' \
-            --region '${var.aws_region}')
-    arn=$(echo "$out" | jq -r '.credentialProviderArn // empty')
-    cb=$(echo "$out" | jq -r '.callbackUrl // empty')
-    jq -nc --arg arn "$arn" --arg cb "$cb" '{provider_arn:$arn, callback_url:$cb}'
-  EOT
-  ]
+resource "aws_cloudformation_stack" "oauth_provider" {
+  count = var.enabled ? 1 : 0
+  name  = "${var.project_name}-graph-oauth-provider"
+
+  template_body = jsonencode({
+    AWSTemplateFormatVersion = "2010-09-09"
+    Description              = "Microsoft Graph OAuth2 credential provider (managed by Terraform; see infra/modules/microsoft-graph-obo)."
+
+    Resources = {
+      Provider = {
+        Type = "AWS::BedrockAgentCore::OAuth2CredentialProvider"
+        Properties = {
+          Name                     = local.provider_name
+          CredentialProviderVendor = "CustomOauth2"
+          Oauth2ProviderConfigInput = {
+            CustomOauth2ProviderConfig = local.oauth_provider_config
+          }
+        }
+      }
+    }
+
+    # Both readOnly on the resource type, so GetAtt resolves them — this is what retires the
+    # plan-time `data "external"` that used to shell out to the AWS CLI for the same two values.
+    Outputs = {
+      CredentialProviderArn = {
+        Description = "Provider ARN, referenced by the gateway target's oauth credential config."
+        Value       = { "Fn::GetAtt" = ["Provider", "CredentialProviderArn"] }
+      }
+      CallbackUrl = {
+        Description = "Redirect URI to register on the Entra app (3LO/obo mode only)."
+        Value       = { "Fn::GetAtt" = ["Provider", "CallbackUrl"] }
+      }
+    }
+  })
+}
+
+# Drop the retired CLI shims from state without running their destroy provisioners.
+#
+# ⚠️ ONE-TIME MANUAL STEP before the first apply in an environment that already has this provider.
+# `Name` is create-only on AWS::BedrockAgentCore::OAuth2CredentialProvider, so CloudFormation
+# cannot adopt the existing one and CreateOauth2CredentialProvider collides on the name:
+#
+#   aws bedrock-agentcore-control delete-oauth2-credential-provider \
+#     --name microsoft-graph-obo-provider --region <region>
+#
+# The provider ARN is DERIVED FROM THE NAME (.../token-vault/default/oauth2credentialprovider/<name>,
+# verified live 2026-09-02), so the recreated provider gets the same ARN and the imported gateway
+# target below keeps resolving. Graph tool calls fail between the delete and the apply.
+#
+# ⚠️ The callbackUrl does NOT survive: it embeds a server-generated UUID that changes on every
+# create (verified live — two creates of the same name produced different UUIDs). That only matters
+# in `obo` mode, where the URL is a registered Entra redirect URI; this environment runs
+# client_credentials, which has no redirect leg. In obo mode, re-register the new value from the
+# SSM parameter below on the Entra app after applying.
+# (data.external.oauth_provider_info needs no `removed` block — a data source is not tracked as a
+# managed object, so deleting its config is the whole removal.)
+removed {
+  from = null_resource.oauth_provider
+
+  lifecycle {
+    destroy = false
+  }
 }
 
 # ============================================================
 # Gateway Target — OpenAPI schema with TOKEN_EXCHANGE outbound auth
 # ============================================================
 
-resource "null_resource" "gateway_target" {
+resource "aws_bedrockagentcore_gateway_target" "graph" {
   count = var.enabled ? 1 : 0
 
-  triggers = {
-    target_name        = local.target_name
-    gateway_identifier = var.gateway_id
-    aws_region         = var.aws_region
-    config_hash        = local.target_trigger_hash
-  }
+  gateway_identifier = var.gateway_id
+  name               = local.target_name
+  description        = "Microsoft Graph (profile/mail/calendar/OneDrive/SharePoint/Teams) via OBO"
 
-  depends_on = [
-    null_resource.oauth_provider,
-    data.external.oauth_provider_info,
-  ]
-
-  provisioner "local-exec" {
-    when    = create
-    command = <<-EOT
-      set -euo pipefail
-      NAME='${local.target_name}'
-      GW='${var.gateway_id}'
-      REGION='${var.aws_region}'
-      PROVIDER_ARN='${try(data.external.oauth_provider_info[0].result.provider_arn, "")}'
-
-      if [ -z "$PROVIDER_ARN" ]; then
-        echo "[microsoft-graph-obo] ERROR: provider ARN not found" >&2
-        exit 1
-      fi
-
-      SCHEMA=$(cat <<'SCHEMA_EOF'
-${local.openapi_schema}
-SCHEMA_EOF
-)
-      TARGET_CFG=$(jq -nc --arg s "$SCHEMA" '{mcp:{openApiSchema:{inlinePayload:$s}}}')
-
-      # client_credentials (app-only, 2LO): the gateway acquires its OWN Graph token via
-      # CLIENT_CREDENTIALS, independent of the inbound (Cognito) token — no token-exchange
-      # customParameters, since there is no inbound assertion to swap.
-      # obo (delegated, 3LO): TOKEN_EXCHANGE swaps the inbound assertion for a Graph token.
-      CRED_CFG=$(jq -nc --arg arn "$PROVIDER_ARN" '[
-        {
-          credentialProviderType: "OAUTH",
-          credentialProvider: {
-            oauthCredentialProvider: {
-              providerArn: $arn,
-              scopes: ["${join("\",\"", local.oauth_scopes)}"],
-              grantType: "${local.is_cc ? "CLIENT_CREDENTIALS" : "TOKEN_EXCHANGE"}"
-              %{if !local.is_cc},
-              customParameters: {
-                requested_token_use: "on_behalf_of"
-              }
-              %{endif}
-            }
-          }
+  target_configuration {
+    mcp {
+      open_api_schema {
+        inline_payload {
+          payload = local.openapi_schema
         }
-      ]')
-
-      EXISTING=$(aws bedrock-agentcore-control list-gateway-targets \
-        --gateway-identifier "$GW" --region "$REGION" \
-        --query "items[?name=='$NAME'].targetId" --output text 2>/dev/null || true)
-
-      if [ -n "$EXISTING" ] && [ "$EXISTING" != "None" ]; then
-        echo "[microsoft-graph-obo] target exists ($EXISTING); updating" >&2
-        aws bedrock-agentcore-control update-gateway-target \
-          --gateway-identifier "$GW" \
-          --target-id "$EXISTING" \
-          --name "$NAME" \
-          --region "$REGION" \
-          --target-configuration "$TARGET_CFG" \
-          --credential-provider-configurations "$CRED_CFG" >/dev/null
-      else
-        echo "[microsoft-graph-obo] creating target $NAME" >&2
-        aws bedrock-agentcore-control create-gateway-target \
-          --gateway-identifier "$GW" \
-          --name "$NAME" \
-          --description "Microsoft Graph (profile/mail/calendar/OneDrive/SharePoint/Teams) via OBO" \
-          --region "$REGION" \
-          --target-configuration "$TARGET_CFG" \
-          --credential-provider-configurations "$CRED_CFG" >/dev/null
-      fi
-    EOT
+      }
+    }
   }
 
-  provisioner "local-exec" {
-    when       = destroy
-    on_failure = continue
-    command    = <<-EOT
-      set -euo pipefail
-      GW='${self.triggers.gateway_identifier}'
-      NAME='${self.triggers.target_name}'
-      REGION='${self.triggers.aws_region}'
-      TID=$(aws bedrock-agentcore-control list-gateway-targets \
-              --gateway-identifier "$GW" --region "$REGION" \
-              --query "items[?name=='$NAME'].targetId" --output text 2>/dev/null || true)
-      if [ -n "$TID" ] && [ "$TID" != "None" ]; then
-        aws bedrock-agentcore-control delete-gateway-target \
-          --gateway-identifier "$GW" \
-          --target-id "$TID" \
-          --region "$REGION" >/dev/null 2>&1 || true
-      fi
-    EOT
+  # client_credentials (app-only, 2LO): the gateway acquires its OWN Graph token via
+  # CLIENT_CREDENTIALS, independent of the inbound (Cognito) token — no token-exchange
+  # custom_parameters, since there is no inbound assertion to swap.
+  # obo (delegated, 3LO): TOKEN_EXCHANGE swaps the inbound assertion for a Graph token, and
+  # requested_token_use=on_behalf_of is what tells Entra that is the swap being asked for.
+  credential_provider_configuration {
+    oauth {
+      provider_arn = aws_cloudformation_stack.oauth_provider[0].outputs["CredentialProviderArn"]
+      scopes       = local.oauth_scopes
+      grant_type   = local.is_cc ? "CLIENT_CREDENTIALS" : "TOKEN_EXCHANGE"
+      # An empty map would be sent as an empty customParameters object; omit the argument entirely
+      # in client_credentials mode instead.
+      custom_parameters = local.is_cc ? null : { requested_token_use = "on_behalf_of" }
+    }
+  }
+
+  lifecycle {
+    # Service-managed and undeclarable: the gateway injects allowed_request_headers, which would
+    # otherwise show as a perpetual diff on every plan.
+    ignore_changes = [metadata_configuration]
+  }
+}
+
+removed {
+  from = null_resource.gateway_target
+
+  lifecycle {
+    destroy = false
   }
 }
 
@@ -261,7 +224,7 @@ resource "aws_ssm_parameter" "callback_url" {
   count = var.enabled ? 1 : 0
   name  = "/${var.project_name}/${var.environment}/mcp/microsoft-graph-obo-callback-url"
   type  = "String"
-  value = try(data.external.oauth_provider_info[0].result.callback_url, "pending")
+  value = aws_cloudformation_stack.oauth_provider[0].outputs["CallbackUrl"]
 
   lifecycle {
     ignore_changes = [value]

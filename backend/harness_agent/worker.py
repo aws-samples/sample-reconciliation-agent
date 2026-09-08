@@ -6,7 +6,7 @@ Strands loop; this worker owns the inline_function round-trip and all persistenc
   1. build the first message (item + IDP class/confidence + lessons + workflow contract);
   2. InvokeHarness (stream) → assemble typed trace + gateway tool outputs;
   3. when the stream stops to run ``submit_proposal``: validate + derive the reference + compute
-     the composite + persist the proposal (→ PROPOSED);
+     the evidence-completeness confidence + persist the proposal (→ PROPOSED);
   4. on ``execute`` the WORKER performs the Policy-gated set_draw_status write through the
      egress gateway and resolves the case (APPROVED→RESOLVED + notification email +
      AUTO_RESOLVED lesson) via the SAME shared code the runtime backend uses
@@ -28,6 +28,7 @@ from backend.harness_agent import intake, prompting
 from backend.harness_agent.stream import assemble_stream
 from backend.recon_core.cases import CaseStore
 from backend.recon_core.schema import ReasoningStep, ReconItem
+from backend.recon_core.tier1_hint import read_hint
 
 logger = logging.getLogger(__name__)
 
@@ -66,27 +67,25 @@ def _toolresult_message(tool_use_id: str, decision: dict) -> dict:
 
 def _persist_degraded(
     *, cases: CaseStore, item: ReconItem, steps, reason: str, now: str,
-    class_id: str = "unknown", classification_confidence: float = 0.0,
+    class_id: str = "unknown",
 ) -> None:
     """Persist a degraded proposal (trace-so-far, no executable action) → PROPOSED.
 
     Used when no VALID proposal was produced (failure stop / missing submit_proposal / malformed
     output) so the item always leaves IN_PROGRESS for a human rather than being stranded. The
-    resolution CONFIDENCE stays 0 (there is no trustworthy resolution), but the CLASSIFICATION and
-    its confidence are preserved when known — on a malformed proposal the model still typically
-    supplied a valid ``class_name`` and IDP still has a class confidence, so collapsing them to
-    ``unknown``/0 needlessly discards a correct classification (observed live 2026-07-27).
+    resolution CONFIDENCE stays 0 (there is no trustworthy resolution), but the CLASSIFICATION is
+    preserved when known — on a malformed proposal the model still typically supplied a valid
+    ``class_name``, so collapsing it to ``unknown`` needlessly discards a correct classification
+    (observed live 2026-07-27).
 
     :param class_id: preserved classification when known (default ``"unknown"``).
-    :param classification_confidence: preserved class confidence in [0,1] (default 0.0).
     """
     from backend.recon_core.schema import Proposal
 
     prop = Proposal(
         item_id=item.item_id, class_id=class_id,
-        classification_confidence=classification_confidence,
         classification_reasoning=reason, resolution=reason, confidence=0.0,
-        steps=list(steps) + [ReasoningStep(skill=class_id, confidence=0.0, kind="propose",
+        steps=list(steps) + [ReasoningStep(skill=class_id, kind="propose",
                                            reasoning=reason)],
         proposed_action=None,
     )
@@ -95,8 +94,7 @@ def _persist_degraded(
 
 def run_investigation(
     *, item: ReconItem, invoke, cases: CaseStore, catalog: list[dict],
-    idp_classification_confidence, threshold, lessons=None, now: str = "",
-    write_transport=None,
+    threshold, lessons=None, now: str = "", write_transport=None,
 ) -> str:
     """Drive the harness loop for one item. Returns 'executed' | 'escalated' | 'failed'.
 
@@ -105,7 +103,7 @@ def run_investigation(
     :param write_transport: test seam for the worker's gateway write
         (``callable(tool_name, arguments) -> result``); None uses the live SigV4 MCP call.
     """
-    messages = [prompting.build_first_message(item=item, lessons=lessons)]
+    messages = [prompting.build_first_message(item=item, catalog=catalog, lessons=lessons)]
     try:
         first = assemble_stream(invoke(messages))
     except Exception as exc:  # noqa: BLE001 - stream/transport failure must not strand the item
@@ -132,19 +130,20 @@ def run_investigation(
     try:
         proposal = intake.build_proposal(
             item=item, submitted=pending["input"], stream_result=first, catalog=catalog,
-            idp_classification_confidence=idp_classification_confidence,
         )
     except ValueError as exc:
-        # Malformed proposal (e.g. missing `resolution`). Preserve the model's classification +
-        # confidence when it supplied one — do NOT discard a correct class as unknown/0.
+        # Malformed proposal (e.g. missing `resolution`). Preserve the model's classification when it
+        # supplied one — do NOT discard a correct class as unknown.
         logger.warning("harness malformed proposal for %s: %s", item.item_id, exc)
         submitted = pending["input"] if isinstance(pending["input"], dict) else {}
-        cls_id, cls_conf, _ = intake.classify_submitted(submitted=submitted, catalog=catalog)
+        cls_id, _ = intake.classify_submitted(
+            submitted=submitted,
+            catalog=catalog,
+            tier1_hint=read_hint(attributes=item.attributes or {}),
+        )
         _persist_degraded(
             cases=cases, item=item, steps=first.steps,
             reason=f"malformed proposal: {exc}", now=now, class_id=cls_id,
-            classification_confidence=(idp_classification_confidence
-                                       if idp_classification_confidence is not None else cls_conf),
         )
         return "escalated"
 
@@ -189,8 +188,8 @@ def run_investigation(
     except Exception as exc:  # noqa: BLE001 - already persisted; summary failure changes nothing
         logger.warning("harness follow-up invoke failed for %s: %s", item.item_id, exc)
 
-    logger.info("harness decision for %s: decision=%s outcome=%s composite=%s",
-                item.item_id, decision.get("decision"), outcome, decision.get("composite"))
+    logger.info("harness decision for %s: decision=%s outcome=%s confidence=%s",
+                item.item_id, decision.get("decision"), outcome, decision.get("confidence"))
     return "executed" if outcome == "executed" else "escalated"
 
 
@@ -228,7 +227,6 @@ def handle(event, _context=None):  # pragma: no cover - live wiring; loop tested
         contract=_read_s3_text(bucket, os.environ.get("HARNESS_SYSTEM_PROMPT_KEY", HARNESS_CONTRACT_KEY)),
     )
     threshold = get_threshold(os.environ.get("AUTO_RESOLVE_PARAM", ""))
-    idp_conf = _to_float(item.attributes.get("idp_classification_confidence"))
 
     # Worker-side lesson recall (advisory, fail-soft) — kept explicit + in-trace since the
     # harness memory is disabled.
@@ -290,7 +288,7 @@ def handle(event, _context=None):  # pragma: no cover - live wiring; loop tested
     cases = CaseStore(table=os.environ["CASES_TABLE"], audit=os.environ["AUDIT_TABLE"])
     outcome = run_investigation(
         item=item, invoke=_invoke, cases=cases, catalog=catalog,
-        idp_classification_confidence=idp_conf, threshold=threshold, lessons=lessons,
+        threshold=threshold, lessons=lessons,
     )
     return {"outcome": outcome, "item_id": item.item_id}
 
@@ -314,10 +312,3 @@ def _read_s3_text(bucket: str, key: str) -> str:  # pragma: no cover - thin S3 g
     except Exception:  # noqa: BLE001
         return ""
 
-
-def _to_float(value):
-    """Coerce a passthrough attribute to float, or None."""
-    try:
-        return float(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None

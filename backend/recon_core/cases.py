@@ -131,9 +131,7 @@ class CaseStore:
         if category is not None:
             row["category"] = category
         try:
-            self._cases.put_item(
-                Item=row, ConditionExpression="attribute_not_exists(item_id)"
-            )
+            self._cases.put_item(Item=row, ConditionExpression="attribute_not_exists(item_id)")
         except ClientError as exc:
             if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
                 return False
@@ -207,12 +205,59 @@ class CaseStore:
         self._audit_row(key, new_status, f"{base} — {note}" if note else base)
         return True
 
+    # Longest failure reason persisted onto the case. Reasons come from exception text, which can be
+    # a multi-kilobyte boto3 error body or traceback; the case row is read on every queue render, so
+    # an unbounded string would bloat every list response for no analyst benefit. Truncation is
+    # explicit and marked in the stored value — the full text stays in the worker's CloudWatch log.
+    _FAILURE_REASON_MAX = 800
+
+    def mark_failed(self, item_id: str, *, reason: str) -> bool:
+        """Escalate a case to FAILED after its investigation errored out.
+
+        Writes the status, the (truncated) reason and the failure timestamp in ONE conditional
+        update: two writes would leave a window where the case reads FAILED with no reason, which is
+        exactly the state the analyst needs. The update is conditional on the case still being
+        IN_PROGRESS, so a run that actually persisted its proposal just before erroring on the way
+        out is never overwritten with a failure — the proposal wins.
+
+        :param item_id: the case key.
+        :param reason: human-readable cause (exception text); truncated to
+            ``_FAILURE_REASON_MAX`` characters.
+        :returns: True if this call marked the case FAILED; False if the transition was not allowed
+            from the current status or lost the race with a concurrent write.
+        :raises KeyError: when no case row exists for ``item_id``.
+        """
+        current = self.status(item_id)
+        if not can_transition(current, CaseStatus.FAILED):
+            return False
+        text = reason.strip() or "investigation failed with no error text"
+        if len(text) > self._FAILURE_REASON_MAX:
+            text = text[: self._FAILURE_REASON_MAX] + "… (truncated, see worker logs)"
+        try:
+            self._cases.update_item(
+                Key={"item_id": item_id},
+                UpdateExpression="SET #s = :new, failure_reason = :fr, failed_at = :fa",
+                ConditionExpression="#s = :cur",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":new": CaseStatus.FAILED.value,
+                    ":cur": current.value,
+                    ":fr": text,
+                    ":fa": self._now(),
+                },
+            )
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                return False
+            raise
+        self._audit_row(item_id, CaseStatus.FAILED, f"investigation failed: {text}")
+        return True
+
     def attach_proposal(
         self,
         *,
         item_id: str,
         class_id: str,
-        classification_confidence: Decimal,
         classification_reasoning: str,
         resolution: str,
         confidence: Decimal,
@@ -223,8 +268,8 @@ class CaseStore:
     ) -> None:
         """Write the agent's proposal (classification + typed trace) onto the case.
 
-        ``confidence_components`` is the transparency breakdown of the computed composite
-        confidence (consistency / grounding / verbalized), shown on the case detail.
+        ``confidence_components`` is the breakdown of the computed evidence-completeness score —
+        which of the classified skill's prescribed steps obtained data — shown on the case detail.
         ``steps`` are opaque dicts (any typed-trace fields the caller includes are stored
         verbatim). ``proposed_action`` is the structured, executable action derived from the
         investigation (``None`` when nothing is safely actionable) — persisted so the
@@ -244,14 +289,20 @@ class CaseStore:
         self._update_existing(
             item_id=item_id,
             UpdateExpression=(
-                "SET class_id = :c, classification_confidence = :cc, "
+                # The only confidence written here is `confidence` — the computed
+                # evidence-completeness score. There is deliberately no self-reported one: rows
+                # written before 2026-09-04 still carry a per-classification confidence attribute,
+                # and nothing backfills or removes it (the value is inert, and rewriting historical
+                # cases to erase a number an analyst may have seen at review time is the worse
+                # outcome). See tests/recon_core/test_single_confidence_signal.py, which bans the
+                # old attribute name from this tree — hence the description rather than the name.
+                "SET class_id = :c, "
                 "classification_reasoning = :cr, resolution = :r, confidence = :conf, "
                 "steps = :st, confidence_components = :comp, proposed_action = :pa, "
                 "proposed_email = :pe"
             ),
             ExpressionAttributeValues={
                 ":c": class_id,
-                ":cc": classification_confidence,
                 ":cr": classification_reasoning,
                 ":r": resolution,
                 ":conf": confidence,
@@ -307,7 +358,9 @@ class CaseStore:
                 ExpressionAttributeValues={":s": CaseStatus.AGED.value, ":it": new_item},
             )
             self._audit_row(
-                item.item_id, CaseStatus.AGED, f"IDP reprocess cap reached ({count} > {reprocess_cap})"
+                item.item_id,
+                CaseStatus.AGED,
+                f"IDP reprocess cap reached ({count} > {reprocess_cap})",
             )
             return "aged"
 

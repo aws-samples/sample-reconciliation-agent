@@ -47,6 +47,7 @@ def test_invoke_via_ingress_uses_transport_seam():
         region="us-east-1",
         payload={"item": {"item_id": "i-1"}},
         session_id="sess-123",
+        timeout=60,
         creds=_Creds(),
         transport=_transport,
     )
@@ -71,6 +72,7 @@ def test_extra_headers_ride_along_without_disturbing_the_signature():
         region="us-east-1",
         payload={"item": {"item_id": "i-1"}},
         session_id="sess-123",
+        timeout=60,
         creds=_Creds(),
         transport=_transport,
         extra_headers={"traceparent": "00-" + "a" * 32 + "-" + "b" * 16 + "-01",

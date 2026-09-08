@@ -1,0 +1,59 @@
+{
+  "metadataAttributes": {
+    "doc_type": {
+      "value": { "type": "STRING", "stringValue": "email_attachment" },
+      "includeForEmbedding": false
+    },
+    "break_class": {
+      "value": { "type": "STRING_LIST", "stringListValue": ["aggregation"] },
+      "includeForEmbedding": true
+    },
+    "skill": {
+      "value": {
+        "type": "STRING_LIST",
+        "stringListValue": ["document-cross-reference", "record-match-review"]
+      },
+      "includeForEmbedding": false
+    },
+    "effective_date": {
+      "value": { "type": "NUMBER", "numberValue": 20260227 },
+      "includeForEmbedding": false
+    },
+    "message_id": {
+      "value": { "type": "STRING", "stringValue": "MSG-20260227-CPA26322" },
+      "includeForEmbedding": false
+    },
+    "sender": {
+      "value": {
+        "type": "STRING",
+        "stringValue": "loan.ops@meridian-agent.example"
+      },
+      "includeForEmbedding": false
+    },
+    "receiver": {
+      "value": {
+        "type": "STRING_LIST",
+        "stringListValue": [
+          "loan-ops@loanmesa.example",
+          "recon-team@loanmesa.example"
+        ]
+      },
+      "includeForEmbedding": false
+    },
+    "subject": {
+      "value": {
+        "type": "STRING",
+        "stringValue": "Consolidated payment advice — one wire, 3 facilities — Cindermoor Logistics"
+      },
+      "includeForEmbedding": true
+    },
+    "received_date": {
+      "value": { "type": "NUMBER", "numberValue": 20260227 },
+      "includeForEmbedding": false
+    },
+    "attachment_format": {
+      "value": { "type": "STRING", "stringValue": "xlsx" },
+      "includeForEmbedding": false
+    }
+  }
+}

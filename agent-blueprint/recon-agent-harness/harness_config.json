@@ -1,0 +1,134 @@
+{
+  "allowed_tools": [
+    "@egress-tools/general-ledger___search_ledger",
+    "@egress-tools/notices___search_notices",
+    "@egress-tools/managed-kb___Retrieve",
+    "@egress-tools/document-extraction___IDPTools___get_results",
+    "@egress-tools/correspondence-search___search_correspondence",
+    "@egress-tools/contacts___list_contacts",
+    "@egress-tools/templates___list_templates",
+    "submit_proposal"
+  ],
+  "gateway_arn_sentinel": "__GATEWAY_ARN__",
+  "idle_runtime_session_timeout": 60,
+  "max_iterations": 20,
+  "max_lifetime": 1800,
+  "tools": [
+    {
+      "Config": {
+        "AgentCoreGateway": {
+          "GatewayArn": "__GATEWAY_ARN__",
+          "OutboundAuth": {
+            "AwsIam": {}
+          }
+        }
+      },
+      "Name": "egress-tools",
+      "Type": "agentcore_gateway"
+    },
+    {
+      "Config": {
+        "InlineFunction": {
+          "Description": "Emit your final proposal for this reconciliation item. Call this EXACTLY ONCE, after investigating. Do not include a ledger reference \u2014 it is derived from your search_ledger results.",
+          "InputSchema": {
+            "properties": {
+              "class_name": {
+                "description": "Chosen classification type name from the SKILL.md catalog.",
+                "type": "string"
+              },
+              "classification_reasoning": {
+                "description": "Why this classification type was chosen.",
+                "type": "string"
+              },
+              "email_draft": {
+                "description": "Optional counterparty email for a human to review and send. Include ONLY when settling the item genuinely requires asking the counterparty something. You cite a recipient and a wording by id \u2014 you do not write the message and you never supply an address.",
+                "properties": {
+                  "recipient_contact_id": {
+                    "description": "A `contact_id` from contacts___list_contacts with kind `counterparty`. The platform resolves it to an address at send time; you never see one.",
+                    "type": "string"
+                  },
+                  "recipient_hint": {
+                    "description": "The counterparty's NAME as it appears in the item or a tool output \u2014 not an email address. Shown next to the contact you cited so the reviewer can tell you picked the right one.",
+                    "type": "string"
+                  },
+                  "template_id": {
+                    "description": "A `template_id` from templates___list_templates with purpose `counterparty`. The operator wrote the wording; you supply the values it declares.",
+                    "type": "string"
+                  },
+                  "variables": {
+                    "description": "Values for EXACTLY the names in that template's `variables` list \u2014 no more, no fewer. A mismatch leaves the draft visibly unrenderable for an operator to fix.",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "recipient_contact_id",
+                  "template_id",
+                  "variables"
+                ],
+                "type": "object"
+              },
+              "evidence": {
+                "description": "Cited evidence values that appear verbatim in the item data or tool outputs.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "evidence_steps": {
+                "description": "REQUIRED. One entry per evidence step your skill's front matter prescribes, in the order listed. `satisfied` is true ONLY if that step's tool call returned data answering it \u2014 not if you reasoned around it. Reporting a step you did not attempt as satisfied is the single most damaging error you can make here: the case may then be resolved with no human review.",
+                "items": {
+                  "properties": {
+                    "note": {
+                      "description": "One line on what was found.",
+                      "type": "string"
+                    },
+                    "satisfied": {
+                      "description": "Did it return data?",
+                      "type": "boolean"
+                    },
+                    "step_id": {
+                      "description": "The prescribed step's id.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "step_id",
+                    "satisfied"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "reason": {
+                "description": "Optional short note for the status change (recorded on the ledger overlay). Does NOT replace `resolution` \u2014 provide both.",
+                "type": "string"
+              },
+              "resolution": {
+                "description": "REQUIRED. Human-readable proposed resolution for the reconciliation break (one to two sentences). Distinct from `reason`: always supply `resolution` even when you also set `status`/`reason`.",
+                "type": "string"
+              },
+              "status": {
+                "description": "Proposed ledger status to set. Omit when no ledger write is warranted.",
+                "enum": [
+                  "Cancelled",
+                  "Confirmed",
+                  "OnHold",
+                  "Amended"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "class_name",
+              "classification_reasoning",
+              "resolution"
+            ],
+            "type": "object"
+          }
+        }
+      },
+      "Name": "submit_proposal",
+      "Type": "inline_function"
+    }
+  ]
+}

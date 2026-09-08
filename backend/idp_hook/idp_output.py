@@ -25,6 +25,7 @@ from typing import Optional
 import boto3
 
 from backend.idp_hook.explainability import alert_count, extraction_confidence
+from backend.idp_hook.mapper import split_s3_uri
 
 
 def _page_num(key: str, marker: str) -> int:
@@ -48,6 +49,49 @@ class IdpOutputReader:
     def __init__(self, *, s3=None) -> None:
         """:param s3: optional boto3 S3 client (injected in tests); defaults to a real client."""
         self._s3 = s3 if s3 is not None else boto3.client("s3")
+
+    def resolve_document(self, document: dict) -> dict:
+        """Follow IDP's compressed-output pointer, returning the full tracking record.
+
+        A Step Functions execution's output is capped at 256 KB, so for any document large enough
+        IDP writes the real record to its WORKING bucket and puts a stand-in in the event instead::
+
+            {"document_id": "<prefix>/<file>.pdf", "compressed": true, "num_pages": 6,
+             "status": "EVALUATING", "sections": ["1", "2"],
+             "s3_uri": "s3://<working>/compressed_documents/<document_id>/<ts>_evaluation_state.json"}
+
+        Two traps make this worth a dedicated method rather than an inline branch:
+
+        * ``sections`` degrades from a list of RECORDS to a list of id STRINGS, so code that treats
+          the stand-in as the record raises ``AttributeError`` rather than merely losing detail.
+        * the stand-in carries no ``output_bucket``/``input_key``, so the enrichment read is silently
+          skipped (``_derive_output_location`` returns an empty bucket) — an extraction with no field
+          values at all, which then fails the notice_date check for a reason that names neither cause.
+
+        Every succeeded execution in recon-dev's IDP deployment is compressed, so this is the normal
+        path and not an edge case.
+
+        :param document: the record from the completion event's ``detail.output``.
+        :returns: the resolved record when ``compressed`` is set, otherwise ``document`` unchanged.
+        :raises ValueError: when the record claims to be compressed but carries no usable ``s3_uri``,
+            or when the pointer's contents are not a JSON object. Deliberately loud: continuing with
+            the stand-in produces a fieldless notice, which is worse than a DLQ'd invocation.
+        :raises botocore.exceptions.ClientError: when the pointer cannot be read (e.g. the hook's
+            role lacks a grant on IDP's working bucket) — surfaced for the same reason.
+        """
+        if not document.get("compressed"):
+            return document
+        bucket, key = split_s3_uri(document.get("s3_uri") or "")
+        if not bucket or not key:
+            raise ValueError(
+                f"IDP document {document.get('document_id')!r} is marked compressed but has no "
+                f"usable s3_uri: {document.get('s3_uri')!r}"
+            )
+        body = self._s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+        resolved = json.loads(body)
+        if not isinstance(resolved, dict):
+            raise ValueError(f"compressed IDP record s3://{bucket}/{key} is not a JSON object")
+        return resolved
 
     def read(self, *, bucket: str, prefix: str) -> dict:
         """Read all section results and page images for one processed document.
@@ -101,15 +145,17 @@ class IdpOutputReader:
                 "fields": inference_result,
                 "output_uri": f"s3://{bucket}/{key}",
             }
-            # Confidence for the composite's classification slot, in preference order:
+            # IDP's confidence in the EXTRACTION, in preference order. It is stored as the notice's
+            # `extraction_confidence` and read as a prompt hint + by the gateway interceptor. It is
+            # not an input to any score. Preference order:
             #   1. document_class.confidence, if IDP's Assessment step ever attaches one. It does
             #      NOT in any live recon-dev output — every document_class is just {"type": ...} —
             #      so this branch is kept for forward compatibility, not because it fires.
             #   2. the mean per-field extraction confidence from explainability_info, over the
             #      fields IDP actually extracted a value for (see explainability.py for why the
             #      "extracted only" restriction is load-bearing).
-            # Neither available => the key is omitted entirely rather than defaulted, so the
-            # composite takes its existing renormalized no-classification path.
+            # Neither available => the key is omitted entirely rather than defaulted, so the notice
+            # records `extraction_confidence: None` instead of a fabricated number.
             if doc_class.get("confidence") is not None:
                 rec["classification_confidence"] = doc_class["confidence"]
             else:

@@ -1,0 +1,39 @@
+{
+  "document_class": {
+    "type": "activity_memo"
+  },
+  "split_document": {
+    "page_indices": [
+      0,
+      1,
+      2,
+      3
+    ]
+  },
+  "classification": "activity_memo",
+  "page_ids": [
+    "1",
+    "2",
+    "3",
+    "4"
+  ],
+  "confidence": 1.0,
+  "inference_result": {
+    "notice_date": "2026-01-21",
+    "notice_date_source_raw": "1/21/2026",
+    "value_date": "2026-12-31",
+    "counterparty": "Mistfell Foods Corp. (fka MF Holdco)",
+    "fund": "Evergreen Specialty Finance, Inc.",
+    "reference": "Mistfell Foods Corp. (fka MF Holdco)",
+    "amount": "20108.56",
+    "currency": "USD",
+    "activity_type": "Daily Wire Detail",
+    "fee_amount": "446.67",
+    "cusip": "",
+    "agent_bank": "Tarnsmoor Trust Capital LLC",
+    "agent_contact_name": "R. Sanjay",
+    "agent_email": "rsanjay@tarnsmoortrustcapital.example",
+    "agent_telephone": "312-555-4592",
+    "notice_comment": ""
+  }
+}

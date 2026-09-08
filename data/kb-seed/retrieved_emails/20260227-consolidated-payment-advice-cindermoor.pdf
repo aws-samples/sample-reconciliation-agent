@@ -1,0 +1,172 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R 6 0 R 8 0 R] /Count 3 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 2252 >>
+stream
+BT /F1 9.5 Tf 54 738 Td 13 TL
+(Meridian Agency Services LLC - Consolidated Payment Advice) Tj T*
+() Tj T*
+(To:      Tidelantern Senior Loan Fund, LP) Tj T*
+(From:    Meridian Agency Services LLC, Loan Operations) Tj T*
+(Phone:   212-555-3380) Tj T*
+(Fax:) Tj T*
+(Email:   loan.ops@meridian-agent.example) Tj T*
+() Tj T*
+(  Field                  Value) Tj T*
+(  ---------------------------------------------------------------------------) Tj T*
+(  Lender                 Tidelantern Senior Loan Fund, LP) Tj T*
+(  Borrower               CINDERMOOR LOGISTICS HOLDINGS, INC.) Tj T*
+(  Credit Agreement       CINDERMOOR LOGISTICS HOLDINGS, INC. Credit Agreement) Tj T*
+() Tj T*
+(Created on 27-Feb-2026) Tj T*
+() Tj T*
+(Consolidated Payment Advice) Tj T*
+() Tj T*
+(Payment Due Date: 02-Mar-2026) Tj T*
+() Tj T*
+(This single wire aggregates cash across the Revolving Credit Facility, Term Loan A,) Tj T*
+(and Term Loan B below.) Tj T*
+() Tj T*
+(Cash Summary) Tj T*
+() Tj T*
+(  Item                                          CCY        Amount) Tj T*
+(  ---------------------------------------------------------------------) Tj T*
+(  Revolving Credit Facility                     USD        4,182.55) Tj T*
+(  Term Loan A - Interest                        USD        9,640.18) Tj T*
+(  Term Loan B - Principal                       USD       12,500.00) Tj T*
+(  ---------------------------------------------------------------------) Tj T*
+(  Total USD:                                              26,322.73) Tj T*
+() Tj T*
+() Tj T*
+(Revolving Credit Facility) Tj T*
+() Tj T*
+(Borrower: CINDERMOOR LOGISTICS HOLDINGS, INC.) Tj T*
+(Facility: Revolving Credit Facility $200MM) Tj T*
+() Tj T*
+(  Outstanding Amount:      2,500,000.00) Tj T*
+(  Currency:                USD) Tj T*
+(  Day Count:               Actual/360) Tj T*
+(  From / To:               30-Nov-2025 to 28-Feb-2026  \(90 days\)) Tj T*
+(  All In Rate %:           7.52400) Tj T*
+(  Total Interest Amount:   470,250.00) Tj T*
+(  Cash Amount:             4,182.55) Tj T*
+() Tj T*
+(CME Term SOFR Contract: CME TERM SOFR 11/30-2/28 \(USD\) Spread Adj: 0.15000%) Tj T*
+(Basis: ACT/360) Tj T*
+(Maturity Date: 3/15/2028) Tj T*
+(Activity: Rollover - Interest) Tj T*
+(Cash Amount \(USD\): 4,182.55) Tj T*
+ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 2040 >>
+stream
+BT /F1 9.5 Tf 54 738 Td 13 TL
+() Tj T*
+() Tj T*
+(Term Loan A) Tj T*
+() Tj T*
+(Borrower: CINDERMOOR LOGISTICS HOLDINGS, INC.) Tj T*
+(Facility: CINDERMOOR LOGISTICS TL-A $160MM   LoanXid: LX223061XXXX1) Tj T*
+() Tj T*
+(  Outstanding Amount:      150,400,000.00) Tj T*
+(  Currency:                USD) Tj T*
+(  Day Count:               Actual/360) Tj T*
+(  From / To:               30-Nov-2025 to 28-Feb-2026  \(90 days\)) Tj T*
+(  All In Rate %:           7.32750) Tj T*
+(  Total Interest Amount:   8,265,552.00) Tj T*
+(  Cash Amount:             9,640.18) Tj T*
+() Tj T*
+(CME Term SOFR Contract: CME TERM SOFR 11/30-2/28 \(USD\) Spread Adj: 0.15000%) Tj T*
+(Basis: ACT/360) Tj T*
+(Maturity Date: 3/15/2028) Tj T*
+(Activity: Receive Accrued Interest - Interest) Tj T*
+(Cash Amount \(USD\): 9,640.18) Tj T*
+() Tj T*
+() Tj T*
+(Term Loan B) Tj T*
+() Tj T*
+(Borrower: CINDERMOOR LOGISTICS HOLDINGS, INC.) Tj T*
+(Facility: CINDERMOOR LOGISTICS TL-B $250MM) Tj T*
+() Tj T*
+(  Global Amount:           250,000,000.00) Tj T*
+(  Lender Share:            12,500.00) Tj T*
+(  Accrual Period:          11/30/2025 - 2/28/2026) Tj T*
+(  Base Rate:               4.57750%) Tj T*
+(  Spread:                  3.25000%) Tj T*
+(  Activity:                Early CME Term SOFR Paydown) Tj T*
+(  Cash Amount:             12,500.00) Tj T*
+() Tj T*
+(CME Term SOFR Contract: CME TERM SOFR 11/30-2/28 \(USD\) Spread Adj: 0.15000%) Tj T*
+(Basis: ACT/360) Tj T*
+(Maturity Date: 3/15/2029) Tj T*
+(Activity: Early CME Term SOFR Paydown - Principal) Tj T*
+(Cash Amount \(USD\): 12,500.00) Tj T*
+() Tj T*
+() Tj T*
+(Aggregated Wire - USD wire instructions for Tidelantern Senior Loan Fund, LP) Tj T*
+() Tj T*
+(USD 26,322.73) Tj T*
+() Tj T*
+(Reference: CINDERMOOR LOGISTICS HOLDINGS, INC. $850MM 3/15/2021) Tj T*
+(Comments: Kindly apply funds accordingly.) Tj T*
+() Tj T*
+(  Field                 Value) Tj T*
+(  ------------------------------------------------------------------------) Tj T*
+(  Bank Name:            TARNSMOOR TRUST BANK, N.A. New York \(STBKUS33\)) Tj T*
+ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 9 0 R >>
+endobj
+9 0 obj
+<< /Length 453 >>
+stream
+BT /F1 9.5 Tf 54 738 Td 13 TL
+(  ABA Number:           121000341) Tj T*
+(  SWIFT Code:           STBKUS33) Tj T*
+(  Account Name:         Tidelantern Senior Loan Fund, LP) Tj T*
+(  Account Number:       ****7305) Tj T*
+() Tj T*
+(Note: This single wire aggregates cash across the Revolving Credit Facility,) Tj T*
+(Term Loan A, and Term Loan B above.) Tj T*
+() Tj T*
+() Tj T*
+(Produced by Meridian Agency Services LLC) Tj T*
+(Run date 2/26/2026) Tj T*
+ET
+endstream
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000127 00000 n 
+0000000222 00000 n 
+0000000348 00000 n 
+0000002652 00000 n 
+0000002778 00000 n 
+0000004870 00000 n 
+0000004996 00000 n 
+trailer
+<< /Size 10 /Root 1 0 R >>
+startxref
+5500
+%%EOF

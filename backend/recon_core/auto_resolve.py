@@ -1,7 +1,7 @@
 """Auto-resolution of high-confidence proposals (straight-through processing).
 
 An admin sets a confidence threshold in the Config tab (stored in SSM). After the agent
-persists a proposal, if the COMPUTED composite confidence meets the threshold the case takes
+persists a proposal, if the COMPUTED evidence-completeness confidence meets the threshold the case takes
 the full approve path unattended: PROPOSED -> APPROVED -> notification email (marked
 AUTO-RESOLVED) -> RESOLVED, plus an AUTO_RESOLVED lesson for the audit trail. Anything below
 the threshold stays PROPOSED for human review. Threshold "off" disables auto-resolution.
@@ -23,10 +23,12 @@ from backend.recon_core.status import CaseStatus
 logger = logging.getLogger(__name__)
 
 
-def autonomous_execute(*, proposal: Proposal, threshold: Optional[float], invoker, now: str = "") -> str:
+def autonomous_execute(
+    *, proposal: Proposal, threshold: Optional[float], invoker, now: str = ""
+) -> str:
     """Perform the proposed write autonomously when confidence clears the threshold.
 
-    The gate is the COMPUTED composite confidence vs. the admin threshold — never the model's
+    The gate is the COMPUTED evidence-completeness confidence vs. the admin threshold — never the model's
     self-reported number. Below threshold, threshold disabled, or no clean ``proposed_action``
     (e.g. no unambiguous ledger match) ⇒ the item halts unactioned and escalates for human
     review. A write failure also escalates (the case stays PROPOSED) with the error recorded.
@@ -45,7 +47,7 @@ def autonomous_execute(*, proposal: Proposal, threshold: Optional[float], invoke
     action = proposal.proposed_action
     if not action:
         return "escalated"  # non-executable — never auto-act without a clean action
-    # Pass the COMPUTED composite as the tool's `confidence` input so the gateway's AgentCore
+    # Pass the COMPUTED evidence-completeness score as the tool's `confidence` input so the AgentCore
     # Policy can gate on context.input.confidence. Cedar compares Longs (no float literals), so
     # send an INTEGER PERCENT in [0..100]; the Cedar policy gates `>= threshold*100`. App-side we
     # already checked the threshold; the policy is the independent hard guardrail (defense in depth).
@@ -69,7 +71,6 @@ def autonomous_execute(*, proposal: Proposal, threshold: Optional[float], invoke
             ReasoningStep(
                 skill="execute",
                 kind="execute",
-                confidence=0.0,
                 reasoning="Gateway policy denied the write (confidence below threshold); escalating.",
                 action=action,
                 outcome=f"escalated: policy denied ({exc})",
@@ -82,7 +83,6 @@ def autonomous_execute(*, proposal: Proposal, threshold: Optional[float], invoke
             ReasoningStep(
                 skill="execute",
                 kind="execute",
-                confidence=0.0,
                 reasoning="Autonomous execution failed; escalating for human review.",
                 action=action,
                 outcome=f"failed: {exc}",
@@ -94,7 +94,6 @@ def autonomous_execute(*, proposal: Proposal, threshold: Optional[float], invoke
         ReasoningStep(
             skill="execute",
             kind="execute",
-            confidence=0.0,
             reasoning=f"Executed {action.get('tool')} on {action.get('reference')} "
             f"→ {action.get('status')}.",
             action=action,
@@ -135,7 +134,7 @@ def maybe_auto_resolve(
     """Take the full approve path unattended when confidence meets the threshold.
 
     :param cases: case store (already holds the PROPOSED case).
-    :param proposal: the persisted proposal (``confidence`` is the computed composite).
+    :param proposal: the persisted proposal (``confidence`` is the computed evidence completeness).
     :param threshold: admin threshold, or None when auto-resolution is disabled.
     :param transport: injectable gateway tool-call transport for the notification email
         (``callable(tool_name, arguments) -> result``); None uses the live SigV4 MCP call.
@@ -152,9 +151,7 @@ def maybe_auto_resolve(
     # produced, so the draft is always `pending` at this point — hence the plain truthiness check
     # rather than a status comparison that could never be exercised.
     if proposal.proposed_email:
-        logger.info(
-            "auto-resolve skipped for %s: carries an unsent email draft", proposal.item_id
-        )
+        logger.info("auto-resolve skipped for %s: carries an unsent email draft", proposal.item_id)
         return False
 
     item_id = proposal.item_id
@@ -165,8 +162,10 @@ def maybe_auto_resolve(
     # Notification email — same as a human approval, marked as automatic. Best-effort.
     # Sent from the shared mailbox via the microsoft-graph gateway tool (no SES).
     mailbox = os.environ.get("GRAPH_MAILBOX", "")
-    recipient = os.environ.get("RECON_NOTIFY_EMAIL", "")
-    if mailbox and recipient:
+    # A contact id, not an address — the address is looked up at send time so deactivating the
+    # recipient in the console stops the mail on the next case, without a redeploy.
+    contact_id = os.environ.get("NOTIFY_CONTACT_ID", "")
+    if mailbox and contact_id:
         try:
             from backend.cases.notify import send_resolution_email
 
@@ -179,8 +178,18 @@ def maybe_auto_resolve(
                     "confidence": str(proposal.confidence),
                 },
                 mailbox=mailbox,
-                recipient=recipient,
+                contact_id=contact_id,
                 transport=transport,
+            )
+        except LookupError as exc:
+            # The contact was deactivated, deleted, or is not an internal_notification contact. The
+            # resolution still stands — but say which contact failed, because the alternative is an
+            # operator inferring a missing notification from silence.
+            logger.warning(
+                "auto-resolve notification skipped for %s: contact %s is unusable: %s",
+                item_id,
+                contact_id,
+                exc,
             )
         except Exception as exc:  # noqa: BLE001 - email must not block resolution
             logger.warning("auto-resolve email failed for %s: %s", item_id, exc)

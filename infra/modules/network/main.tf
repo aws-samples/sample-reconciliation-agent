@@ -147,11 +147,14 @@ locals {
     # OTel span export goes to xray.<region>.amazonaws.com. Without this endpoint a VPC-attached
     # Lambda in private mode drops every span while otherwise working normally — a silent gap.
     "xray",
-    # Bedrock Knowledge Base Retrieve is served by bedrock-agent-runtime, which is a DIFFERENT
-    # service from bedrock-runtime (model inference). The KB tool Lambda
-    # (backend/kb_tool/handler.py) builds boto3.client("bedrock-agent-runtime"), so without this
-    # endpoint search_guidance / the consult-guidance skill hangs in a no-NAT deployment.
-    "bedrock-agent-runtime",
+    # ⚠️ `bedrock-agent-runtime` is deliberately NOT here. It served the retired KB tool Lambda's
+    # boto3.client("bedrock-agent-runtime").Retrieve call; the knowledge-base read is now the
+    # `managed-kb` GATEWAY connector target, so the Retrieve is made by the AgentCore Gateway from
+    # AWS-managed infrastructure, not from inside this VPC. Nothing in the VPC calls
+    # bedrock-agent-runtime any more. Verified live 2026-08-27 on both agent backends (the runtime
+    # container and the harness) before the endpoint was removed. If you add any in-VPC caller of
+    # Retrieve / RetrieveAndGenerate / InvokeAgent, put it back or it will hang in a no-NAT
+    # deployment.
     # AgentCore Gateway has its OWN PrivateLink service, separate from the bedrock-agentcore data
     # plane. It is not redundant: the gateway's private DNS is the wildcard
     # *.gateway.bedrock-agentcore.<region>.amazonaws.com, which the bedrock-agentcore endpoint's

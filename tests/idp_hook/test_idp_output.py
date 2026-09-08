@@ -4,6 +4,7 @@ import json
 from decimal import Decimal
 
 import boto3
+import pytest
 from moto import mock_aws
 
 from backend.idp_hook.idp_output import IdpOutputReader
@@ -97,3 +98,56 @@ def test_copy_pages_failure_keeps_pages_without_local_key():
     out = reader.copy_pages(pages, dest_bucket="missing-bucket", item_id="x")
     assert len(out) == 2
     assert all("local_key" not in p for p in out)
+
+
+@mock_aws
+def test_resolve_document_returns_an_uncompressed_record_untouched():
+    """Small documents arrive whole, and resolution must be a no-op for them — no S3 call at all.
+
+    Pinned with NO bucket created: if the method ever reads S3 unconditionally this fails on
+    NoSuchBucket rather than quietly costing a GET per invocation.
+
+    :returns: None.
+    """
+    document = {"id": "doc-1", "sections": [{"section_id": "1"}]}
+    assert IdpOutputReader().resolve_document(document) is document
+
+
+@mock_aws
+def test_resolve_document_follows_the_compressed_pointer():
+    """The stand-in names a working-bucket object holding the real record; return THAT record.
+
+    The stand-in's own keys must not survive: its ``sections`` is a list of id strings and its
+    ``status`` is the pre-completion ``EVALUATING``, so merging the two shapes would keep exactly the
+    values that break the mapper.
+
+    :returns: None.
+    """
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="idp-working")
+    real = {"id": "doc-1", "output_bucket": BUCKET, "sections": [{"section_id": "1"}]}
+    s3.put_object(
+        Bucket="idp-working", Key="compressed_documents/doc-1/1.json", Body=json.dumps(real).encode()
+    )
+
+    resolved = IdpOutputReader().resolve_document(
+        {
+            "document_id": "doc-1",
+            "s3_uri": "s3://idp-working/compressed_documents/doc-1/1.json",
+            "sections": ["1"],
+            "status": "EVALUATING",
+            "compressed": True,
+        }
+    )
+
+    assert resolved == real
+
+
+@mock_aws
+def test_resolve_document_raises_when_the_pointer_is_missing():
+    """`compressed` with no s3_uri is unrecoverable, and the message has to name the document.
+
+    :returns: None.
+    """
+    with pytest.raises(ValueError, match="marked compressed but has no usable s3_uri"):
+        IdpOutputReader().resolve_document({"document_id": "doc-1", "compressed": True})

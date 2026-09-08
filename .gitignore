@@ -51,3 +51,7 @@ data/input/sample-classes/
 # Design records, implementation plans and security-audit reports are kept local-only —
 # they are working notes, not part of the published sample, and are deliberately untracked.
 docs/
+
+# Upload archives for the IDP evaluation test sets: pure derivatives of the `testsets/<FAMILY>/`
+# trees committed beside them, rebuilt by the generator (see data/input/idp-evaluation/README.md).
+data/input/idp-evaluation/testsets/*.zip

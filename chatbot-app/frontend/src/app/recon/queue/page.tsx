@@ -1,9 +1,12 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { listCases, bulkUpdateCases, type ReconCase } from "@/lib/reconApi";
 import { getStoredAccessToken } from "@/lib/reconToken";
+import { NewItemModal } from "@/components/recon/NewItemModal";
+import { DataTable, type DataTableColumn } from "@/components/recon/DataTable";
+import { useReconSubject } from "@/hooks/useReconSubject";
 import {
   ConfidenceMeter,
   Eyebrow,
@@ -12,13 +15,15 @@ import {
   StatusPill,
 } from "@/components/recon/ui";
 
-// "OPEN" = the live triage queue (PENDING/IN_PROGRESS/PROPOSED); every other option filters
-// the full case history by one status; "ALL" shows everything.
+// "OPEN" = the live triage queue (PENDING/IN_PROGRESS/PROPOSED/FAILED); every other option filters
+// the full case history by one status; "ALL" shows everything. FAILED is listed right after
+// IN_PROGRESS because that is the pair an analyst compares: still running vs. died and needs a retry.
 const FILTERS = [
   "OPEN",
   "ALL",
   "PENDING",
   "IN_PROGRESS",
+  "FAILED",
   "PROPOSED",
   "APPROVED",
   "REJECTED",
@@ -31,6 +36,9 @@ const FILTERS = [
 function QueueContent() {
   const router = useRouter();
   const params = useSearchParams();
+  // Empty on the first render. The table falls back to the shipped columns until it resolves, and only
+  // then reads this person's stored layout — see `columnPrefs.ts` for why a placeholder is not an option.
+  const { subject: sub } = useReconSubject();
   const initial = params.get("status");
   const [filter, setFilter] = useState<string>(
     initial && FILTERS.includes(initial as (typeof FILTERS)[number])
@@ -44,6 +52,7 @@ function QueueContent() {
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
 
   const load = (f: string) => {
     setCases(null);
@@ -118,6 +127,150 @@ function QueueContent() {
   const selCount = selected.size;
   const isHistory = filter !== "OPEN";
 
+  /**
+   * The class shown for a case, and the provenance suffix that says where it came from.
+   *
+   * Three sources, most authoritative first: the agent's own `class_id`, then Tier-1's suggestion (a
+   * real classification, but one the agent may still disagree with), then the IDP document type, which
+   * is not a break class at all. Labelling the last two is the point — an unlabelled `wire_mismatch`
+   * from IDP would read as a finding rather than as a guess about a PDF.
+   */
+  const classOf = (
+    c: ReconCase,
+  ): { text: string; suffix?: string; title?: string } => {
+    if (c.class_id) return { text: c.class_id };
+    const tier1 = c.item?.attributes?.tier1_break_type;
+    if (tier1)
+      return {
+        text: String(tier1),
+        suffix: "tier1",
+        title:
+          "Tier-1 suggested this class from the item's shape; the agent has not classified it yet and may reach a different answer",
+      };
+    const idp = c.item?.attributes?.idp_class;
+    if (idp)
+      return {
+        text: String(idp),
+        suffix: "idp",
+        title: "IDP document class (agent has not classified yet)",
+      };
+    return { text: "—" };
+  };
+
+  // Rebuilt when the selection changes, because the checkbox cells close over it. `useMemo` keeps the
+  // array identity stable otherwise — `DataTable` re-reads stored layouts whenever its column set
+  // changes, and a fresh array every render would do that on every keystroke in the search box.
+  const columns = useMemo<DataTableColumn<ReconCase>[]>(
+    () => [
+      {
+        id: "select",
+        // Pinned: hiding this would take the bulk-action bar with it, and nothing about the table
+        // afterwards would explain where the bulk actions went.
+        pinned: true,
+        width: "auto",
+        header: (
+          <input
+            type="checkbox"
+            aria-label="Select all"
+            checked={selCount > 0 && selCount === shown.length}
+            onChange={toggleAll}
+            className="h-3.5 w-3.5 accent-[var(--rc-cyan)]"
+          />
+        ),
+        cell: (c) => (
+          <input
+            type="checkbox"
+            aria-label={`Select ${c.item_id}`}
+            checked={selected.has(c.item_id)}
+            onChange={() => toggle(c.item_id)}
+            // The row navigates on click; ticking a box must not also leave the page.
+            onClick={(e) => e.stopPropagation()}
+            className="h-3.5 w-3.5 accent-[var(--rc-cyan)]"
+          />
+        ),
+      },
+      {
+        id: "item",
+        header: "Item",
+        width: "1.4fr",
+        sortValue: (c) => c.item_id,
+        cell: (c) => (
+          <span className="rc-mono text-[13px] text-[var(--rc-ink)]">
+            {c.item_id}
+          </span>
+        ),
+      },
+      {
+        id: "status",
+        header: "Status",
+        sortValue: (c) => c.status,
+        cell: (c) => <StatusPill status={c.status} />,
+      },
+      {
+        id: "class",
+        header: "Class",
+        sortValue: (c) => classOf(c).text,
+        cell: (c) => {
+          const { text, suffix, title } = classOf(c);
+          return (
+            <span
+              className="rc-mono text-[12px] text-[var(--rc-ink-dim)]"
+              title={title}
+            >
+              {text}
+              {suffix && (
+                <span className="text-[var(--rc-ink-faint)]"> · {suffix}</span>
+              )}
+            </span>
+          );
+        },
+      },
+      {
+        id: "confidence",
+        header: "Confidence",
+        width: "1.6fr",
+        // Parsed to a number so 0.9 sorts above 0.15 — a string compare would put "0.15" first.
+        // Absent confidence sorts last in both directions (see DataTable), which is right here: a case
+        // with no score yet is not the least confident one, it is one nobody has scored.
+        sortValue: (c) => (c.confidence ? parseFloat(c.confidence) : null),
+        cell: (c) =>
+          c.confidence ? (
+            <ConfidenceMeter value={c.confidence} />
+          ) : (
+            <span className="rc-mono text-[12px] text-[var(--rc-ink-faint)]">
+              —
+            </span>
+          ),
+      },
+      {
+        id: "skill",
+        header: "Skill",
+        // Hidden by default. Useful when an analyst is asking why a whole group of cases scored badly,
+        // and noise the rest of the time.
+        defaultHidden: true,
+        sortValue: (c) => c.confidence_components?.skill ?? null,
+        cell: (c) => (
+          <span className="rc-mono text-[12px] text-[var(--rc-ink-dim)]">
+            {c.confidence_components?.skill ?? "—"}
+          </span>
+        ),
+      },
+      {
+        id: "open",
+        pinned: true,
+        width: "auto",
+        header: "",
+        cell: () => (
+          <span className="rc-mono text-[16px] text-[var(--rc-ink-faint)]">
+            →
+          </span>
+        ),
+      },
+    ],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selected, selCount, shown.length],
+  );
+
   return (
     <div className="space-y-6">
       <header className="flex flex-wrap items-end justify-between gap-4">
@@ -127,11 +280,19 @@ function QueueContent() {
             {isHistory ? "Case History" : "Exception Queue"}
           </h1>
         </div>
-        {cases && (
-          <span className="rc-mono rc-tnum text-[13px] text-[var(--rc-ink-dim)]">
-            {shown.length} {isHistory ? "item(s)" : "open"}
-          </span>
-        )}
+        <div className="flex items-center gap-4">
+          <button
+            onClick={() => setCreating(true)}
+            className="rc-mono rounded border border-[var(--rc-cyan)] px-4 py-2 text-[12px] uppercase tracking-[0.1em] text-[var(--rc-cyan)] hover:bg-[var(--rc-cyan)] hover:text-[#040a10]"
+          >
+            + Create New
+          </button>
+          {cases && (
+            <span className="rc-mono rc-tnum text-[13px] text-[var(--rc-ink-dim)]">
+              {shown.length} {isHistory ? "item(s)" : "open"}
+            </span>
+          )}
+        </div>
       </header>
 
       {/* filter bar: status pills + free-text search over item id / class */}
@@ -212,77 +373,30 @@ function QueueContent() {
             : "◇ queue clear — no open exceptions"}
         </Placeholder>
       ) : (
-        <Panel className="rc-rise overflow-hidden">
-          {/* header row */}
-          <div className="grid grid-cols-[auto_1.4fr_1fr_1fr_1.6fr_auto] items-center gap-4 border-b border-[var(--rc-line)] px-5 py-3">
-            <input
-              type="checkbox"
-              aria-label="Select all"
-              checked={selCount > 0 && selCount === shown.length}
-              onChange={toggleAll}
-              className="h-3.5 w-3.5 accent-[var(--rc-cyan)]"
-            />
-            {["Item", "Status", "Class", "Confidence", ""].map((h) => (
-              <div key={h} className="rc-eyebrow">
-                {h}
-              </div>
-            ))}
-          </div>
-          {shown.map((c) => (
-            <div
-              key={c.item_id}
-              className="rc-row grid grid-cols-[auto_1.4fr_1fr_1fr_1.6fr_auto] items-center gap-4 border-b border-[var(--rc-line-soft)] px-5 py-4 last:border-0"
-            >
-              <input
-                type="checkbox"
-                aria-label={`Select ${c.item_id}`}
-                checked={selected.has(c.item_id)}
-                onChange={() => toggle(c.item_id)}
-                onClick={(e) => e.stopPropagation()}
-                className="h-3.5 w-3.5 accent-[var(--rc-cyan)]"
-              />
-              <button
-                onClick={() =>
-                  router.push(`/recon/case/${encodeURIComponent(c.item_id)}`)
-                }
-                className="rc-mono cursor-pointer text-left text-[13px] text-[var(--rc-ink)] hover:text-[var(--rc-cyan)]"
-              >
-                {c.item_id}
-              </button>
-              <div>
-                <StatusPill status={c.status} />
-              </div>
-              <div className="rc-mono text-[12px] text-[var(--rc-ink-dim)]">
-                {c.class_id ??
-                  (c.item?.attributes?.idp_class ? (
-                    <span title="IDP document class (agent has not classified yet)">
-                      {String(c.item.attributes.idp_class)}
-                      <span className="text-[var(--rc-ink-faint)]"> · idp</span>
-                    </span>
-                  ) : (
-                    "—"
-                  ))}
-              </div>
-              <div>
-                {c.confidence ? (
-                  <ConfidenceMeter value={c.confidence} />
-                ) : (
-                  <span className="rc-mono text-[12px] text-[var(--rc-ink-faint)]">
-                    —
-                  </span>
-                )}
-              </div>
-              <button
-                onClick={() =>
-                  router.push(`/recon/case/${encodeURIComponent(c.item_id)}`)
-                }
-                className="rc-mono text-[16px] text-[var(--rc-ink-faint)] hover:text-[var(--rc-cyan)]"
-              >
-                →
-              </button>
-            </div>
-          ))}
-        </Panel>
+        <DataTable
+          tableId="queue"
+          sub={sub}
+          columns={columns}
+          rows={shown}
+          rowKey={(c) => c.item_id}
+          onRowClick={(c) =>
+            router.push(`/recon/case/${encodeURIComponent(c.item_id)}`)
+          }
+        />
+      )}
+
+      {creating && (
+        <NewItemModal
+          onClose={() => setCreating(false)}
+          onSubmitted={() => {
+            // The item lands in PENDING within a second or two (DynamoDB Stream latency), so a
+            // single immediate reload can legitimately miss it. Say so rather than looking broken.
+            setMsg(
+              "Submitted — Tier-1 is running; reload in a moment if it is not listed yet.",
+            );
+            void load(filter);
+          }}
+        />
       )}
     </div>
   );

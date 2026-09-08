@@ -3,7 +3,7 @@ output "enabled" {
 }
 
 output "provider_arn" {
-  value = try(data.external.oauth_provider_info[0].result.provider_arn, "")
+  value = var.enabled ? aws_cloudformation_stack.oauth_provider[0].outputs["CredentialProviderArn"] : ""
 }
 
 output "callback_url_ssm_param" {

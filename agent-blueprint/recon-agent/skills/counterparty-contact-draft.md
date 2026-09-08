@@ -2,6 +2,9 @@
 name: counterparty-contact-draft
 description: Draft a counterparty email for a human to approve and send. You do not send it yourself.
 tools: []
+metadata:
+  # No trigger: reached as the resolution of an investigation, not as an item's break type.
+  tier: resolution
 ---
 
 When the item cannot be resolved from internal sources, draft a concise outbound message to the
@@ -38,5 +41,5 @@ Include an `email_draft` only when settling the item genuinely requires asking t
 something and the request is well-grounded. Omit it entirely otherwise.
 
 Always conclude with: (1) a one-paragraph **reasoning** of why counterparty contact is needed and
-what to ask, (2) a **confidence** score in [0,1] for the proposed next step, and (3) the
-**evidence** list (the facts the draft is grounded in). These populate the ReasoningStep.
+what to ask, (2) the **evidence_steps** report required by the break-type skill this case was classified under — this skill prescribes no steps of its own, so it adds no entries and removes none — and (3) the
+**evidence** list (the facts the draft is grounded in). These populate the case's ReasoningStep entries, and the evidence_steps outcomes are what determine whether this case can be resolved without a human.

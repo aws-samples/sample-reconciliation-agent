@@ -86,7 +86,7 @@ describe("currentSystemPrompt", () => {
 
   it("rejects an unknown backend", async () => {
     const { currentSystemPrompt } = await import("@/lib/agentSystemPrompt");
-    await expect(currentSystemPrompt("legacy")).rejects.toThrow(
+    await expect(currentSystemPrompt("nonesuch")).rejects.toThrow(
       /Unknown agent backend/,
     );
     expect(s3Send).not.toHaveBeenCalled();

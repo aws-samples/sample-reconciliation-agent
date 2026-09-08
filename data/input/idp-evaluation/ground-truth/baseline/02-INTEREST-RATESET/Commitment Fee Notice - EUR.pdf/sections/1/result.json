@@ -1,0 +1,35 @@
+{
+  "document_class": {
+    "type": "commitment_fee_notice"
+  },
+  "split_document": {
+    "page_indices": [
+      0
+    ]
+  },
+  "classification": "commitment_fee_notice",
+  "page_ids": [
+    "1"
+  ],
+  "confidence": 1.0,
+  "inference_result": {
+    "notice_date": "2026-11-17",
+    "notice_date_source_raw": "17-Nov-2026",
+    "value_date": "2026-11-19",
+    "counterparty": "MISTFELL FOODS CORP.",
+    "fund": "Senior Credit Fund",
+    "facility": "MISTFELL REVOLVING CREDIT FACILITY EUR 90MM",
+    "reference": "MF-FEE-EUR-1119",
+    "amount": "412.50",
+    "fee_amount": "412.50",
+    "fee_percentage": "0.375",
+    "currency": "EUR",
+    "activity_type": "Commitment Fee",
+    "facility_id_source_raw": "SL-311907",
+    "agent_bank": "Tarnsmoor Trust Bank, N.A.",
+    "agent_contact_name": "Fee Administration",
+    "agent_email": "fees@tarnsmoor-trust.example",
+    "agent_telephone": "+1-555-0177",
+    "notice_comment": "This facility is denominated in EUR. The borrower also maintains a USD revolving facility; fees on that facility are noticed separately."
+  }
+}

@@ -157,24 +157,83 @@ def test_strands_json_drops_temperature_when_model_rejects_it():
 
 
 def test_classify_with_consistency_majority_vote_and_prompt():
-    # 3 samples: timing, timing, unknown → majority 'timing', consistency 2/3.
+    # 3 samples: timing, timing, unknown → majority 'timing'. The minority sample supplies the
+    # reasoning ONLY if the majority filter is broken, which is what makes it worth asserting.
     fc = _FakeCaller(
         [
-            {"name": "timing", "confidence": 0.9, "reasoning": "value date off"},
-            {"name": "timing", "confidence": 0.8, "reasoning": "again"},
-            {"name": "unknown", "confidence": 0.5, "reasoning": "unsure"},
+            {"name": "timing", "reasoning": "value date off"},
+            {"name": "timing", "reasoning": "again"},
+            {"name": "unknown", "reasoning": "unsure"},
         ]
     )
-    name, conf, reasoning, consistency = classify_with_consistency(
+    name, reasoning = classify_with_consistency(
         model_id="m", system="s", item=ITEM, catalog=CATALOG, caller=fc
     )
     assert name == "timing"
-    assert consistency == pytest.approx(2 / 3)
+    assert reasoning in ("value date off", "again")
     # The prompt carries the catalog AND the item's IDP-extracted data.
     assert "timing breaks" in fc.prompts[0]
     assert "26-Dec-2026" in fc.prompts[0]
     # Each sample is a separate call — three independent draws, not one reused conversation.
     assert len(fc.prompts) == 3
+
+
+def test_the_classifier_prompt_asks_for_no_confidence():
+    """The k-sample vote stays; the two numbers it produced are gone.
+
+    Neither was read: the agreement fraction was already computed and discarded at the call site, and
+    the verbalized mean fed a floor whose only production effect was a mass false-negative. A prompt
+    that still asks for a number nobody reads invites a future reader to start reading it — and the
+    parse would ``KeyError`` the moment a model omitted the key it was no longer relied on for.
+    """
+    fc = _FakeCaller([{"name": "timing", "reasoning": "r"}] * 3)
+    classify_with_consistency(model_id="m", system="s", item=ITEM, catalog=CATALOG, caller=fc)
+    assert "confidence" not in fc.prompts[0]
+
+
+def test_classification_prompt_withholds_the_tier1_hint():
+    """The k samples are only independent draws if the classifier is not handed the answer.
+
+    Tier-1 stamps ``tier1_break_type`` onto the item's attributes, and the classification prompt
+    serializes the whole item — so without the filter the hint reaches the classifier through the
+    item even though the explicit hint block is confined to the investigation prompt. This asserts
+    the leak is closed while the rest of the item's data still gets through.
+    """
+    hinted = ReconItem(
+        item_id="idp-n2.pdf",
+        domain="cash",
+        sides=[],
+        attributes={
+            "idp_attributes": {"Date": "26-Dec-2026"},
+            "tier1_break_type": "record-match-review",
+            "tier1_escalation_reason": "tolerance_miss",
+        },
+    )
+    fc = _FakeCaller([{"name": "timing", "reasoning": "r"}] * 3)
+    classify_with_consistency(model_id="m", system="s", item=hinted, catalog=CATALOG, caller=fc)
+    prompt = fc.prompts[0]
+    assert "tier1_break_type" not in prompt
+    assert "record-match-review" not in prompt
+    # Only the two hint keys are withheld — the escalation reason included, since it names the rule
+    # that produced the hint. Everything else the classifier needs is still there.
+    assert "tier1_escalation_reason" not in prompt and "tolerance_miss" not in prompt
+    assert "26-Dec-2026" in prompt
+
+
+def test_investigation_prompt_keeps_the_tier1_hint():
+    """The filter is scoped to classification: the investigation prompt shows the hint on purpose."""
+    from strands_investigator import _prompt
+
+    hinted = ReconItem(
+        item_id="idp-n3.pdf",
+        domain="cash",
+        sides=[],
+        attributes={"tier1_break_type": "record-match-review"},
+    )
+    text = _prompt(hinted, [{"name": "record-match-review", "body": "procedure"}], None)
+    assert "record-match-review" in text
+    # And filtering for the classification prompt must not have mutated the item itself.
+    assert hinted.attributes["tier1_break_type"] == "record-match-review"
 
 
 def test_default_caller_pins_streaming_off(monkeypatch):

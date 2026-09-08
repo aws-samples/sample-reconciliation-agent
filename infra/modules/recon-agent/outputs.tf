@@ -33,14 +33,38 @@ output "memory_id" {
   value       = aws_bedrockagentcore_memory.this.id
 }
 
-output "kb_id" {
-  description = "Bedrock Knowledge Base id."
-  value       = aws_bedrockagent_knowledge_base.this.id
+# The `kb_id` / `kb_data_source_id` outputs are gone with the customer-managed KB they pointed at
+# (Phase 3). Nothing consumed them once local.kb_ingest_targets dropped its "vectors" entry. The
+# managed pair below is the only knowledge base now.
+
+output "managed_kb_id" {
+  description = "Bedrock MANAGED Knowledge Base id (the one the Gateway connector target wraps)."
+  value       = aws_bedrockagent_knowledge_base.managed.id
 }
 
-output "kb_data_source_id" {
-  description = "Bedrock Knowledge Base data source id (for triggering ingestion jobs)."
-  value       = aws_bedrockagent_data_source.kb.data_source_id
+output "managed_kb_arn" {
+  description = "ARN of the MANAGED Knowledge Base (for the gateway role's bedrock:Retrieve grant)."
+  value       = aws_bedrockagent_knowledge_base.managed.arn
+}
+
+output "managed_kb_data_source_id" {
+  description = "MANAGED Knowledge Base data source id (for triggering ingestion jobs). Gated on the data source reaching AVAILABLE."
+  # ⚠️ Read THROUGH the readiness gate ON PURPOSE, not straight off the data source.
+  # CreateDataSource is async for a managed KB (CREATING -> AVAILABLE, ~2-5 min) and an ingestion
+  # job started against a CREATING data source fails. The consumer is the environment's KB
+  # ingestion, which cannot depends_on a resource inside this module — so the dependency has to
+  # travel through this output. Pointing it at aws_bedrockagent_data_source.managed.data_source_id
+  # instead would silently drop the wait.
+  #
+  # The gate is now an aws_lambda_invocation, so the id is read back out of its `input` (the
+  # invocation has no `triggers`). Same effect: nothing can read this output until the wait has
+  # returned successfully.
+  value = jsondecode(aws_lambda_invocation.managed_kb_data_source_available.input).data_source_id
+}
+
+output "kb_connector_target_id" {
+  description = "Gateway target id of the `managed-kb` connector target (for readiness polling and tools/list probes)."
+  value       = aws_cloudformation_stack.kb_connector_target.outputs["TargetId"]
 }
 
 output "memory_arn" {

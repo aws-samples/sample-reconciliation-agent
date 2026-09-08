@@ -377,6 +377,130 @@ resource "aws_iam_role_policy" "ecs_task" {
         Resource = [var.lessons_table_arn, "${var.lessons_table_arn}/index/*"]
       },
       {
+        # Contacts, email templates, and workflow types -- the three operator-owned tables behind the
+        # Config tab. This is the ONLY role in the deployment with a write grant on any of them: the
+        # agent-facing gateway tools are read-only by IAM, so a recipient, a wording, or a document
+        # destination can only be changed by a signed-in operator going through the Config tab. Scan
+        # is needed because all three are listed whole (see the contact-store and workflow-types
+        # modules on why there is no GSI). DeleteItem is deliberately absent -- rows are deactivated,
+        # not removed, so a historical draft can still name the contact it was addressed to, and a
+        # retired workflow type still explains where documents already uploaded under it went.
+        Effect = "Allow"
+        Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Scan"]
+        # An empty Resource list is a malformed policy, so an unwired module falls back to a table
+        # name that cannot exist. The Config tab then fails closed with AccessDenied instead of the
+        # statement quietly widening to every table in the account.
+        Resource = length(compact([var.contacts_table_arn, var.templates_table_arn, var.workflow_types_table_arn])) > 0 ? compact([var.contacts_table_arn, var.templates_table_arn, var.workflow_types_table_arn]) : ["arn:aws:dynamodb:*:*:table/__none__"]
+      },
+      {
+        # Documents tab: read the document pipeline's GraphQL API as this task role.
+        #
+        # Two named query fields, not the API wildcard. `appsync:GraphQL` is field-scoped, and the
+        # wildcard would silently include uploadDocument, deleteDocument and every mutation that
+        # pipeline adds later -- a console tab that lists documents would carry the authority to
+        # delete them. It also matters for the architecture argument: reading this API directly was
+        # chosen over a recon-owned event mirror specifically because the grant is a couple of named
+        # reads. A wildcard would make the rejected alternative the better one after the fact.
+        #
+        # The count and presign fields are absent on purpose. The count query returns null to a
+        # machine caller with no error, so the tab counts the rows it received; no query on that API
+        # returns a URL for a source file, so the tab links out to the pipeline's own review UI.
+        Effect = "Allow"
+        Action = ["appsync:GraphQL"]
+        Resource = var.idp_appsync_api_arn != "" ? [
+          "${var.idp_appsync_api_arn}/types/Query/fields/listDocuments",
+          "${var.idp_appsync_api_arn}/types/Query/fields/getDocument",
+          # An empty Resource list is a malformed policy, so an unwired module falls back to an ARN
+          # that cannot match. The tab then fails closed rather than the statement widening.
+        ] : ["arn:aws:appsync:*:*:apis/__none__/types/Query/fields/__none__"]
+      },
+      {
+        # The audit table. Query is for the by_recency index, and the index needs its own ARN.
+        Effect   = "Allow"
+        Action   = ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:Query"]
+        Resource = length(compact([var.uploads_table_arn, var.uploads_table_index_arn])) > 0 ? compact([var.uploads_table_arn, var.uploads_table_index_arn]) : ["arn:aws:dynamodb:*:*:table/__none__"]
+      },
+      {
+        # The two upload destinations, and nothing else in either bucket.
+        #
+        # No DeleteObject: nothing in the console removes an object, so the verb has no caller and
+        # would only widen what a compromised task can do. ListBucket is granted, but only on the
+        # document pipeline's input bucket and only at the bucket level -- see the statement below
+        # for why that one is not optional.
+        #
+        # GetObject is granted for two named readers, not as a general read. On the staging prefixes,
+        # because CopyObject reads the source as the caller. On the document pipeline's input bucket,
+        # because the Documents tab streams the source file behind a processed document -- and that route
+        # resolves the caller's key through the pipeline's own `getDocument` before reading, so the grant
+        # is only reachable for objects the pipeline already has a record of.
+        #
+        # The knowledge-base prefix is `knowledge-base/uploads/` and not `knowledge-base/`: the seed
+        # corpus lives directly under `knowledge-base/`, and a grant that covered it would let a
+        # malformed upload overwrite a seeded playbook with a counterparty's PDF. The data source's
+        # inclusionPrefixes is already `knowledge-base/`, so the sub-prefix is ingested anyway.
+        Effect = "Allow"
+        Action = ["s3:PutObject", "s3:GetObject"]
+        Resource = compact([
+          "${var.assets_bucket_arn}/uploads/inbox/*",
+          "${var.assets_bucket_arn}/uploads/derived/*",
+          "${var.assets_bucket_arn}/knowledge-base/uploads/*",
+          var.idp_input_bucket_arn != "" ? "${var.idp_input_bucket_arn}/*" : "",
+        ])
+      },
+      {
+        # ⚠️ ListBucket on the input bucket, for ERROR REPORTING rather than for enumeration. Nothing
+        # in the BFF lists this bucket; `.../source/route.ts` only ever issues GetObject.
+        #
+        # It is required anyway, because of how S3 answers a GetObject for a key that is not there.
+        # With `s3:GetObject` alone the caller is told `AccessDenied` naming `s3:ListBucket`; only a
+        # caller that also holds ListBucket gets `NoSuchKey`. S3 does this deliberately, so that a
+        # bucket's key namespace cannot be probed by reading the error. The cost is that the source
+        # route's `NoSuchKey` branch -- the one that explains "the pipeline has a record for this key
+        # but the object is no longer in the input bucket" -- was UNREACHABLE, and every processed
+        # document whose source had since been removed rendered in the Documents tab as
+        # "Source document unavailable -- ... is not authorized to perform: s3:ListBucket", which
+        # reads as a broken deployment rather than as an expired object.
+        #
+        # Scoped to the bucket ARN with no `/*`: ListBucket is a bucket-level action, and the pair of
+        # statements grants strictly less than a wildcard read -- the task can still only GetObject
+        # from this one bucket, on keys the pipeline's own `getDocument` has already vouched for.
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = var.idp_input_bucket_arn != "" ? [var.idp_input_bucket_arn] : ["arn:aws:s3:::__none__"]
+      },
+      {
+        # IDP encrypts its buckets with a customer-managed KMS key, so the S3 grants above are
+        # necessary but not sufficient in BOTH directions. Without this the Documents tab's UPLOAD
+        # fails with `not authorized to perform: kms:GenerateDataKey`, and the source preview's
+        # GetObject fails with `kms:Decrypt` -- both reported against a key id that appears nowhere
+        # in this repo, which reads as a broken deployment rather than a missing grant.
+        #
+        # IDP's key policy delegates to IAM (root principal with `kms:*`), so this identity-based
+        # grant is enough and recon never has to touch IDP's key policy -- which matters, because the
+        # key belongs to the document pipeline's stack and not to this one.
+        #
+        # Resource = "*" scoped by `kms:ViaService` rather than the key ARN, for the same reason as
+        # `modules/idp-hook`: naming the key would either hard-code an id that changes when IDP is
+        # rebuilt, or need a data source that makes a recon plan FAIL wherever IDP is not deployed.
+        # With this condition the role can only use KMS *through S3*, and its S3 reach is already
+        # limited to the prefixes granted above -- so the effective grant is exactly "read and write
+        # the objects it can already GetObject and PutObject".
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"]
+        Resource = "*"
+        Condition = {
+          StringEquals = { "kms:ViaService" = "s3.${var.region}.amazonaws.com" }
+        }
+      },
+      {
+        # The pre-processor, and only when it is wired. An unset ARN falls back to a function name
+        # that cannot exist, so an email upload fails with AccessDenied rather than the statement
+        # widening to every function in the account.
+        Effect   = "Allow"
+        Action   = ["lambda:InvokeFunction"]
+        Resource = var.email_preprocess_function_arn != "" ? [var.email_preprocess_function_arn] : ["arn:aws:lambda:*:*:function:__none__"]
+      },
+      {
         # Skills CRUD + system-prompt editor: BFF reads AND writes editable
         # SKILL.md / system-prompt.md under the assets bucket so edits apply without redeploy.
         # system-prompt-harness.md is read-only in practice but shares this statement: the
@@ -418,11 +542,19 @@ resource "aws_iam_role_policy" "ecs_task" {
         Resource = "*"
       },
       {
-        # Reject→reprocess re-drives the investigation via the agent-worker Lambda (async),
-        # which resolves the AGENT_BACKEND switch (runtime⇄harness).
-        Effect   = "Allow"
-        Action   = ["lambda:InvokeFunction"]
-        Resource = var.agent_worker_function_arn != "" ? [var.agent_worker_function_arn] : ["arn:aws:lambda:*:*:function:${var.name_prefix}-agent-worker"]
+        # Two BFF paths invoke a Lambda directly:
+        #  - reject→reprocess re-drives the investigation via the agent-worker Lambda (async),
+        #    which resolves the AGENT_BACKEND switch (runtime⇄harness);
+        #  - the queue's "Create New" action submits a manual payload through the intake Lambda,
+        #    so validation stays in one place (backend/intake/handler.py + the ReconItem model).
+        # compact() drops the intake entry when the ARN is unset, keeping the grant scoped rather
+        # than silently widening to a wildcard.
+        Effect = "Allow"
+        Action = ["lambda:InvokeFunction"]
+        Resource = compact([
+          var.agent_worker_function_arn != "" ? var.agent_worker_function_arn : "arn:aws:lambda:*:*:function:${var.name_prefix}-agent-worker",
+          var.intake_function_arn,
+        ])
       },
       {
         # Lessons <-> AgentCore Memory: the BFF WRITES each analyst decision as a memory event
@@ -575,17 +707,36 @@ resource "aws_ecs_task_definition" "frontend" {
       { name = "LESSONS_TABLE", value = var.lessons_table },
       # Approve emails via the microsoft-graph gateway tool (from the shared
       # mailbox); disapprove+reprocess re-invokes the agent.
-      { name = "RECON_NOTIFY_EMAIL", value = var.notify_email },
       { name = "GRAPH_MAILBOX", value = var.graph_mailbox },
+      # Contacts + templates. No recipient ADDRESS is configured anywhere: an approved draft
+      # carries a contact ID, and the BFF resolves it against this table at the moment it sends.
+      # These two are also the Config tab's write targets -- the one role that may edit either.
+      { name = "CONTACTS_TABLE", value = var.contacts_table },
+      { name = "TEMPLATES_TABLE", value = var.templates_table },
+      { name = "WORKFLOW_TYPES_TABLE", value = var.workflow_types_table },
+      # --- Upload route (src/app/api/recon/uploads/route.ts) ---
+      # All four are read with no fallback: the route raises rather than guessing a bucket. An
+      # upload that lands in the wrong bucket is not an error anywhere -- nothing reads it, and the
+      # audit row says UPLOADED -- so a missing name has to fail loudly at the request.
+      { name = "UPLOADS_TABLE", value = var.uploads_table },
+      { name = "IDP_INPUT_BUCKET", value = var.idp_input_bucket },
+      # Recon's own bucket, twice over: raw emails are staged here and derived parts written back.
+      { name = "UPLOAD_STAGING_BUCKET", value = var.assets_bucket },
+      { name = "EMAIL_PREPROCESS_FUNCTION", value = var.email_preprocess_function_name },
+      # Documents tab. Server-side only -- the endpoint and the signing credentials never reach the
+      # browser, which is why the tab calls a same-origin route instead of this API directly.
+      { name = "IDP_APPSYNC_ENDPOINT", value = var.idp_appsync_endpoint },
       # Counterparty-email draft: which domains an analyst may address. Comma-separated because
       # the Python authority (recon_core.email_policy.parse_domain_allowlist) and its TS mirror
       # both parse that shape — one wire format for both readers.
-      { name = "COUNTERPARTY_EMAIL_DOMAINS", value = join(",", var.counterparty_email_domains) },
       { name = "RECON_GATEWAY_URL", value = var.egress_gateway_url },
       { name = "REPROCESS_CAP", value = tostring(var.reprocess_cap) },
       { name = "AGENT_RUNTIME_ARN", value = var.agent_runtime_arn },
       # Reject→reprocess re-drives the agent via the agent-worker Lambda (backend switch).
       { name = "AGENT_WORKER_FUNCTION", value = var.agent_worker_function_arn },
+      # Queue → "Create New": the BFF invokes intake so payload validation stays in one place
+      # (backend/intake/handler.py + the pydantic ReconItem model).
+      { name = "INTAKE_FUNCTION", value = var.intake_function_name },
       # Config tab → Policy: rewrite the gated Cedar statements' threshold on the egress gateway.
       { name = "POLICY_ENGINE_NAME", value = var.policy_engine_name },
       { name = "EGRESS_GATEWAY_ARN", value = var.egress_gateway_arn },
@@ -623,6 +774,13 @@ resource "aws_ecs_task_definition" "frontend" {
       { name = "AUTH_PROVIDER", value = var.auth_provider },
       { name = "OKTA_ISSUER", value = var.okta_issuer },
       { name = "OKTA_CLIENT_ID", value = var.okta_client_id },
+      # --- Configuration-change role (src/lib/reconAdmin.ts) ---
+      # There is no Cognito user pool here, so membership is an OIDC group claim and the group itself is
+      # created in the identity provider, not by Terraform. Leaving `recon_admin_group` empty is a
+      # supported state and it fails CLOSED: nobody can change platform configuration until an operator
+      # names a group here AND the provider is configured to release the claim.
+      { name = "RECON_ADMIN_GROUP", value = var.recon_admin_group },
+      { name = "AUTH_GROUPS_CLAIM", value = var.auth_groups_claim },
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -846,6 +1004,18 @@ resource "aws_cloudfront_response_headers_policy" "security" {
         "font-src 'self' data:",
         "img-src 'self' data: blob:",
         "connect-src 'self' https://*.okta.com https://login.microsoftonline.com",
+        # ⚠️ `frame-src` must be stated, and `blob:` is the whole reason. Source documents are
+        # fetched with the BFF's Authorization header and handed to the element as an OBJECT URL --
+        # neither `<iframe src>` nor `<img src>` can carry a header, so there is no other shape this
+        # can take. `img-src` already lists `blob:`, which is why an image preview worked and a PDF
+        # did not: with no `frame-src`, an `<iframe src="blob:...">` falls back to
+        # `default-src 'self'` and is refused. Chrome renders that refusal as a torn-page icon inside
+        # a grey frame rather than as an error, so it reads as a corrupt document.
+        #
+        # This is NOT the Okta-framing allowance warned about above: `blob:` is same-document data
+        # the page already holds, not a third-party origin, and `frame-ancestors 'self'` still bars
+        # anyone from framing US.
+        "frame-src 'self' blob:",
         "frame-ancestors 'self'",
         "base-uri 'self'",
         "form-action 'self'",

@@ -81,9 +81,9 @@ def test_put_and_detect_reprocess_new_run_overwrites():
 
 @mock_aws
 def test_put_and_detect_reprocess_empty_stored_arn_redrives_once():
-    """A pre-existing item written before idp_execution_arn existed (empty stored arn) should
-    re-drive once when a real run id arrives."""
+    """An item stored with a blank ``idp_execution_arn`` should re-drive once when a real run id
+    arrives."""
     _make_items_table()
     store = ItemStore(table_name="recon-items")
-    store.put_if_absent(_item(""))  # legacy item, no run id
+    store.put_if_absent(_item(""))  # stored with an empty arn, i.e. no run id
     assert store.put_and_detect_reprocess(_item("run-A")) == "reprocessed"

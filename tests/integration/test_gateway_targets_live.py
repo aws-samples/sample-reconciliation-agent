@@ -70,11 +70,44 @@ def test_general_ledger_search_ledger():
     assert "rows" in payload and "count" in payload
 
 
-def test_knowledge_base_search_guidance():
-    """Target `knowledge-base`: guidance retrieval returns content."""
-    out = _call("knowledge-base___search_guidance", {"query": "reconciliation break", "top_k": 1})
+def test_managed_kb_retrieve():
+    """Target `managed-kb`: the connector reaches Bedrock Retrieve and honours the filter override.
+
+    Two assertions, because they fail for different reasons:
+
+    * an unfiltered call returns content -- the connector, the gateway IAM role's bedrock:Retrieve
+      grant and the KB's index are all live;
+    * a filtered call returns ONLY documents carrying that attribute -- which is the only proof the
+      `filter` parameterOverride took effect. An unrecognised override Path is silently ignored, so
+      the tool would still be advertised and would still answer 200 with unfiltered results.
+
+    ⚠️ The argument shape is NESTED (the overrides are JSONPaths into the Retrieve request, not flat
+    names). A bare {"query": ...} fails schema validation.
+    """
+    out = _call("managed-kb___Retrieve", {"retrievalQuery": {"text": "reconciliation break"}})
     assert not out.get("isError")
     assert _text(out).strip()
+
+    filtered = _call(
+        "managed-kb___Retrieve",
+        {
+            "retrievalQuery": {"text": "how do I reconcile this"},
+            "retrievalConfiguration": {
+                "managedSearchConfiguration": {
+                    "numberOfResults": 5,
+                    # STRING attribute -> equals. break_class would need listContains.
+                    "filter": {"equals": {"key": "doc_type", "value": "playbook"}},
+                }
+            },
+        },
+    )
+    assert not filtered.get("isError")
+    results = json.loads(_text(filtered))["retrievalResults"]
+    assert results, "filtered retrieval returned nothing; the corpus should hold 7 playbooks"
+    assert all(r["metadata"]["doc_type"] == "playbook" for r in results), (
+        "a non-playbook came back through a doc_type=playbook filter -- the filter "
+        "parameterOverride is not being applied"
+    )
 
 
 def test_recon_status_update_status(qa_case):

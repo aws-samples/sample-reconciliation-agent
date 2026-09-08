@@ -13,5 +13,12 @@ phases:
       - docker build --platform linux/arm64 -t "$IMAGE_URI" .
       - docker push "$IMAGE_URI"
       # Publish the classification-type catalog from the deployed SKILL.md files.
-      - python3 -c "import json,sys; sys.path.insert(0,'.'); from skills_loader import catalog; from pathlib import Path; print(json.dumps(catalog(Path('skills'))))" > skills-catalog.json
+      #
+      # Run this INSIDE the image just built, not on the CodeBuild host. `skills_loader.catalog`
+      # validates each SKILL.md's front matter through backend.recon_core.skill_meta, which imports
+      # pydantic models — and pydantic is installed in the image, never on the build host, so the
+      # host invocation fails with ModuleNotFoundError. The host is ARM_CONTAINER and the image is
+      # linux/arm64, so this runs natively with no emulation. `--entrypoint python3` overrides the
+      # image's opentelemetry-instrument CMD; WORKDIR is /app, where skills/ lives.
+      - docker run --rm --entrypoint python3 "$IMAGE_URI" -c "import json; from skills_loader import catalog; from pathlib import Path; print(json.dumps(catalog(Path('skills'))))" > skills-catalog.json
       - aws s3 cp skills-catalog.json "s3://$ASSETS_BUCKET/skills-catalog.json"

@@ -17,3 +17,13 @@ output "execution_arn" {
   description = "API execution ARN (for Lambda invoke permissions)."
   value       = aws_apigatewayv2_api.http.execution_arn
 }
+
+output "function_name" {
+  description = "Intake Lambda name (the frontend BFF invokes it for manual submissions)."
+  value       = aws_lambda_function.intake.function_name
+}
+
+output "function_arn" {
+  description = "Intake Lambda ARN (for a scoped lambda:InvokeFunction grant)."
+  value       = aws_lambda_function.intake.arn
+}

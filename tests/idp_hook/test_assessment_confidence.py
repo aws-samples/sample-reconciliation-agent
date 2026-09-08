@@ -1,7 +1,7 @@
 """IDP Assessment classification confidence capture.
 
 The reader resolves each section's classification confidence and the mapper stores the first
-section's as ``idp_classification_confidence`` — omitted when nothing is available, so
+section's as the notice's ``extraction_confidence`` — None when nothing is available, so
 pre-Assessment documents degrade gracefully onto the composite's renormalized path.
 
 Two sources, in preference order:
@@ -20,7 +20,7 @@ import boto3
 from moto import mock_aws
 
 from backend.idp_hook.idp_output import IdpOutputReader
-from backend.idp_hook.mapper import idp_event_to_recon_item
+from backend.idp_hook.mapper import idp_event_to_notice
 
 BUCKET = "idp-out"
 PREFIX = "Notice.pdf"
@@ -71,7 +71,9 @@ class _FakeReader:
             "section_id": "1",
             "classification": "LoanDrawCancellationNotice",
             "page_indices": [0],
-            "fields": {"BorrowerName": "NORTHWIND MIDCO"},
+            # notice_date is required: it is the counterparty-index range key, and the mapper raises
+            # without one rather than store a row the agent's main query can never return.
+            "fields": {"counterparty": "NORTHWIND MIDCO", "notice_date": "2026-04-01"},
             "output_uri": f"s3://{bucket}/{prefix}/sections/1/result.json",
         }
         if self._conf:
@@ -79,17 +81,29 @@ class _FakeReader:
         return {"sections": [sec], "pages": []}
 
 
+def _event() -> dict:
+    """Build the minimal completion event that points the mapper at the seeded section.
+
+    :returns: an IDP completion record carrying one section OutputJSONUri.
+    """
+    return {
+        "ObjectKey": "Notice.pdf",
+        "Sections": [
+            {"Id": "1", "OutputJSONUri": f"s3://{BUCKET}/{PREFIX}/sections/1/result.json"}
+        ],
+    }
+
+
 def test_mapper_stores_idp_classification_confidence():
-    doc = {"ObjectKey": "Notice.pdf", "Sections": [{"Id": "1", "OutputJSONUri": f"s3://{BUCKET}/{PREFIX}/sections/1/result.json"}]}
-    item = idp_event_to_recon_item(doc, domain="cash", output_reader=_FakeReader(with_confidence=True))
-    assert item.attributes["idp_class"] == "LoanDrawCancellationNotice"
-    assert item.attributes["idp_classification_confidence"] == Decimal(str(0.976))
+    notice = idp_event_to_notice(_event(), output_reader=_FakeReader(with_confidence=True))
+    assert notice.notice_class == "LoanDrawCancellationNotice"
+    assert notice.extraction_confidence == Decimal(str(0.976))
 
 
 def test_mapper_omits_confidence_when_absent():
-    doc = {"ObjectKey": "Notice.pdf", "Sections": [{"Id": "1", "OutputJSONUri": f"s3://{BUCKET}/{PREFIX}/sections/1/result.json"}]}
-    item = idp_event_to_recon_item(doc, domain="cash", output_reader=_FakeReader(with_confidence=False))
-    assert "idp_classification_confidence" not in item.attributes
+    notice = idp_event_to_notice(_event(), output_reader=_FakeReader(with_confidence=False))
+    # None, not 0.0: "unknown confidence" and "zero confidence" score differently downstream.
+    assert notice.extraction_confidence is None
 
 
 # ---------------------------------------------------------------------------------
@@ -111,7 +125,11 @@ def _seed_explainability(*, doc_class_confidence: float | None = None):
             {
                 "document_class": doc_class,
                 "split_document": {"page_indices": [0]},
-                "inference_result": {"BorrowerName": "NORTHWIND MIDCO", "Amount": "10", "Fax": None},
+                "inference_result": {
+                    "BorrowerName": "NORTHWIND MIDCO",
+                    "Amount": "10",
+                    "Fax": None,
+                },
                 "explainability_info": [
                     {
                         "BorrowerName": {"confidence": 1.0, "confidence_threshold": 0.8},
@@ -157,7 +175,9 @@ class _FakeMultiSectionReader:
             return {
                 "section_id": sid,
                 "classification": f"Class{sid}",
-                "fields": {},
+                # Only the FIRST section's fields are read, but every section needs a date for the
+                # test to stay valid if the mapper's section preference ever changes.
+                "fields": {"counterparty": "NORTHWIND MIDCO", "notice_date": "2026-04-01"},
                 "output_uri": "",
                 "classification_confidence": conf,
                 "confidence_alert_count": alerts,
@@ -176,12 +196,14 @@ def test_mapper_sums_alert_counts_across_all_sections():
     doc = {
         "ObjectKey": "Notice.pdf",
         "ConfidenceAlertCount": None,
-        "Sections": [{"Id": "1", "OutputJSONUri": f"s3://{BUCKET}/{PREFIX}/sections/1/result.json"}],
+        "Sections": [
+            {"Id": "1", "OutputJSONUri": f"s3://{BUCKET}/{PREFIX}/sections/1/result.json"}
+        ],
     }
-    item = idp_event_to_recon_item(doc, domain="cash", output_reader=_FakeMultiSectionReader())
-    assert item.attributes["idp_confidence_alert_count"] == 3
+    notice = idp_event_to_notice(doc, output_reader=_FakeMultiSectionReader())
+    assert notice.confidence_alert_count == 3
     # First section's confidence is the one stored.
-    assert item.attributes["idp_classification_confidence"] == Decimal(str(0.95))
+    assert notice.extraction_confidence == Decimal(str(0.95))
 
 
 def test_mapper_falls_back_to_the_event_alert_count_when_no_sections_were_read():
@@ -189,7 +211,9 @@ def test_mapper_falls_back_to_the_event_alert_count_when_no_sections_were_read()
     doc = {
         "ObjectKey": "Notice.pdf",
         "ConfidenceAlertCount": 4,
-        "Sections": [{"Id": "1", "Class": "A", "attributes": {}}],
+        "Sections": [
+            {"Id": "1", "Class": "A", "attributes": {"notice_date": "2026-04-01"}},
+        ],
     }
-    item = idp_event_to_recon_item(doc, domain="cash", output_reader=None)
-    assert item.attributes["idp_confidence_alert_count"] == 4
+    notice = idp_event_to_notice(doc, output_reader=None)
+    assert notice.confidence_alert_count == 4

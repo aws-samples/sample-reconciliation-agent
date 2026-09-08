@@ -44,7 +44,7 @@ def test_captures_pending_submit_proposal_on_tool_use_stop():
         {"contentBlockStart": {"contentBlockIndex": 1,
                                "start": {"toolUse": {"toolUseId": "tu-2", "name": "submit_proposal"}}}},
         {"contentBlockDelta": {"contentBlockIndex": 1, "delta": {"toolUse": {"input": '{"class_name": "document-cross-reference",'}}}},
-        {"contentBlockDelta": {"contentBlockIndex": 1, "delta": {"toolUse": {"input": ' "resolution": "Mark cancelled", "verbalized_confidence": 0.9, "classification_reasoning": "x", "status": "Cancelled"}'}}}},
+        {"contentBlockDelta": {"contentBlockIndex": 1, "delta": {"toolUse": {"input": ' "resolution": "Mark cancelled", "classification_reasoning": "x", "status": "Cancelled"}'}}}},
         {"contentBlockStop": {"contentBlockIndex": 1}},
         {"messageStop": {"stopReason": "tool_use"}},
     ]
@@ -92,7 +92,7 @@ def test_payload_extraction_tolerates_alternate_envelope():
     events = [
         {"contentBlockStart": {"contentBlockIndex": 0,
                                "start": {"toolUse": {"toolUseId": "tu-3",
-                                                     "name": "knowledge-base___search_guidance"}}}},
+                                                     "name": "managed-kb___Retrieve"}}}},
         {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"toolUse": {"input": '{"query": "loan confirmation"}'}}}},
         {"contentBlockStop": {"contentBlockIndex": 0}},
         {"toolResult": {"toolUseId": "tu-3", "content": {"guidance": "match on reference"}, "status": "success"}},
@@ -176,7 +176,7 @@ def test_live_result_block_chunked_text_parts_accumulate():
     events = [
         {"contentBlockStart": {"contentBlockIndex": 2,
                                "start": {"toolUse": {"toolUseId": "tu-kb",
-                                                     "name": "knowledge-base___search_guidance"}}}},
+                                                     "name": "managed-kb___Retrieve"}}}},
         {"contentBlockDelta": {"contentBlockIndex": 2, "delta": {"toolUse": {"input": '{"query": "x"}'}}}},
         {"contentBlockStop": {"contentBlockIndex": 2}},
         {"contentBlockStart": {"contentBlockIndex": 2,

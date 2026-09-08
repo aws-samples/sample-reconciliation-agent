@@ -1,0 +1,32 @@
+{
+  "document_class": {
+    "type": "interest_rate_set_notice"
+  },
+  "split_document": {
+    "page_indices": [
+      0
+    ]
+  },
+  "classification": "interest_rate_set_notice",
+  "page_ids": [
+    "1"
+  ],
+  "confidence": 1.0,
+  "inference_result": {
+    "notice_date": "2026-02-26",
+    "notice_date_source_raw": "26-Feb-2026",
+    "value_date": "2026-03-02",
+    "counterparty": "CINDERMOOR LOGISTICS HOLDINGS INC.",
+    "fund": "Direct Lending Fund I",
+    "facility": "CINDERMOOR REVOLVING CREDIT FACILITY $200MM",
+    "global_amount": "418255.00",
+    "currency": "USD",
+    "activity_type": "Interest",
+    "facility_id_source_raw": "SL-204833",
+    "agent_bank": "Meridian Agency Services LLC",
+    "agent_contact_name": "Dana Whitfield",
+    "agent_email": "loan.ops@meridian-agent.example",
+    "agent_telephone": "+1-555-0142",
+    "notice_comment": "Lender-level allocations for this payment are issued separately by the administrative agent. This notice states the facility total only."
+  }
+}

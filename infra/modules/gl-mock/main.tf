@@ -63,6 +63,25 @@ resource "aws_glue_catalog_table" "gl_entries" {
         { name = "amount", type = "double" },
         { name = "currency", type = "string" },
         { name = "entry_type", type = "string" },
+        # ⚠️ POSITIONAL. LazySimpleSerDe maps CSV columns by position, not by name, so this list and
+        # the header of data/general-ledger/gl-entries.csv must stay in the SAME ORDER. A mismatch
+        # does not error -- Athena returns values under the wrong column names. Only ever APPEND,
+        # and append to both at once. tests/gl_tool/test_seed_columns.py pins the order.
+        #
+        # The fund/portfolio dimension the skills' alias table resolves counterparty labels TO.
+        { name = "fund_code", type = "string" },
+        # When the receivable was EXPECTED, as distinct from when the entry was posted.
+        { name = "expected_value_date", type = "date" },
+        # The identifier columns the facility crosswalk keys on (canonical forms only).
+        { name = "loanx_id", type = "string" },
+        { name = "cusip", type = "string" },
+        { name = "isin", type = "string" },
+        # The activity dimension, in the same vocabulary the notices carry: Interest, Rateset,
+        # Rollover, Commitment Fee, Paydown. Without it the expected side has no answer to "what kind
+        # of movement was this", which is one of the three keys a match is made on (never facility
+        # alone). Free text on this side, deliberately: the ledger is a mock of a system this platform
+        # does not own, and constraining its vocabulary here would be inventing a guarantee.
+        { name = "activity_type", type = "string" },
       ]
       content {
         name = columns.value.name

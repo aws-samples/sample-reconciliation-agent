@@ -1,5 +1,7 @@
 """Tests for the auto-resolve path (composite confidence >= admin threshold)."""
 
+import logging
+
 import boto3
 from moto import mock_aws
 
@@ -9,6 +11,30 @@ from backend.recon_core.cases import CaseStore
 from backend.recon_core.email_policy import build_persisted_draft
 from backend.recon_core.schema import Proposal, ReconItem
 from backend.recon_core.status import CaseStatus
+
+CONTACTS_TABLE = "recon-contacts"
+NOTIFY_CONTACT_ID = "int-ops"
+NOTIFY = "ops@recon.example"
+
+
+class _Templates:
+    """A TemplateStore stand-in for the one test here that needs a draft to exist.
+
+    What the draft SAYS is irrelevant to auto-resolution — only that the case carries one — so this
+    returns a fixed template rather than reaching for the real table.
+    """
+
+    def get(self, *, template_id: str) -> dict:
+        """Return a template with no variables to substitute.
+
+        :param template_id: the id the draft cited; ignored.
+        :returns: a fixed subject/body pair.
+        """
+        return {
+            "subject_template": "Wire reference confirmation",
+            "body_template": "Please confirm.",
+            "variables": [],
+        }
 
 
 def _make_tables():
@@ -51,6 +77,35 @@ def _make_tables():
         AttributeDefinitions=[{"AttributeName": "lesson_id", "AttributeType": "S"}],
         BillingMode="PAY_PER_REQUEST",
     )
+    # The notification recipient lives here, not in an environment variable — auto-resolve names a
+    # contact id and the notifier looks the address up when it sends. Created unconditionally so a test
+    # that only cares about the status transitions does not have to know that.
+    ddb.create_table(
+        TableName=CONTACTS_TABLE,
+        KeySchema=[{"AttributeName": "contact_id", "KeyType": "HASH"}],
+        AttributeDefinitions=[{"AttributeName": "contact_id", "AttributeType": "S"}],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    ddb.Table(CONTACTS_TABLE).put_item(
+        Item={
+            "contact_id": NOTIFY_CONTACT_ID,
+            "display_name": "Reconciliation Operations",
+            "email": NOTIFY,
+            "kind": "internal_notification",
+            "active": True,
+        }
+    )
+
+
+def _notify_env(monkeypatch) -> None:
+    """Configure the auto-resolve notification: a shared mailbox to send FROM and a contact to send TO.
+
+    :param monkeypatch: pytest env patcher.
+    :returns: None.
+    """
+    monkeypatch.setenv("GRAPH_MAILBOX", "shared@recon.example")
+    monkeypatch.setenv("CONTACTS_TABLE", CONTACTS_TABLE)
+    monkeypatch.setenv("NOTIFY_CONTACT_ID", NOTIFY_CONTACT_ID)
 
 
 def _proposed_case(cases: CaseStore, item_id: str = "i-1") -> Proposal:
@@ -61,7 +116,6 @@ def _proposed_case(cases: CaseStore, item_id: str = "i-1") -> Proposal:
     return Proposal(
         item_id=item_id,
         class_id="timing",
-        classification_confidence=0.9,
         classification_reasoning="r",
         resolution="match to bank line 12",
         confidence=0.97,
@@ -120,11 +174,10 @@ def test_get_threshold_parses_and_disables():
 
 @mock_aws
 def test_auto_resolve_sends_graph_email_when_configured(monkeypatch):
-    """With mailbox + recipient set, the notification goes out via the Graph gateway tool."""
+    """With a mailbox and a notify contact set, the notification goes out via the Graph gateway tool."""
     _make_tables()
     monkeypatch.setenv("LESSONS_TABLE", "recon-lessons")
-    monkeypatch.setenv("GRAPH_MAILBOX", "shared@recon.example")
-    monkeypatch.setenv("RECON_NOTIFY_EMAIL", "ops@recon.example")
+    _notify_env(monkeypatch)
     calls: list[tuple[str, dict]] = []
 
     def transport(tool_name: str, arguments: dict) -> dict:
@@ -139,7 +192,8 @@ def test_auto_resolve_sends_graph_email_when_configured(monkeypatch):
     tool_name, args = calls[0]
     assert tool_name == "microsoft-graph___sendSharedMailboxMail"
     assert args["mailboxAddress"] == "shared@recon.example"
-    assert args["message"]["toRecipients"][0]["emailAddress"]["address"] == "ops@recon.example"
+    # The address came out of the contact row; nothing in the environment named it.
+    assert args["message"]["toRecipients"][0]["emailAddress"]["address"] == NOTIFY
     # Marked as automatic in the subject-driving class field.
     assert "(AUTO-RESOLVED)" in args["message"]["body"]["content"]
 
@@ -155,8 +209,7 @@ def test_a_case_carrying_an_email_draft_is_never_auto_resolved(monkeypatch):
     is the operator's signal that the case closed."""
     _make_tables()
     monkeypatch.setenv("LESSONS_TABLE", "recon-lessons")
-    monkeypatch.setenv("GRAPH_MAILBOX", "shared@recon.example")
-    monkeypatch.setenv("RECON_NOTIFY_EMAIL", "ops@recon.example")
+    _notify_env(monkeypatch)
     calls: list[tuple[str, dict]] = []
 
     def transport(tool_name: str, arguments: dict) -> dict:
@@ -166,10 +219,19 @@ def test_a_case_carrying_an_email_draft_is_never_auto_resolved(monkeypatch):
     cases = CaseStore(table="recon-cases", audit="recon-audit")
     prop = _proposed_case(cases)
     prop.confidence = 1.0
+    # Built through the real helper rather than hand-rolled, so a change to the persisted shape
+    # cannot leave this test asserting against a draft the code does not produce.
     prop.proposed_email = build_persisted_draft(
-        email_draft={"subject": "Wire reference confirmation", "body": "Please confirm."}
+        email_draft={
+            "recipient_contact_id": "cp-acme",
+            "template_id": "tpl-wire",
+            "variables": {},
+        },
+        templates=_Templates(),
     )
-    assert maybe_auto_resolve(cases=cases, proposal=prop, threshold=0.5, transport=transport) is False
+    assert (
+        maybe_auto_resolve(cases=cases, proposal=prop, threshold=0.5, transport=transport) is False
+    )
     # Stopped BEFORE the first transition, so the case is still waiting for the analyst.
     assert cases.status("i-1") == CaseStatus.PROPOSED
     assert calls == []
@@ -198,8 +260,7 @@ def test_auto_resolve_email_failure_does_not_block_resolution(monkeypatch):
     """The notification is best-effort on the autonomous path — a send failure still resolves."""
     _make_tables()
     monkeypatch.setenv("LESSONS_TABLE", "recon-lessons")
-    monkeypatch.setenv("GRAPH_MAILBOX", "shared@recon.example")
-    monkeypatch.setenv("RECON_NOTIFY_EMAIL", "ops@recon.example")
+    _notify_env(monkeypatch)
 
     def transport(tool_name: str, arguments: dict) -> dict:
         raise RuntimeError("gateway unreachable")
@@ -208,3 +269,46 @@ def test_auto_resolve_email_failure_does_not_block_resolution(monkeypatch):
     prop = _proposed_case(cases)
     assert maybe_auto_resolve(cases=cases, proposal=prop, threshold=0.95, transport=transport)
     assert cases.status("i-1") == CaseStatus.RESOLVED
+
+
+@mock_aws
+def test_auto_resolve_skips_the_email_when_the_notify_contact_is_deactivated_but_still_resolves(
+    monkeypatch, caplog
+):
+    """Deactivating the notify contact must not quietly stop cases from resolving.
+
+    The recipient is a contact row an operator can deactivate at any time — somebody removes a leaver
+    from the Config tab — so it can stop being valid between one case and the next. The resolution has
+    to survive that, because a case whose evidence cleared the threshold is resolved whether or not
+    anyone was told.
+
+    The log assertion is the other half. Best-effort silence is exactly how "we stopped getting
+    resolution emails last Tuesday" turns into an afternoon of guessing, so the warning has to name the
+    contact id that failed.
+    """
+    _make_tables()
+    monkeypatch.setenv("LESSONS_TABLE", "recon-lessons")
+    _notify_env(monkeypatch)
+    boto3.resource("dynamodb", region_name="us-east-1").Table(CONTACTS_TABLE).update_item(
+        Key={"contact_id": NOTIFY_CONTACT_ID},
+        UpdateExpression="SET active = :f",
+        ExpressionAttributeValues={":f": False},
+    )
+    calls: list[str] = []
+
+    cases = CaseStore(table="recon-cases", audit="recon-audit")
+    prop = _proposed_case(cases)
+    with caplog.at_level(logging.WARNING, logger="backend.recon_core.auto_resolve"):
+        assert maybe_auto_resolve(
+            cases=cases,
+            proposal=prop,
+            threshold=0.95,
+            transport=lambda tool_name, arguments: calls.append(tool_name) or {"content": []},
+        )
+
+    assert cases.status("i-1") == CaseStatus.RESOLVED
+    # Refused before the gateway was touched, not after — nothing was sent anywhere.
+    assert calls == []
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert NOTIFY_CONTACT_ID in messages
+    assert "deactivated" in messages

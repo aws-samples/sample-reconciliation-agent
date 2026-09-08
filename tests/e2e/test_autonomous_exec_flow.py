@@ -80,7 +80,7 @@ def _invoker(action):
 
 def _proposal(confidence, action):
     return Proposal(
-        item_id="idp-1", class_id="document-cross-reference", classification_confidence=0.9,
+        item_id="idp-1", class_id="document-cross-reference",
         classification_reasoning="draw cancellation", resolution="Mark cancelled.",
         confidence=confidence, proposed_action=action,
     )

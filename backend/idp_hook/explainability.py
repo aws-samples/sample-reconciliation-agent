@@ -1,10 +1,15 @@
-"""Aggregation of IDP's per-field extraction confidences into recon's classification signal.
+"""Aggregation of IDP's per-field extraction confidences into one per-notice number.
 
 IDP's Assessment step attaches a per-field confidence to each extracted value and reports it in
 the section result's ``explainability_info``. It does NOT attach a confidence to
-``document_class`` — verified across every live section result in recon-dev — so the composite's
-0.45 classification slot has no source on the harness path and the harness has always scored on
-the renormalized two-signal form. This module supplies that missing signal.
+``document_class`` — verified across every live section result in recon-dev. This module reduces the
+per-field scores to one number describing HOW WELL THE DOCUMENT WAS READ.
+
+**It is not a score of the proposal.** It once fed a weighted confidence composite; that composite is
+gone (proposals now score on evidence completeness, ``backend/recon_core/confidence.py``). What
+remains are the two uses that were always the honest ones: it is stored as the notice's
+``extraction_confidence`` and shown/prompted as context, and :func:`alert_count` lets the gateway
+interceptor REFUSE a ledger write that rests on fields IDP itself doubted.
 
 **Shape (verified against live IDP output).** ``explainability_info`` is a *list* of dicts; each
 dict maps a field name to ``{"confidence": float, "confidence_threshold": float, "geometry": [...]}``.
@@ -16,11 +21,10 @@ field ``confidence: 0.0`` with an all-zero bounding box and a ``null`` value in
 ``inference_result``. Counting those collapses the aggregate to an artifact of how broad the
 document schema is rather than how well the extraction went: across the 18 live sections that
 carry ``explainability_info``, the all-fields mean spans 0.025-0.950 while the extracted-fields
-mean spans 0.933-0.985 (median 0.956). See
-the harness signal + tool-parity design record (D1).
+mean spans 0.933-0.985 (median 0.956).
 
 Nothing here falls back to a fabricated value: a section with no ``explainability_info`` yields
-``None``, and the composite keeps its existing ``None`` renormalization path (D3).
+``None``, and the caller records the absence rather than substituting a number.
 """
 
 from typing import Any, Optional
@@ -107,9 +111,9 @@ def field_confidences(*, explainability_info: Any, inference_result: Any) -> lis
 def extraction_confidence(*, explainability_info: Any, inference_result: Any) -> Optional[float]:
     """Mean per-field confidence over the fields IDP actually extracted a value for.
 
-    This is the value recon feeds into the composite's 0.45 classification slot on the harness
-    path. Returns None — never a fabricated default — when the section carries no explainability
-    data or extracted nothing, so the composite takes its existing renormalized path.
+    This is the value stored as the notice's ``extraction_confidence``. Returns None — never a
+    fabricated default — when the section carries no explainability data or extracted nothing, so
+    the absence is recorded as an absence.
 
     :param explainability_info: the section result's ``explainability_info``.
     :param inference_result: the section's extracted values.
@@ -130,10 +134,11 @@ def extraction_confidence(*, explainability_info: Any, inference_result: Any) ->
 def alert_count(*, explainability_info: Any, inference_result: Any) -> int:
     """Count extracted fields whose confidence is below THEIR OWN ``confidence_threshold``.
 
-    Feeds the composite's 10% ``IDP_ALERT_PENALTY`` — the agent is reasoning over values IDP was
-    itself unsure about. Thresholds are per-field (both 0.8 and 0.9 occur in live output), so this
-    never compares against a global constant. Fields IDP extracted no value for are excluded: an
-    absent optional field is not a data-quality alert (D1/D4).
+    Read by the gateway interceptor, which refuses a ledger write resting on a doubtful extraction
+    -- that is the only consumer, and deliberately so: a count of doubtful fields is a
+    reason to REFUSE a write, not a term to nudge a score with. Thresholds are per-field (both 0.8 and
+    0.9 occur in live output), so this never compares against a global constant. Fields IDP extracted
+    no value for are excluded: an absent optional field is not a data-quality alert.
 
     :param explainability_info: the section result's ``explainability_info``.
     :param inference_result: the section's extracted values.

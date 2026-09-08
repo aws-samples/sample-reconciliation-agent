@@ -1,8 +1,15 @@
 """IDP post-processing hook. IDP invokes this on Step-Function SUCCEEDED with the completion
-event; we map the document to a ReconItem and write it through the normal intake path.
+event; we map the document to a Notice — EVIDENCE on the actual side of the reconciliation — and
+store it in recon-notices.
+
+This hook deliberately does NOT create a reconciliation case. An extracted document is not a
+break; it is one input the deterministic matcher and the agent read when a break already exists
+-- extraction produces evidence, not a case. recon-notices has no DynamoDB stream, so there is no
+path from here to
+cases.open, and that absence is the control — not a flag anyone can flip.
 
 IDP coupling: the inbound invocation (trigger) plus a single READ-ONLY read of IDP's output
-bucket at ingest to embed the extracted field values + page-image locations into the item
+bucket at ingest to embed the extracted field values + page-image locations into the notice
 (user-approved — the detail screen renders these directly, no on-demand IDP call). The recon
 runtime/agent still never reads IDP storage.
 """
@@ -12,60 +19,25 @@ import logging
 import os
 
 from backend.idp_hook.idp_output import IdpOutputReader
-from backend.idp_hook.mapper import idp_event_to_recon_item
-from backend.recon_core.cases import CaseStore
-from backend.recon_core.ddb import ItemStore
+from backend.idp_hook.mapper import idp_event_to_notice
+from backend.recon_core.notices import NoticeStore
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 
-def _redrive_case(item, *, agent_arn: str) -> str:
-    """Re-open + re-investigate a case after a genuine IDP reprocess.
+def handle(event, _context) -> dict:
+    """Map an IDP completion event to a Notice and store it.
 
-    Resets the (possibly terminal) case to PENDING with the new extraction, then, unless it
-    aged out at the reprocess cap, advances PENDING->IN_PROGRESS and dispatches the agent
-    worker — the same round-trip the items stream does on first ingest, done directly here
-    because a MODIFY of an already-open case does not re-open it via tier1 (cases.open is
-    put-if-absent).
+    Re-delivery needs no idempotency guard: ``notice_id`` is deterministic (``idp-<ObjectKey>``)
+    and the put is an unconditional overwrite, so the same event lands on the same row. A genuine
+    reprocess (a new IDP run) simply replaces the stale extraction — there is no case to re-drive.
 
-    :returns: ``"redriven"``, ``"aged"``, or ``"redrive_no_case"`` when no case exists yet.
-    """
-    cases = CaseStore(
-        table=os.environ.get("CASES_TABLE", "recon-cases"),
-        audit=os.environ.get("AUDIT_TABLE", "recon-audit"),
-    )
-    try:
-        cases.status(item.item_id)  # KeyError if the item exists but a case never opened
-    except KeyError:
-        # No case (unusual) — let the normal first-ingest path handle it on the item write.
-        return "redrive_no_case"
-
-    cap = int(os.environ.get("REPROCESS_CAP", "3"))
-    outcome = cases.redrive(item, reprocess_cap=cap)
-    if outcome == "redriven" and agent_arn and os.environ.get("AGENT_WORKER_FUNCTION"):
-        # Lazy import: invoke_agent lives in the tier1 package.
-        from backend.recon_core.status import CaseStatus
-        from backend.tier1.invoke_agent import invoke_recon_agent
-
-        # redrive() already set PENDING; advance PENDING->IN_PROGRESS + dispatch (guarded).
-        if cases.transition("item_id", item.item_id, CaseStatus.IN_PROGRESS, note="IDP reprocess"):
-            invoke_recon_agent(
-                agent_arn=agent_arn, item=item, cases=cases, already_in_progress=True
-            )
-    return outcome
-
-
-def handle(event, _context):
-    """Map the IDP completion event to a ReconItem and write it; re-drive on a genuine reprocess.
-
-    First ingest writes the item (items stream opens + escalates the case). A NEW IDP run of an
-    already-ingested document (distinct ``detail.executionArn``) overwrites the item and
-    re-drives its case to PENDING->IN_PROGRESS — even from a terminal state. A re-delivered
-    identical completion event is a no-op (idempotency preserved).
-
-    Returns ``{"written": n, "redriven": m, "outcome": ...}``. Re-raises unexpected errors so
-    IDP's retry/DLQ engages.
+    :param event: the EventBridge event carrying IDP's Step-Function completion detail.
+    :param _context: the Lambda context (unused).
+    :returns: ``{"written": n, "notice_id": id_or_None}``.
+    :raises Exception: re-raises unexpected errors so IDP's retry/DLQ engages. In particular a
+        document with no extractable notice date raises rather than storing an unindexable row.
     """
     # Log the raw event once — the real IDP shape was undocumented and cost us a silent
     # field-drop; keep this so future shape changes are diagnosable from CloudWatch.
@@ -73,44 +45,33 @@ def handle(event, _context):
 
     detail = event.get("detail", {})
     if detail.get("status") != "SUCCEEDED":
-        return {"written": 0, "redriven": 0, "outcome": "not_succeeded"}
+        return {"written": 0, "notice_id": None}
     output = detail.get("output")
     parsed = json.loads(output) if isinstance(output, str) else (output or {})
     document = parsed.get("document") or parsed  # tolerate either shape
-    domain = os.environ.get("RECON_DOMAIN")  # single deployment domain; None -> "unknown"
-    execution_arn = detail.get("executionArn")  # unique per IDP run — reprocess discriminator
+    execution_arn = detail.get("executionArn")  # the IDP run id, kept for the audit trail
 
-    # Reader is used by the mapper to pull extracted values from IDP output S3 at ingest. If the
-    # bucket isn't configured we still capture high-level info (classification/sections) from the
-    # event itself.
+    # Reader pulls extracted values from IDP output S3 at ingest. Without a reachable bucket we
+    # still capture what the event itself carries (classification/sections).
     reader = IdpOutputReader()
-
-    store = ItemStore(table_name=os.environ.get("ITEMS_TABLE", "recon-items"))
-    item = idp_event_to_recon_item(
-        document, domain=domain, output_reader=reader, execution_arn=execution_arn
-    )
+    # IDP compresses any output too large for Step Functions' 256 KB cap, leaving only a pointer in
+    # the event. Resolve it BEFORE mapping: the stand-in's `sections` is a list of id strings, not
+    # records, and it names neither the output bucket nor the input key. Every succeeded execution in
+    # recon-dev is compressed, so this is the normal path.
+    document = reader.resolve_document(document)
+    notice = idp_event_to_notice(document, output_reader=reader, execution_arn=execution_arn)
 
     # Copy page previews into recon's own assets bucket so the UI serves them same-origin
-    # (best-effort — the ingest never fails on a preview copy).
+    # (best-effort — ingest never fails on a preview copy). This S3 read is the one sanctioned
+    # IDP coupling; see the module docstring.
     assets_bucket = os.environ.get("ASSETS_BUCKET", "")
-    pages = item.attributes.get("idp_pages") or []
-    if assets_bucket and pages:
-        item.attributes["idp_pages"] = reader.copy_pages(
-            pages, dest_bucket=assets_bucket, item_id=item.item_id
+    if assets_bucket and notice.idp_pages:
+        notice.idp_pages = reader.copy_pages(
+            notice.idp_pages, dest_bucket=assets_bucket, item_id=notice.notice_id
         )
 
-    disposition = store.put_and_detect_reprocess(item)
-    if disposition == "created":
-        # First ingest: the items stream opens the case and escalates (unchanged path).
-        logger.info("idp-hook wrote item_id=%s written=1 (created)", item.item_id)
-        return {"written": 1, "redriven": 0, "outcome": "created"}
-    if disposition == "duplicate":
-        # Re-delivered identical completion event — preserve the original idempotency guard.
-        logger.info("idp-hook item_id=%s duplicate event, no-op", item.item_id)
-        return {"written": 0, "redriven": 0, "outcome": "duplicate"}
-
-    # disposition == "reprocessed": item overwritten with the new extraction; re-drive the case.
-    agent_arn = os.environ.get("AGENT_RUNTIME_ARN", "")
-    outcome = _redrive_case(item, agent_arn=agent_arn)
-    logger.info("idp-hook item_id=%s reprocessed, re-drive outcome=%s", item.item_id, outcome)
-    return {"written": 0, "redriven": 1, "outcome": outcome}
+    # os.environ[...] not .get(..., "recon-notices"): a misconfigured hook must fail its invocation
+    # and land in the DLQ, not silently write to a table name that is only right in dev.
+    NoticeStore(table_name=os.environ["NOTICES_TABLE"]).put(notice=notice)
+    logger.info("idp-hook wrote notice_id=%s class=%s", notice.notice_id, notice.notice_class)
+    return {"written": 1, "notice_id": notice.notice_id}

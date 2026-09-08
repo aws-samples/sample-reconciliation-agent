@@ -10,6 +10,10 @@ import {
   type HarnessInfo,
 } from "@/lib/reconApi";
 import { Eyebrow, Panel, Placeholder } from "@/components/recon/ui";
+import { SourceViewer } from "@/components/recon/SourceViewer";
+import { ContactsPanel } from "@/components/recon/ContactsPanel";
+import { TemplatesPanel } from "@/components/recon/TemplatesPanel";
+import { WorkflowTypesPanel } from "@/components/recon/WorkflowTypesPanel";
 
 type PlatformConfigCommentMode = "required" | "optional" | "disapprove-only";
 
@@ -55,14 +59,19 @@ export default function ConfigPage() {
 
   const [source, setSource] = useState<LambdaSourceFile[] | null>(null);
   const [srcError, setSrcError] = useState<string | null>(null);
-  const [active, setActive] = useState(0);
 
   // Tier-2 Runtime agent source (read-only), lazy-loaded when the Runtime backend is selected.
   const [agentSource, setAgentSource] = useState<LambdaSourceFile[] | null>(
     null,
   );
   const [agentSrcErr, setAgentSrcErr] = useState<string | null>(null);
-  const [agentActive, setAgentActive] = useState(0);
+
+  // Egress-gateway interceptor source (read-only). Loaded eagerly, not behind a toggle: the
+  // interceptor runs on every gateway tool call whatever Tier-1 and the backend are set to.
+  const [guardSource, setGuardSource] = useState<LambdaSourceFile[] | null>(
+    null,
+  );
+  const [guardSrcErr, setGuardSrcErr] = useState<string | null>(null);
 
   useEffect(() => {
     getConfig()
@@ -79,6 +88,9 @@ export default function ConfigPage() {
     getLambdaSource()
       .then((f) => setSource(f))
       .catch((e) => setSrcError(String(e)));
+    getLambdaSource("guard")
+      .then((f) => setGuardSource(f))
+      .catch((e) => setGuardSrcErr(String(e)));
   }, []);
 
   // Lazy-load the live harness config when the Harness backend is (or becomes) selected.
@@ -253,49 +265,15 @@ export default function ConfigPage() {
           </p>
         )}
 
-        {/* Tier-1 Lambda source (read-only) — shown inline only while Tier-1 is enabled. */}
+        {/* Tier-1 Lambda source (read-only) — shown inline only while Tier-1 is enabled.
+            Includes classify.py, the rule table that stamps tier1_break_type. */}
         {tier1Enabled && (
-          <div className="mt-6 border-t border-[var(--rc-line)] pt-5">
-            <Eyebrow>Tier-1 Lambda source · read-only</Eyebrow>
-            <div className="mt-3">
-              {srcError ? (
-                <Placeholder kind="error">
-                  Failed to load source — {srcError}
-                </Placeholder>
-              ) : !source ? (
-                <Placeholder kind="loading">◆ loading source…</Placeholder>
-              ) : source.length === 0 ? (
-                <Placeholder kind="empty">
-                  ◇ no source files published
-                </Placeholder>
-              ) : (
-                <div className="overflow-hidden rounded border border-[var(--rc-line)]">
-                  <div className="flex flex-wrap gap-1 border-b border-[var(--rc-line)] px-3 py-2">
-                    {source.map((f, i) => (
-                      <button
-                        key={f.path}
-                        onClick={() => setActive(i)}
-                        className="rc-mono rounded px-3 py-1 text-[11px] tracking-[0.06em]"
-                        style={{
-                          color:
-                            i === active
-                              ? "var(--rc-ink)"
-                              : "var(--rc-ink-faint)",
-                          background:
-                            i === active ? "var(--rc-panel-2)" : "transparent",
-                        }}
-                      >
-                        {f.path}
-                      </button>
-                    ))}
-                  </div>
-                  <pre className="max-h-[520px] overflow-auto bg-[var(--rc-panel-2)] p-4 text-[12px] leading-relaxed text-[var(--rc-ink)]">
-                    <code className="rc-mono">{source[active]?.content}</code>
-                  </pre>
-                </div>
-              )}
-            </div>
-          </div>
+          <SourceViewer
+            title="Tier-1 Lambda source · read-only"
+            files={source}
+            error={srcError}
+            noun="source"
+          />
         )}
       </Panel>
 
@@ -307,11 +285,14 @@ export default function ConfigPage() {
               Auto-resolve threshold
             </div>
             <p className="mt-2 text-[13px] leading-relaxed text-[var(--rc-ink-dim)]">
-              Cases whose <em>computed</em> confidence (classification
-              self-consistency + evidence grounding + model self-report) meets
-              this threshold take the full approve path unattended — email,
-              lesson, <code>RESOLVED</code>. Everything below it stays in the
-              queue for human review.
+              Cases whose <em>computed</em> confidence meets this threshold take
+              the full approve path unattended — email, lesson,{" "}
+              <code>RESOLVED</code>. Everything below it stays in the queue for
+              human review. That number is <em>evidence completeness</em>: the
+              fraction of the matched skill&apos;s required evidence steps whose
+              tool call actually returned data. Nothing the model says about its
+              own confidence feeds it, so the only way to clear the bar is to
+              produce the evidence.
             </p>
           </div>
 
@@ -484,53 +465,12 @@ export default function ConfigPage() {
         {/* Runtime agent source (read-only) — shown when the Runtime backend is selected,
             mirroring the Tier-1 section's inline source viewer. */}
         {agentBackend === "runtime" && (
-          <div className="mt-6 border-t border-[var(--rc-line)] pt-5">
-            <Eyebrow>Runtime agent source · read-only</Eyebrow>
-            <div className="mt-3">
-              {agentSrcErr ? (
-                <Placeholder kind="error">
-                  Failed to load agent source — {agentSrcErr}
-                </Placeholder>
-              ) : !agentSource ? (
-                <Placeholder kind="loading">
-                  ◆ loading agent source…
-                </Placeholder>
-              ) : agentSource.length === 0 ? (
-                <Placeholder kind="empty">
-                  ◇ no agent source published
-                </Placeholder>
-              ) : (
-                <div className="overflow-hidden rounded border border-[var(--rc-line)]">
-                  <div className="flex flex-wrap gap-1 border-b border-[var(--rc-line)] px-3 py-2">
-                    {agentSource.map((f, i) => (
-                      <button
-                        key={f.path}
-                        onClick={() => setAgentActive(i)}
-                        className="rc-mono rounded px-3 py-1 text-[11px] tracking-[0.06em]"
-                        style={{
-                          color:
-                            i === agentActive
-                              ? "var(--rc-ink)"
-                              : "var(--rc-ink-faint)",
-                          background:
-                            i === agentActive
-                              ? "var(--rc-panel-2)"
-                              : "transparent",
-                        }}
-                      >
-                        {f.path}
-                      </button>
-                    ))}
-                  </div>
-                  <pre className="max-h-[520px] overflow-auto bg-[var(--rc-panel-2)] p-4 text-[12px] leading-relaxed text-[var(--rc-ink)]">
-                    <code className="rc-mono">
-                      {agentSource[agentActive]?.content}
-                    </code>
-                  </pre>
-                </div>
-              )}
-            </div>
-          </div>
+          <SourceViewer
+            title="Runtime agent source · read-only"
+            files={agentSource}
+            error={agentSrcErr}
+            noun="agent source"
+          />
         )}
 
         {/* Live AgentCore Harness config — shown only when the Harness backend is selected. */}
@@ -588,6 +528,39 @@ export default function ConfigPage() {
             </div>
           </div>
         )}
+      </Panel>
+
+      {/* --- What may be uploaded, and where each upload goes --- */}
+      <WorkflowTypesPanel />
+
+      {/* --- Who may be emailed, and in what words --- */}
+      <ContactsPanel />
+      <TemplatesPanel />
+
+      {/* --- Egress-gateway write guard (read-only) --- */}
+      <Panel className="rc-rise p-6">
+        <div className="max-w-2xl">
+          <div className="rc-mono text-[15px] font-medium text-[var(--rc-ink)]">
+            Gateway write guard
+          </div>
+          <p className="mt-2 text-[13px] leading-relaxed text-[var(--rc-ink-dim)]">
+            Every tool call the agent makes passes through this REQUEST
+            interceptor on the egress gateway <em>before</em> AgentCore Policy
+            sees it. It refuses a ledger write on two grounds no confidence
+            threshold can express: <strong>provenance</strong> — the reference
+            being written must match the <code>proposed_action</code> persisted
+            on the case — and <strong>extraction confidence</strong> — the write
+            is refused outright when the IDP extraction behind the case flagged
+            any field as low-confidence. Neither is configurable here; this is
+            the deployed code, shown so the guarantee is auditable.
+          </p>
+        </div>
+        <SourceViewer
+          title="Gateway interceptor source · read-only"
+          files={guardSource}
+          error={guardSrcErr}
+          noun="guard source"
+        />
       </Panel>
     </div>
   );

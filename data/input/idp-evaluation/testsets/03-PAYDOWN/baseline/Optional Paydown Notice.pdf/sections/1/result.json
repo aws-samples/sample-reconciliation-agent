@@ -1,0 +1,36 @@
+{
+  "document_class": {
+    "type": "paydown_notice"
+  },
+  "split_document": {
+    "page_indices": [
+      0,
+      1
+    ]
+  },
+  "classification": "paydown_notice",
+  "page_ids": [
+    "1",
+    "2"
+  ],
+  "confidence": 1.0,
+  "inference_result": {
+    "notice_date": "2026-11-07",
+    "notice_date_source_raw": "07-Nov-2026",
+    "value_date": "2026-11-07",
+    "counterparty": "Northwind Manufacturing LLC",
+    "fund": "Evergreen Credit CLO 2020-1, Limited",
+    "facility": "INITIAL TERM LOANS",
+    "reference": "NORTHWIND MANUFACTURING (11/23)",
+    "amount": "842155.20",
+    "global_amount": "512400001.55",
+    "currency": "USD",
+    "activity_type": "Principal Payment",
+    "cusip": "SYN00053G",
+    "agent_bank": "Tarnsmoor Trust Bank, N.A.",
+    "agent_contact_name": "J. HALVERSON",
+    "agent_email": "AGENCY@tarnsmoortrustbank.example",
+    "agent_telephone": "",
+    "notice_comment": "CASH PAYOUT FOR NONCONSENTING LENDERS LENDERS - YOU ARE RECEIVING THIS NOTICE BECAUSE YOU VOTED NOT TO CASHLESS ROLL TO THE NEW DEAL."
+  }
+}
