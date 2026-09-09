@@ -233,3 +233,93 @@ def test_amount_and_global_amount_are_independent() -> None:
     notice = _notice(amount=None, global_amount=Decimal("462150998.05"))
     assert notice.amount is None  # fund-level validation is unavailable, and visibly so
     assert notice.global_amount == Decimal("462150998.05")
+
+
+# --- The embedded per-section extraction, and the one place it yields ------------------------------
+
+
+def _section(*, field_count: int, value: str = "v") -> dict:
+    """Build one embedded section with a given number of scored fields.
+
+    :param field_count: how many field/confidence pairs to generate.
+    :param value: the extracted value to repeat, used to inflate the row's size.
+    :returns: an ``idp_sections`` entry in the shape the mapper writes.
+    """
+    return {
+        "section_id": "1",
+        "classification": "LoanPaymentNotice",
+        "page_ids": [0],
+        "fields": {f"Field{i}": value for i in range(field_count)},
+        "confidences": [
+            {
+                "field": f"Field{i}",
+                "confidence": Decimal("0.95"),
+                "threshold": Decimal("0.8"),
+                "value": value,
+                "extracted": True,
+            }
+            for i in range(field_count)
+        ],
+        "mean_confidence": Decimal("0.95"),
+        "alert_count": 0,
+    }
+
+
+@mock_aws
+def test_the_embedded_sections_round_trip() -> None:
+    """A live 17-field section is ~6 KB, so the ordinary case must simply store and come back."""
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    store.put(notice=_notice(idp_sections=[_section(field_count=17)]))
+    fetched = store.get(notice_id="NTC-0001")
+    assert len(fetched.idp_sections) == 1
+    assert len(fetched.idp_sections[0]["confidences"]) == 17
+    assert fetched.idp_sections[0]["confidences"][0]["confidence"] == Decimal("0.95")
+    assert fetched.idp_sections_omitted is None  # nothing was dropped, and the row says so
+
+
+@mock_aws
+def test_no_sections_is_stored_as_an_empty_list_not_an_absent_attribute() -> None:
+    """Empty is a real answer here — "read, nothing to show" — unlike the class-dependent fields."""
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    store.put(notice=_notice())
+    raw = store.raw(notice_id="NTC-0001")
+    assert raw["idp_sections"] == []
+
+
+@mock_aws
+def test_an_oversized_extraction_still_writes_the_notice_with_the_reason() -> None:
+    """The row feeds the matcher and the interceptor's refusal, so the DISPLAY detail is what yields.
+
+    Failing the put instead would take out reconciliation for this notice to protect a drawer.
+    """
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    # ~500 KB of extracted values: past DynamoDB's 400 KB item ceiling, never mind our budget.
+    store.put(notice=_notice(idp_sections=[_section(field_count=500, value="x" * 500)]))
+    raw = store.raw(notice_id="NTC-0001")
+    assert "idp_sections" not in raw
+    assert "over the" in raw["idp_sections_omitted"]
+    # The two aggregates are separate scalars, so the guard cannot disarm the interceptor.
+    assert raw["confidence_alert_count"] == 0
+    assert raw["extraction_confidence"] == Decimal("0.94")
+
+
+@mock_aws
+def test_an_oversized_extraction_leaves_the_rest_of_the_notice_intact() -> None:
+    """Only `idp_sections` is dropped: everything the matcher reads must survive the trim."""
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    store.put(
+        notice=_notice(
+            reference="WIRE-20260302-EVG",
+            amount=Decimal("9640.18"),
+            idp_sections=[_section(field_count=500, value="x" * 500)],
+        )
+    )
+    fetched = store.get(notice_id="NTC-0001")
+    assert fetched.reference == "WIRE-20260302-EVG"
+    assert fetched.amount == Decimal("9640.18")
+    assert fetched.idp_sections == []  # the model's default, with the reason beside it
+    assert fetched.idp_sections_omitted is not None

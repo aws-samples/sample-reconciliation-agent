@@ -192,6 +192,12 @@ variable "agent_backend_param" {
   default     = ""
 }
 
+variable "agent_model_id_param" {
+  description = "SSM parameter name of the live Tier-2 model selection. Empty means unwired, and the worker keeps using HARNESS_MODEL_ID without attempting a read."
+  type        = string
+  default     = ""
+}
+
 variable "egress_gateway_arn" {
   description = "Egress tools gateway ARN — the harness-backend worker executes the Policy-gated set_draw_status write through it ('' skips the grant)."
   type        = string

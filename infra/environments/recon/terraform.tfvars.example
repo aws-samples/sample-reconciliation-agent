@@ -20,6 +20,13 @@ idp_appsync_api_arn  = "" # arn:aws:appsync:us-east-1:ACCOUNT_ID:apis/API_ID
 idp_input_bucket     = "" # the document pipeline's input bucket, e.g. idp-unified-input-ACCOUNT_ID
 idp_input_bucket_arn = "" # arn:aws:s3:::idp-unified-input-ACCOUNT_ID
 
+# ⚠️ The one that decides whether an uploaded document ever becomes a notice. Recon puts an
+# EventBridge rule on this state machine's SUCCEEDED events and that rule is the ONLY thing that
+# invokes the ingest hook. Leave it empty and uploads still succeed, extraction still completes, and
+# the notices table stays permanently empty with nothing reporting a fault -- so set it whenever
+# idp_input_bucket is set. The suffix is regenerated on every pipeline rebuild; re-read it then.
+idp_state_machine_arn = "" # arn:aws:states:us-east-1:ACCOUNT_ID:stateMachine:PIPELINE-document-processing
+
 # The extraction workflow type the upload dialog opens with. Empty (the default) skips the seed, so
 # the dialog offers no extraction type at all. Set it to the configuration version the document
 # pipeline really has -- read it off the Documents tab's Config version column rather than guessing,

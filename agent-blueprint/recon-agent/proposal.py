@@ -42,4 +42,7 @@ def build_proposal(
         steps=result.steps,
         proposed_action=result.proposed_action,
         proposed_email=result.proposed_email,
+        # Passed through rather than re-derived: the investigator is the only place that saw the
+        # `search_notices` results, and this backend's persist path writes what lands here.
+        notice_search=result.notice_search,
     )

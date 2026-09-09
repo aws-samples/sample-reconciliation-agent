@@ -10,6 +10,8 @@ import { requireReconAdmin } from "@/lib/reconAdmin";
 //   tier1Enabled          — deterministic Tier-1 route on/off (Tier-1 Lambda reads per batch)
 //   autoResolveThreshold  — evidence-completeness threshold for straight-through processing
 //                           (the agent reads it after each proposal); null = disabled ("off").
+//   agentModelId          — which Bedrock model the Tier-2 agent invokes, read per invocation by
+//                           BOTH backends; null = no selection, each uses its deployed default.
 // The recipient allowlist is deliberately NOT here. `counterparty_email_domains` is a GATE and
 // nothing else: it is read by the gateway interceptor, which re-derives the verdict on every send,
 // and by no one else. Publishing it let three other places form an opinion about it -- an amber
@@ -32,8 +34,27 @@ const COMMENT_REQ_PARAM =
   process.env.COMMENT_REQUIREMENT_PARAM ?? "/recon-dev/comment-requirement";
 const AGENT_BACKEND_PARAM =
   process.env.AGENT_BACKEND_PARAM ?? "/recon-dev/agent-backend";
+const AGENT_MODEL_PARAM =
+  process.env.AGENT_MODEL_PARAM ?? "/recon-dev/agent-model-id";
 const COMMENT_MODES = ["required", "optional", "disapprove-only"] as const;
 const AGENT_BACKENDS = ["runtime", "harness"] as const;
+// Selectable Tier-2 model ids, as cross-region inference profiles.
+//
+// KEEP IN SYNC with ALLOWED_MODEL_IDS in backend/recon_core/model_select.py, which enforces the same
+// list when the agent reads the parameter. There is no shared schema layer between the Python runtime
+// and this BFF, so the duplication is deliberate — but an id accepted here and rejected there is a
+// save that appears to work and then silently falls back to the deployed default.
+//
+// The `global.` variants are not a faster tier: they may route the request outside the US, which is a
+// data-residency decision and is invisible in the id. The Config tab labels it as such.
+const AGENT_MODEL_IDS = [
+  "us.anthropic.claude-opus-5",
+  "global.anthropic.claude-opus-5",
+  "us.anthropic.claude-sonnet-5",
+  "global.anthropic.claude-sonnet-5",
+  "us.anthropic.claude-fable-5-1",
+  "global.anthropic.claude-fable-5-1",
+] as const;
 
 function ssm() {
   return new SSMClient({ region: REGION });
@@ -63,14 +84,24 @@ function parseThreshold(raw: string | null): number | null {
 
 export async function GET() {
   try {
-    const [tier1Raw, autoRaw, commentRaw, backendRaw] = await Promise.all([
-      readParam(TIER1_PARAM),
-      readParam(AUTO_RESOLVE_PARAM),
-      readParam(COMMENT_REQ_PARAM),
-      readParam(AGENT_BACKEND_PARAM),
-    ]);
+    const [tier1Raw, autoRaw, commentRaw, backendRaw, modelRaw] =
+      await Promise.all([
+        readParam(TIER1_PARAM),
+        readParam(AUTO_RESOLVE_PARAM),
+        readParam(COMMENT_REQ_PARAM),
+        readParam(AGENT_BACKEND_PARAM),
+        readParam(AGENT_MODEL_PARAM),
+      ]);
     const mode = (commentRaw ?? "disapprove-only").trim().toLowerCase();
     const backend = (backendRaw ?? "runtime").trim().toLowerCase();
+    // No default is substituted for the model, unlike every sibling above, because this route does
+    // not know what the default IS: it is each backend's deploy-time environment variable, and the
+    // two backends could in principle carry different ones. `null` therefore means "no selection
+    // recorded — each backend uses whatever it was deployed with", which is a different statement
+    // from any concrete id and is the state a fresh environment is in. An unrecognised stored value
+    // is also reported as null: the agent will refuse it and fall back, so showing it as the live
+    // selection would be a lie the UI tells on the agent's behalf.
+    const model = (modelRaw ?? "").trim();
     return NextResponse.json({
       tier1Enabled: (tier1Raw ?? "true").trim().toLowerCase() === "true",
       autoResolveThreshold: parseThreshold(autoRaw),
@@ -80,6 +111,10 @@ export async function GET() {
       agentBackend: (AGENT_BACKENDS as readonly string[]).includes(backend)
         ? backend
         : "runtime",
+      agentModelId: (AGENT_MODEL_IDS as readonly string[]).includes(model)
+        ? model
+        : null,
+      agentModelIds: AGENT_MODEL_IDS,
     });
   } catch (err) {
     return NextResponse.json(
@@ -91,8 +126,8 @@ export async function GET() {
 
 export async function PUT(req: Request) {
   // Admin only. Every value written here changes how the platform behaves for everyone — the
-  // auto-resolve threshold decides which cases skip a human entirely, and `agentBackend` swaps the
-  // model runtime under a live queue.
+  // auto-resolve threshold decides which cases skip a human entirely, and `agentBackend` /
+  // `agentModelId` swap the runtime and the model under a live queue.
   const who = await requireReconAdmin(req);
   if ("error" in who) return who.error;
 
@@ -101,6 +136,7 @@ export async function PUT(req: Request) {
     autoResolveThreshold?: number | null;
     commentRequirement?: string;
     agentBackend?: string;
+    agentModelId?: string;
     counterpartyEmailDomains?: unknown;
   };
   // Refused rather than ignored. A UI that round-trips the whole config object would otherwise
@@ -119,11 +155,12 @@ export async function PUT(req: Request) {
   const hasAuto = "autoResolveThreshold" in body;
   const hasComment = typeof body.commentRequirement === "string";
   const hasBackend = typeof body.agentBackend === "string";
-  if (!hasTier1 && !hasAuto && !hasComment && !hasBackend) {
+  const hasModel = typeof body.agentModelId === "string";
+  if (!hasTier1 && !hasAuto && !hasComment && !hasBackend && !hasModel) {
     return NextResponse.json(
       {
         error:
-          "tier1Enabled, autoResolveThreshold, commentRequirement, or agentBackend required",
+          "tier1Enabled, autoResolveThreshold, commentRequirement, agentBackend, or agentModelId required",
       },
       { status: 400 },
     );
@@ -134,6 +171,18 @@ export async function PUT(req: Request) {
   ) {
     return NextResponse.json(
       { error: "agentBackend must be runtime | harness" },
+      { status: 400 },
+    );
+  }
+  // Rejected before any write, and the allowlist is named in the error. An id that reached the
+  // parameter would be refused per invocation by the agent instead, which surfaces as the model
+  // silently not changing rather than as the typo it is.
+  if (
+    hasModel &&
+    !(AGENT_MODEL_IDS as readonly string[]).includes(body.agentModelId!)
+  ) {
+    return NextResponse.json(
+      { error: `agentModelId must be one of: ${AGENT_MODEL_IDS.join(", ")}` },
       { status: 400 },
     );
   }
@@ -214,6 +263,18 @@ export async function PUT(req: Request) {
         ),
       );
     }
+    if (hasModel) {
+      writes.push(
+        ssm().send(
+          new PutParameterCommand({
+            Name: AGENT_MODEL_PARAM,
+            Value: body.agentModelId!,
+            Type: "String",
+            Overwrite: true,
+          }),
+        ),
+      );
+    }
     await Promise.all(writes);
     // The threshold is ENFORCED by AgentCore Policy on the egress gateway, so a non-null
     // change must also rewrite the gated Cedar policies — the SSM value alone is only an
@@ -264,6 +325,7 @@ export async function PUT(req: Request) {
       ...(hasAuto ? { autoResolveThreshold: body.autoResolveThreshold } : {}),
       ...(hasComment ? { commentRequirement: body.commentRequirement } : {}),
       ...(hasBackend ? { agentBackend: body.agentBackend } : {}),
+      ...(hasModel ? { agentModelId: body.agentModelId } : {}),
     });
   } catch (err) {
     return NextResponse.json(

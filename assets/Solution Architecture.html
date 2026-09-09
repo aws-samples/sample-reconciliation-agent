@@ -538,8 +538,8 @@
   <body>
     <h1>Solution Architecture</h1>
     <p class="subtitle">
-      Single-region logical view • Email ingestion → IDP → Agent → Shared
-      services
+      Single-region logical view • Email ingestion → IDP → item store • Agent →
+      Shared services
     </p>
 
     <div class="diagram">
@@ -627,8 +627,24 @@
         ></rect>
         <text x="890" y="176" class="service-text-bold">DynamoDB</text>
 
-        <!-- IDP to AgentCore Runtime -->
-        <path class="arrow" d="M715,230 L715,284"></path>
+        <!-- IDP to the App Database, NOT to the AgentCore Runtime. IDP completion does not invoke
+             the agent: the hook writes a PENDING item and the item's own lifecycle reaches the agent
+             later. An arrow into the Runtime read as "a finished document runs the agent", which is
+             the one coupling the two sides are deliberately not wired for.
+
+             Routed down the corridor between the frontend section (right edge 540) and the Runtime
+             (left edge 590), so it crosses the short Frontend-to-Runtime arrow at y=453. Every
+             vertical corridor in this layout is spanned by one short horizontal arrow, so a single
+             crossing is the floor here, not something to route around. -->
+        <path class="arrow" d="M565,230 L565,552 L531,552"></path>
+        <text
+          x="572"
+          y="252"
+          class="service-text"
+          style="fill: #5f6b7a; text-anchor: start"
+        >
+          ingests item (PENDING)
+        </text>
 
         <!-- ========== USER ACCESS FLOW ========== -->
         <rect class="service-box" x="30" y="352" width="70" height="45"></rect>

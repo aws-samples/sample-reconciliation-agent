@@ -24,7 +24,7 @@ uploaded again. That is already the documented first step of a demo (see data/RE
 leaves the environment in the same state a fresh apply does rather than in a third state of its own.
 
 Usage:
-  AWS_PROFILE=huthmac python3 infra/scripts/reset_runtime_data.py --prefix recon-dev --apply
+  AWS_PROFILE=<your-profile> python3 infra/scripts/reset_runtime_data.py --prefix recon-dev --apply
 
 Without `--apply` it only counts, so the destructive step is never the default.
 """

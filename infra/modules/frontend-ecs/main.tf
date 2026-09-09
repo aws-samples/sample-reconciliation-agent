@@ -393,7 +393,31 @@ resource "aws_iam_role_policy" "ecs_task" {
         Resource = length(compact([var.contacts_table_arn, var.templates_table_arn, var.workflow_types_table_arn])) > 0 ? compact([var.contacts_table_arn, var.templates_table_arn, var.workflow_types_table_arn]) : ["arn:aws:dynamodb:*:*:table/__none__"]
       },
       {
+        # Documents tab: the extracted fields and their confidences, read off recon's OWN notice rows.
+        #
+        # READ ONLY, and deliberately narrower than every other DynamoDB statement in this policy. The
+        # notices table is the ACTUAL side of every reconciliation: the deterministic matcher reads it,
+        # and the gateway interceptor refuses a ledger write on the confidence stored there. A console
+        # task that could write to it could change what reconciliation concluded, from a tab whose only
+        # job is to display. Nothing in the console writes a notice, so the verbs have no caller.
+        #
+        # BatchGetItem as well as GetItem: the table's field columns read a whole page of documents at
+        # once, and a hundred separate GetItems to render one table is not a shape worth granting.
+        #
+        # No index ARN, because there is no index read -- the notice id is derived from the object key
+        # (`idp-<ObjectKey>`), so every lookup here is by primary key.
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:BatchGetItem"]
+        Resource = var.notices_table_arn != "" ? [var.notices_table_arn] : ["arn:aws:dynamodb:*:*:table/__none__"]
+      },
+      {
         # Documents tab: read the document pipeline's GraphQL API as this task role.
+        #
+        # The tracking record ONLY -- statuses, times, page counts. What the extractor read is no longer
+        # fetched from here: it comes off the notice row above. That is why `getFileContents` is absent
+        # below and must stay absent; adding it would put a second implementation of
+        # `backend/idp_hook/explainability.py` back in the console, and the UI must never compute an
+        # extraction confidence differently from the hook the interceptor trusts.
         #
         # Two named query fields, not the API wildcard. `appsync:GraphQL` is field-scoped, and the
         # wildcard would silently include uploadDocument, deleteDocument and every mutation that
@@ -560,19 +584,30 @@ resource "aws_iam_role_policy" "ecs_task" {
         # Lessons <-> AgentCore Memory: the BFF WRITES each analyst decision as a memory event
         # (lessons_learned semantic strategy consolidates them for agent recall), and the
         # Lessons tab READS the consolidated long-term memory records back for display.
+        # It also DELETES records an operator selects — a bad consolidated lesson is otherwise
+        # recalled before every classification with no way to remove it. Admin-gated in the BFF.
+        #
+        # GetMemory is the control-plane read behind the tab's READ-ONLY strategy panel: it returns
+        # the extraction prompt and model that decide what becomes a lesson. Read-only is the whole
+        # point, so no Update/Delete on the memory or its strategies is granted here — Terraform owns
+        # the strategy, and changing its `type` would replace it and drop every extracted record.
         Effect = "Allow"
         Action = [
           "bedrock-agentcore:CreateEvent",
           "bedrock-agentcore:RetrieveMemoryRecords",
           "bedrock-agentcore:ListMemoryRecords",
           "bedrock-agentcore:GetMemoryRecord",
+          "bedrock-agentcore:DeleteMemoryRecord",
+          "bedrock-agentcore:BatchDeleteMemoryRecords",
+          "bedrock-agentcore:GetMemory",
         ]
         Resource = var.recon_memory_arn != "" ? [var.recon_memory_arn, "${var.recon_memory_arn}/*"] : ["*"]
       },
       {
         # Config tab: Tier-1 toggle, auto-resolve threshold, comment mode, agent-backend
-        # selector, and harness config-version pointer (read + write). Path-scoped to the
-        # platform prefix so the two harness/evals params are covered without listing each ARN.
+        # selector, Tier-2 model selection, and harness config-version pointer (read + write).
+        # Path-scoped to the platform prefix so the harness/evals params are covered without
+        # listing each ARN.
         Effect   = "Allow"
         Action   = ["ssm:GetParameter", "ssm:PutParameter"]
         Resource = "arn:aws:ssm:*:*:parameter/${var.name_prefix}/*"
@@ -726,6 +761,10 @@ resource "aws_ecs_task_definition" "frontend" {
       # Documents tab. Server-side only -- the endpoint and the signing credentials never reach the
       # browser, which is why the tab calls a same-origin route instead of this API directly.
       { name = "IDP_APPSYNC_ENDPOINT", value = var.idp_appsync_endpoint },
+      # The same tab's extracted fields, which come off recon's own notice rows rather than back out of
+      # the pipeline's API. Read with no fallback: a defaulted table name would read a table that does
+      # not exist and report an empty extraction as the truth.
+      { name = "NOTICES_TABLE", value = var.notices_table },
       # Counterparty-email draft: which domains an analyst may address. Comma-separated because
       # the Python authority (recon_core.email_policy.parse_domain_allowlist) and its TS mirror
       # both parse that shape — one wire format for both readers.
@@ -751,6 +790,8 @@ resource "aws_ecs_task_definition" "frontend" {
       { name = "COMMENT_REQUIREMENT_PARAM", value = var.comment_requirement_param },
       # Config tab: runtime agent-backend selector (runtime | harness).
       { name = "AGENT_BACKEND_PARAM", value = var.agent_backend_param },
+      # Config tab: live Tier-2 model selection, read and written by the same BFF route.
+      { name = "AGENT_MODEL_PARAM", value = var.agent_model_id_param },
       # Evals tab: config-version pointer + harness/eval log groups for metrics/results/batch.
       { name = "NAME_PREFIX", value = var.name_prefix },
       { name = "HARNESS_CONFIG_VERSION_PARAM", value = var.harness_config_version_param },

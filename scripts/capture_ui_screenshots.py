@@ -163,6 +163,69 @@ def capture_case_detail(page: Page, base: str, out: Path, full_page: bool) -> li
     return written
 
 
+def capture_tier1_resolution(
+    page: Page, base: str, out: Path, full_page: bool, item_id: str
+) -> list[str]:
+    """Capture a deterministically auto-cleared case, framed on its resolution evidence.
+
+    Taken from an item id supplied on the command line rather than discovered from the queue: an
+    auto-cleared case is not IN the queue -- that is the point of it -- and the dashboard's counts
+    do not link to a specific one. So the caller seeds a Tier-1 item during the live QA run and
+    names it here.
+
+    :param page: the page to drive.
+    :param base: deployment base URL.
+    :param out: output directory.
+    :param full_page: capture the whole scroll height rather than the viewport.
+    :param item_id: the auto-cleared item to open.
+    :returns: the filenames written.
+    """
+    page.goto(f"{base}/recon/case/{item_id}", wait_until="domcontentloaded", timeout=45_000)
+    settle(page)
+    if not await_app(page):
+        print("  ! tier-1 case: still at the identity provider", file=sys.stderr)
+        return []
+    # Fail loudly rather than writing a picture of an escalated case labelled as an auto-clear: the
+    # panel is what this capture exists to show, so its absence means the wrong id was passed.
+    heading = page.get_by_text("Tier-1 Deterministic Resolution", exact=False).first
+    if heading.count() == 0:
+        print(f"  ! {item_id} shows no Tier-1 resolution panel; NOT captured", file=sys.stderr)
+        return []
+    heading.scroll_into_view_if_needed()
+    page.screenshot(path=str(out / "10-case-tier1-auto-cleared.png"), full_page=full_page)
+    return ["10-case-tier1-auto-cleared.png"]
+
+
+def capture_config_model(page: Page, base: str, out: Path, full_page: bool) -> list[str]:
+    """Capture the Config screen framed on the Tier-2 model selection.
+
+    A second Config image, because `07-config.png` is the top of that screen and the model row sits
+    below the fold -- so the tab's own screenshot cannot show it without becoming a 3000px scroll
+    that reads as nothing in a README.
+
+    :param page: the page to drive.
+    :param base: deployment base URL.
+    :param out: output directory.
+    :param full_page: capture the whole scroll height rather than the viewport.
+    :returns: the filenames written.
+    """
+    page.goto(f"{base}/recon/config", wait_until="domcontentloaded", timeout=45_000)
+    settle(page)
+    if not await_app(page):
+        print("  ! config model: still at the identity provider", file=sys.stderr)
+        return []
+    # Anchored on the row's own prose rather than the word "Model", which also labels the harness
+    # config's read-only summary further down and would frame the wrong panel.
+    row = page.get_by_text("Which Anthropic model the Tier-2 agent invokes", exact=False).first
+    if row.count() == 0:
+        print("  ! no model-selection row on the Config screen; NOT captured", file=sys.stderr)
+        return []
+    row.scroll_into_view_if_needed()
+    page.wait_for_timeout(800)
+    page.screenshot(path=str(out / "11-config-model-selection.png"), full_page=full_page)
+    return ["11-config-model-selection.png"]
+
+
 def main() -> int:
     """Capture every screen and report what was written.
 
@@ -176,6 +239,11 @@ def main() -> int:
         "--full-page",
         action="store_true",
         help="capture the full scroll height instead of the viewport",
+    )
+    parser.add_argument(
+        "--tier1-case",
+        default=None,
+        help="item id of an auto-cleared case, to capture its Tier-1 resolution evidence",
     )
     args = parser.parse_args()
 
@@ -212,6 +280,15 @@ def main() -> int:
         for name in capture_case_detail(page, base, out, args.full_page):
             print(f"  {name}")
             written.append(name)
+
+        for name in capture_config_model(page, base, out, args.full_page):
+            print(f"  {name}")
+            written.append(name)
+
+        if args.tier1_case:
+            for name in capture_tier1_resolution(page, base, out, args.full_page, args.tier1_case):
+                print(f"  {name}")
+                written.append(name)
 
         page.close()
 

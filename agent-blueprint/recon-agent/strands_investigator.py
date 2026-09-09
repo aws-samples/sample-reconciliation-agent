@@ -294,6 +294,9 @@ def _build_tools(
     # it passes its own list. `None` rather than `[]`: a mutable default would be shared across every
     # call and accumulate another investigation's citations into this one's verdict.
     guidance_results: list | None = None,
+    # The WHOLE ``search_notices`` results, alongside the flattened ``notice_rows`` above. Optional for
+    # the same reason as ``guidance_results``: only the proposal path persists them.
+    notice_results: list | None = None,
 ) -> list:
     """Build the gateway tools as Strands @tool callables that record trace entries.
 
@@ -334,6 +337,14 @@ def _build_tools(
             ledger_rows.extend(result.get("rows", []) or [])
         if name == "search_notices" and isinstance(result, dict):
             notice_rows.extend(result.get("rows", []) or [])
+        # The unflattened result too, one line from its sibling above so the two cannot drift. Kept
+        # SEPARATE from `notice_rows` deliberately: that list is the evidence VERDICT's input, and the
+        # persisted summary de-duplicates and caps rows, so sharing one list would let a display
+        # concern move a verdict that gates a ledger write. No isinstance guard — `matched_on` and a
+        # tool-level `error` live at the result level and are lost by flattening, and
+        # `notice_search_summary` already skips anything that is not (or does not decode to) a dict.
+        if name == "search_notices" and notice_results is not None:
+            notice_results.append(result)
         # Guidance retrievals are accumulated too, and NOT because they are evidence — they are not.
         # They are recorded so the evidence verdict can SEE that a proposal leaned on guidance and
         # refuse it. Without this, citing only a playbook is indistinguishable from citing nothing,
@@ -840,6 +851,9 @@ def make_strands_investigator(
         trace: list[ReasoningStep] = []
         ledger_rows: list[dict] = []
         notice_rows: list[dict] = []
+        # Whole results, for the persisted display record; `notice_rows` above feeds the verdict. See
+        # the accumulation comment in `_build_tools._call` for why these are two lists and not one.
+        notice_results: list[dict] = []
         guidance_results: list[dict] = []
         # Record the skill library made available to the agent (it invokes the relevant one(s)).
         for s in skills:
@@ -850,7 +864,9 @@ def make_strands_investigator(
                     reasoning=f"Skill available: {s['name']}",
                 )
             )
-        tools = _build_tools(tool_caller, trace, ledger_rows, notice_rows, guidance_results)
+        tools = _build_tools(
+            tool_caller, trace, ledger_rows, notice_rows, guidance_results, notice_results
+        )
         agent = (agent_factory or _default_agent_factory)(model_id, system, tools)
         # Run the agentic loop (the agent autonomously calls the read tools), then parse the
         # final JSON proposal from its last message.
@@ -874,7 +890,10 @@ def make_strands_investigator(
         # Through the SHARED helper, so this backend and the harness reach the same verdict for the same
         # investigation. A divergence here would surface only much later, as a gateway denial on
         # whichever backend happened to run the item.
-        from backend.recon_core.proposal_service import judge_cited_evidence
+        from backend.recon_core.proposal_service import (
+            judge_cited_evidence,
+            notice_search_summary,
+        )
 
         verdict, verdict_reason = judge_cited_evidence(
             notice_rows=notice_rows,
@@ -921,6 +940,9 @@ def make_strands_investigator(
             steps=trace,
             proposed_action=proposed_action,
             proposed_email=proposed_email,
+            # Same shared derivation the harness backend uses, so the same investigation can never
+            # show a different set of notices depending on which backend ran the item.
+            notice_search=notice_search_summary(results=notice_results),
         )
 
     return _investigate

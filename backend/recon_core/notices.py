@@ -24,6 +24,7 @@ corroborated by a human here, so MEDIUM is the ceiling. Do not add one back with
 that, because the band a case can reach is a product decision and not a scoring detail.
 """
 
+import json
 from decimal import Decimal
 from typing import Annotated
 
@@ -138,6 +139,56 @@ class Notice(BaseModel):
     # on-demand call into the document pipeline. Empty list, not None: "no previews" is a real
     # answer here, unlike the class-dependent fields above.
     idp_pages: list[dict] = Field(default_factory=list)
+    # Per-section extraction, embedded at ingest for the same reason as `idp_pages` above: the
+    # Documents tab renders what the extractor read WITHOUT an on-demand call into the document
+    # pipeline. Each entry is
+    #   {section_id, classification, page_ids, fields, confidences, mean_confidence, alert_count}
+    # where `fields` is IDP's `inference_result` verbatim and `confidences` is the flattened
+    # `explainability_info` (see backend/idp_hook/explainability.py, which is now the ONLY
+    # implementation of that flattening -- the console used to carry a TypeScript port of it).
+    #
+    # Empty list, not None: "this section carried no explainability data" is a real answer, and the
+    # tab distinguishes it from "no notice row at all".
+    idp_sections: list[dict] = Field(default_factory=list)
+    # Set ONLY when `idp_sections` had to be dropped to keep the row under DynamoDB's item limit --
+    # see NoticeStore.put, which explains why this one place does not fail loudly.
+    idp_sections_omitted: str | None = None
+
+
+# DynamoDB's hard per-item ceiling is 400 KB. The margin covers the difference between our
+# JSON estimate and DynamoDB's own attribute-name-inclusive accounting, which we cannot measure
+# exactly from here.
+MAX_ITEM_BYTES = 380_000
+
+
+def _fit_item(item: dict) -> dict:
+    """Drop ``idp_sections`` if keeping it would push the row past DynamoDB's item limit.
+
+    This is a DELIBERATE exception to the fail-loudly convention, and the only one in this module.
+    Everywhere else a bad value must raise, because a silently-wrong notice is worse than no notice.
+    Here the trade runs the other way: the row feeds the deterministic matcher AND the gateway
+    interceptor's write refusal, so failing the put would take out reconciliation for that notice to
+    protect a display convenience. `idp_sections` is the only unbounded attribute -- its size is a
+    function of somebody else's document schema -- so it is the one that yields.
+
+    The drop is RECORDED rather than silent: ``idp_sections_omitted`` carries the reason, the tab
+    shows a named gap, and no aggregate is affected because ``extraction_confidence`` and
+    ``confidence_alert_count`` are separate scalars.
+
+    :param item: the marshalled DynamoDB item, already ``exclude_none``'d.
+    :returns: the item unchanged when it fits, otherwise a copy without ``idp_sections``.
+    """
+    # `default=str` because the item carries Decimals, which json cannot serialise. This is an
+    # estimate of DynamoDB's own sizing, not a reimplementation of it -- hence the margin above.
+    size = len(json.dumps(item, default=str).encode("utf-8"))
+    if size <= MAX_ITEM_BYTES or "idp_sections" not in item:
+        return item
+    trimmed = {k: v for k, v in item.items() if k != "idp_sections"}
+    trimmed["idp_sections_omitted"] = (
+        f"the extraction was {size} bytes, over the {MAX_ITEM_BYTES}-byte row budget, "
+        "so the per-field detail was not stored"
+    )
+    return trimmed
 
 
 class NoticeStore:
@@ -169,6 +220,7 @@ class NoticeStore:
         item = notice.model_dump(exclude_none=True)
         for key in ALWAYS_STORED:
             item.setdefault(key, None)
+        item = _fit_item(item)
         self._table.put_item(Item=item)
 
     def get(self, *, notice_id: str) -> Notice:

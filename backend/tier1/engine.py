@@ -39,11 +39,19 @@ class Tier1Result:
     ``escalation_reason`` is its mirror image, set only when ``resolved`` is False. One of the two is
     always populated: an escalation that names no reason is indistinguishable from every other
     escalation by the time the agent sees the item.
+
+    ``match`` accompanies ``category`` and records the comparison that actually cleared the item —
+    which attribute was compared, on which two sides, at what values, and by what margin. Without it
+    an auto-cleared case can state only that it cleared, never how, and the case screen has nothing
+    to show a human asked to trust the deterministic tier. Every value is a string because the
+    numbers are ``Decimal``, and a ``Decimal`` neither survives a JSON hop nor should be coerced to
+    a float on the way through one.
     """
 
     resolved: bool
     category: str | None = None
     escalation_reason: str | None = None
+    match: dict[str, str] | None = None
 
 
 def reconcile(item: ReconItem, *, rules: dict) -> Tier1Result:
@@ -73,5 +81,22 @@ def reconcile(item: ReconItem, *, rules: dict) -> Tier1Result:
         # catch: InvalidOperation, which is what ``Decimal("n/a")`` raises, is a subclass of it.
         return Tier1Result(resolved=False, escalation_reason=ESCALATION_UNPARSEABLE_AMOUNT)
     if tolerance_match(a, b, tolerance=tol):
-        return Tier1Result(resolved=True, category=rule["category"])
+        # Record the comparison, not just the verdict. The parsed ``a`` and ``b`` are reported rather
+        # than ``raw_a`` and ``raw_b``: the parsed values are what the arithmetic used, and a raw
+        # string may carry padding or a stray symbol that never entered it, so showing the raw form
+        # would describe a comparison that did not happen.
+        return Tier1Result(
+            resolved=True,
+            category=rule["category"],
+            match={
+                "rule_domain": item.domain,
+                "match_attr": attr,
+                "tolerance": str(tol),
+                "side_a_name": item.sides[0].name,
+                "side_b_name": item.sides[1].name,
+                "side_a_value": str(a),
+                "side_b_value": str(b),
+                "difference": str(abs(a - b)),
+            },
+        )
     return Tier1Result(resolved=False, escalation_reason=ESCALATION_TOLERANCE_MISS)

@@ -250,6 +250,29 @@ def idp_event_to_notice(
     ]
     alert_total = sum(section_alerts) if section_alerts else document.get("ConfidenceAlertCount")
 
+    # Everything the extractor read, per section, for the Documents tab to render directly. The
+    # values and their per-field confidences are already in hand here -- `_read_sections` kept the
+    # flattened records rather than reducing them away -- so this embeds what would otherwise be a
+    # live call back into the pipeline's API for every drawer open.
+    #
+    # `mean_confidence`/`alert_count` are carried PER SECTION and are not the notice-level
+    # `extraction_confidence`/`confidence_alert_count` below: those are the first section's score and
+    # the sum across sections respectively, which is what the interceptor and the prompt read.
+    idp_sections = _decimalize(
+        [
+            {
+                "section_id": s.get("section_id"),
+                "classification": s.get("classification"),
+                "page_ids": s.get("page_indices") or [],
+                "fields": s.get("fields") or {},
+                "confidences": s.get("field_confidences") or [],
+                "mean_confidence": s.get("classification_confidence"),
+                "alert_count": s.get("confidence_alert_count") or 0,
+            }
+            for s in sections
+        ]
+    )
+
     # Parsed before the constructor call because `amount_type` is derived FROM them. Deriving it from
     # the raw `fields` dict instead would re-parse, and the two parses could disagree on a blank.
     amount = _opt_decimal(fields, "amount")
@@ -309,4 +332,5 @@ def idp_event_to_notice(
         source_document=object_key,
         idp_execution_arn=execution_arn or document.get("workflow_execution_arn") or "",
         idp_pages=_decimalize(pages),
+        idp_sections=idp_sections,
     )

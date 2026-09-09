@@ -176,3 +176,55 @@ def test_invoker_failure_reports_query_failed_without_raising():
 
     got = gl_lookup(ITEM, invoker=boom)
     assert got.row is None and got.reason == GL_QUERY_FAILED
+
+
+def test_gl_lookup_records_which_extracted_amount_the_row_settled():
+    """The matched row alone cannot explain the match.
+
+    A document yields several candidate amounts and the row does not know which one it was compared
+    against, so the pairing has to be recorded at the moment the comparison is made or it is gone.
+    """
+    fake = _FakeInvoker([_row("GL-1", "2052425.70")])
+    match = gl_lookup(ITEM, invoker=fake).match
+    assert match is not None
+    assert match["extracted_amount"] == "2052425.7"
+    assert match["ledger_amount"] == "2052425.7"
+    assert match["entry_type"] == "CREDIT"
+    assert match["borrower"] == "CASCADE LOGISTICS HOLDINGS INC."
+    assert match["tolerance"] == "0.05"
+    assert float(match["difference"]) == 0.0
+
+
+def test_gl_lookup_reports_the_margin_when_the_amounts_differ_within_tolerance():
+    """A near-miss inside tolerance is still a match, and the margin is the interesting part."""
+    fake = _FakeInvoker([_row("GL-1", "2052425.73")])
+    match = gl_lookup(ITEM, invoker=fake).match
+    assert match is not None
+    assert round(float(match["difference"]), 4) == 0.03
+
+
+def test_gl_lookup_reports_how_much_it_had_to_choose_between():
+    """How many candidates and rows were in play is what distinguishes a lucky match from a firm one."""
+    fake = _FakeInvoker([_row("GL-1", "2052425.70"), _row("GL-2", "12.00")])
+    match = gl_lookup(ITEM, invoker=fake).match
+    assert match is not None
+    assert match["ledger_rows_returned"] == "2"
+    assert int(match["candidates_considered"]) >= 2
+
+
+def test_every_refuted_lookup_carries_no_match_evidence():
+    """``match`` is present only alongside a row, never alongside a reason."""
+    refuted = [
+        gl_lookup(ITEM, invoker=_FakeInvoker([])),
+        gl_lookup(ITEM, invoker=_FakeInvoker([_row("GL-9", "999.99")])),
+        gl_lookup(ITEM, invoker=_FakeInvoker([_row("GL-1", "2052425.70", entry_type="DEBIT")])),
+        gl_lookup(
+            ITEM,
+            invoker=_FakeInvoker([_row("GL-1", "2052425.70"), _row("GL-2", "400000.00")]),
+        ),
+        gl_lookup(_item(idp_class=None), invoker=_FakeInvoker([_row("GL-1", "2052425.70")])),
+    ]
+    for outcome in refuted:
+        assert outcome.row is None
+        assert outcome.match is None
+        assert outcome.reason is not None

@@ -1,7 +1,10 @@
 ####################################################################################
-# IDP post-processing hook Lambda. IDP invokes this (via its PostProcessingLambdaHookFunctionArn
-# — set separately, out of scope here) on document completion; it writes a Notice to the notices
-# table. Only channel to IDP is this inbound invocation. ARN is a module output.
+# IDP post-processing hook Lambda. Invoked when an IDP document-processing execution succeeds; it
+# writes a Notice to the notices table. Only channel to IDP is this inbound invocation.
+#
+# The trigger is the EventBridge rule at the bottom of this file, owned HERE. IDP's own
+# `PostProcessingLambdaHookFunctionArn` parameter is an alternative registration path and is left
+# unset — see that rule's comment for why relying on it left the hook unreachable.
 #
 # It CANNOT open a reconciliation case, by grant as well as by code: the role has PutItem on the
 # notices table and nothing else, and the notices table has no stream.
@@ -133,9 +136,9 @@ resource "aws_lambda_function" "hook" {
   }
 }
 
-# Allow IDP's EventBridge completion rule to invoke this hook. The rule's exact name is created
-# out-of-band by the IDP stack, so scope to any EventBridge rule in this account/region (source_arn)
-# plus source_account — closing the confused-deputy hole without needing the specific rule ARN.
+# Allow an EventBridge rule to invoke this hook. Scoped to any rule in this account/region rather
+# than to the one below, because a rule created out-of-band (by an IDP deployment that does register
+# a post-processing hook) must keep working — source_account still closes the confused-deputy hole.
 resource "aws_lambda_permission" "eventbridge" {
   statement_id   = "AllowIDPEventBridgeInvoke"
   action         = "lambda:InvokeFunction"
@@ -143,4 +146,55 @@ resource "aws_lambda_permission" "eventbridge" {
   principal      = "events.amazonaws.com"
   source_account = local.account_id
   source_arn     = "arn:aws:events:${local.region}:${local.account_id}:rule/*"
+}
+
+####################################################################################
+# The trigger. RECON owns this rule.
+#
+# The permission above used to be the whole story, on the assumption that "the rule's exact name is
+# created out-of-band by the IDP stack". No such rule ever existed: IDP's
+# `PostProcessingLambdaHookFunctionArn` was empty, its newer deployment registers no post-workflow
+# hook at all, and the hook therefore never fired for a real document. A grant with nothing on the
+# other end of it fails silently and forever — there is no error to notice, only an empty table.
+#
+# Reading the workflow's SUCCEEDED event is the SAME channel the hook was always meant to consume
+# (see `data/input/IDP-EXTRACTION-REQUIREMENTS.md` §7: the completion-event hook and the IDP MCP tool
+# are the only two channels). Owning the rule here adds no coupling; it removes a dependency on a
+# parameter in a stack this repo does not deploy.
+####################################################################################
+resource "aws_cloudwatch_event_rule" "idp_complete" {
+  count       = var.idp_state_machine_arn == "" ? 0 : 1
+  name        = "${var.name_prefix}-idp-document-complete"
+  description = "Invoke the recon IDP hook when an IDP document-processing execution succeeds."
+
+  # Matches only SUCCEEDED, and only this state machine. The hook returns early on any other status
+  # (handler.py), so the filter is belt-and-braces — but an unfiltered rule would also invoke it for
+  # every other Step Functions execution in the account, which is a cost and noise problem rather
+  # than a correctness one.
+  event_pattern = jsonencode({
+    source        = ["aws.states"]
+    "detail-type" = ["Step Functions Execution Status Change"]
+    detail = {
+      stateMachineArn = [var.idp_state_machine_arn]
+      status          = ["SUCCEEDED"]
+    }
+  })
+}
+
+resource "aws_cloudwatch_event_target" "idp_complete" {
+  count = var.idp_state_machine_arn == "" ? 0 : 1
+  rule  = aws_cloudwatch_event_rule.idp_complete[0].name
+  arn   = aws_lambda_function.hook.arn
+
+  # No `input_transformer`: the hook reads `detail.status` and `detail.output` off the raw event, and
+  # a transformer here would have to be kept in step with the mapper by hand.
+  #
+  # A failed invocation is retried by EventBridge and then dropped. That is deliberate for now: the
+  # hook is idempotent (notice_id is `idp-<ObjectKey>` and the put is an unconditional overwrite), so
+  # a reprocess in IDP recovers a lost document. A DLQ here would need its own alarm and drain path
+  # to be worth more than the retry.
+  retry_policy {
+    maximum_event_age_in_seconds = 3600
+    maximum_retry_attempts       = 3
+  }
 }

@@ -224,8 +224,11 @@ resource "aws_lambda_function" "worker" {
       INGRESS_GATEWAY_URL = var.ingress_gateway_url
       INGRESS_TARGET_NAME = var.ingress_target_name
       # Harness backend config (read by backend/harness_agent/worker.py).
-      HARNESS_ARN      = var.harness_arn
-      HARNESS_MODEL_ID = var.harness_model_id
+      HARNESS_ARN = var.harness_arn
+      # Same pairing as AGENT_BACKEND above: the env var is the deploy-time seed, the SSM parameter is
+      # the runtime-switchable source of truth (Config tab), read per invocation.
+      HARNESS_MODEL_ID  = var.harness_model_id
+      AGENT_MODEL_PARAM = var.agent_model_id_param
       # The harness prompt is composed from TWO objects: the shared policy core (same key the
       # runtime container reads, so a backend switch cannot change the agent's instructions) plus
       # this backend's calling contract. See backend/recon_core/prompt_source.py.

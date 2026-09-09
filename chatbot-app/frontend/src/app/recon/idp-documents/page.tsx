@@ -4,8 +4,12 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   listIdpDocuments,
   getIdpDocument,
+  getIdpExtraction,
+  getIdpExtractions,
   listSubmissions,
   listWorkflowTypes,
+  type ExtractedSection,
+  type NoticeExtraction,
   type IdpDocument,
   type IdpDocumentDetail,
   type SubmissionRow,
@@ -14,6 +18,14 @@ import {
 import { DataTable, type DataTableColumn } from "@/components/recon/DataTable";
 import { Eyebrow, Panel, Placeholder } from "@/components/recon/ui";
 import SourceDocumentPreview from "@/components/recon/SourceDocumentPreview";
+import { ExtractedFields } from "@/components/recon/ExtractedFields";
+import {
+  confidenceByField,
+  confidenceText,
+  fieldText,
+  flattenExtractedFields,
+  isBelowThreshold,
+} from "@/lib/idpFields";
 import { UploadDialog } from "@/components/recon/UploadDialog";
 import { useReconSubject } from "@/hooks/useReconSubject";
 
@@ -125,6 +137,16 @@ function DocumentDetail({
 }) {
   const [doc, setDoc] = useState<IdpDocumentDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // A third fetch, independent of the other two. The extracted values are not in the tracking record
+  // `getIdpDocument` returns -- they are embedded on recon's own notice row -- so a document recon
+  // never wrote a notice for must show as a named gap under the fields heading while every other part
+  // of the panel still renders.
+  //
+  // Three states, kept apart: `null` is not loaded yet; a non-null `unavailable` is recon having
+  // nothing to show AND saying why; `sectionsError` is the read itself failing, which is the only one
+  // that is red.
+  const [extraction, setExtraction] = useState<NoticeExtraction | null>(null);
+  const [sectionsError, setSectionsError] = useState<string | null>(null);
 
   useEffect(() => {
     setDoc(null);
@@ -132,6 +154,14 @@ function DocumentDetail({
     getIdpDocument(objectKey)
       .then(setDoc)
       .catch((e) => setError(String(e)));
+  }, [objectKey]);
+
+  useEffect(() => {
+    setExtraction(null);
+    setSectionsError(null);
+    getIdpExtraction(objectKey)
+      .then(setExtraction)
+      .catch((e) => setSectionsError(String(e)));
   }, [objectKey]);
 
   return (
@@ -151,8 +181,12 @@ function DocumentDetail({
         </button>
       </div>
 
-      <div className="grid gap-5 lg:grid-cols-[0.9fr_1.1fr]">
-        <div>
+      <div className="grid items-start gap-5 lg:grid-cols-[0.9fr_1.1fr]">
+        {/* Sticky, because the field list beside it is now long enough to scroll past. The whole claim
+            of this layout is that a doubtful figure can be checked against the page it was read from,
+            and a preview that scrolled away by the time the operator reached the flagged row would
+            leave them scrolling back and forth between the two halves of one comparison. */}
+        <div className="lg:sticky lg:top-4">
           <div className="rc-eyebrow">Source document</div>
           <SourceDocumentPreview objectKey={objectKey} className="mt-2" />
         </div>
@@ -278,6 +312,40 @@ function DocumentDetail({
               </div>
             </>
           )}
+
+          {/* Outside the branch above on purpose: this is a different fetch against a different part of
+              the pipeline, and it is the half of the panel an operator came for. A tracking record that
+              will not load must not take the extracted fields with it. */}
+          <div className="border-t border-[var(--rc-line)] pt-4">
+            <div className="rc-eyebrow">Extracted fields</div>
+            <p className="rc-mono mt-1 text-[11px] leading-relaxed text-[var(--rc-ink-faint)]">
+              What the extractor read, with the confidence it read each field
+              at. Amber means below that field&rsquo;s own threshold — the
+              thresholds differ per field, so a 0.85 can be fine in one row and
+              flagged in the next. The page it came from is on the left.
+            </p>
+            <div className="mt-3">
+              {sectionsError ? (
+                <Placeholder kind="error">
+                  Failed to read what was extracted — {sectionsError}
+                </Placeholder>
+              ) : !extraction ? (
+                <Placeholder kind="loading">
+                  ◆ reading extracted fields…
+                </Placeholder>
+              ) : extraction.unavailable ? (
+                // Dim, not red, and it says why. Recon having no fields for a document is an ordinary
+                // outcome -- an unmapped class, an unreadable notice date -- and dressing it as a
+                // failure would send an operator looking for a broken console instead of a document
+                // the pipeline classified as something reconciliation does not handle.
+                <Placeholder kind="empty">
+                  ◇ {extraction.unavailable}
+                </Placeholder>
+              ) : (
+                <ExtractedFields sections={extraction.sections} />
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -298,6 +366,150 @@ function rollup(files: SubmissionRow["files"]): string {
   return files.length > 0 ? files[0].status : "—";
 }
 
+/**
+ * One extracted-field column: the class it belongs to and the field path within it.
+ *
+ * Keyed by class as well as field because the same field name means different things in two document
+ * classes, and one column holding both would put a facility's paydown amount and a wire's amount under
+ * the same header.
+ */
+interface FieldColumn {
+  id: string;
+  header: string;
+  classification: string;
+  field: string;
+}
+
+/** Class + field, as one column id. Safe against a field path that itself contains a separator. */
+function fieldColumnId({
+  classification,
+  field,
+}: {
+  classification: string;
+  field: string;
+}): string {
+  return `field:${classification} ${field}`;
+}
+
+/**
+ * The columns implied by the extractions loaded so far: one per (document class, field) pair.
+ *
+ * Derived rather than declared for the same reason the queue's are — the fields are whatever the pinned
+ * extraction configuration asks for, and that changes without this code changing. A field that no
+ * loaded document carries gets no column, so the picker lists what is actually in front of the operator
+ * rather than every field the configuration could ever produce.
+ *
+ * @param extractions - the extractions loaded so far, keyed by object key.
+ * @returns the columns, grouped by class in first-seen order, fields in the extractor's own order.
+ */
+function deriveFieldColumns(
+  extractions: Record<string, ExtractedSection[]>,
+): FieldColumn[] {
+  // Insertion-ordered: classes in the order documents were loaded, fields in the order the extractor
+  // emitted them, which is the order its schema declares. Alphabetising would separate a total from the
+  // line items above it that add up to it.
+  const byClass = new Map<string, Set<string>>();
+  for (const sections of Object.values(extractions)) {
+    for (const s of sections) {
+      const classification = s.classification ?? "unclassified";
+      const fields = byClass.get(classification) ?? new Set<string>();
+      for (const f of flattenExtractedFields(s.fields)) fields.add(f.field);
+      // Scored fields the document carried no value for still earn a column: an operator sorting on one
+      // wants to see WHICH documents left it blank, and a column that appeared only once some document
+      // filled it in would hide exactly that.
+      for (const r of s.confidences) fields.add(r.field);
+      byClass.set(classification, fields);
+    }
+  }
+
+  const out: FieldColumn[] = [];
+  for (const [classification, fields] of byClass) {
+    for (const field of fields) {
+      out.push({
+        id: fieldColumnId({ classification, field }),
+        header: `${classification} · ${field}`,
+        classification,
+        field,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * One cell of an extracted-field column: the value and, under it, the confidence.
+ *
+ * Three distinct states, and telling them apart is the point. Nothing loaded for this document yet
+ * reads as a middle dot; loaded and the field is absent reads as an em dash; loaded and present shows
+ * the value with its score. Collapsing the first two would make "press the button" look like "this
+ * document does not have that field".
+ *
+ * @param sections - the document's extraction, or undefined when it has not been loaded.
+ * @param column - the column being rendered.
+ */
+function FieldCell({
+  sections,
+  column,
+}: {
+  sections: ExtractedSection[] | undefined;
+  column: FieldColumn;
+}) {
+  if (!sections)
+    return (
+      <span
+        className="rc-mono text-[12px] text-[var(--rc-ink-faint)]"
+        title="Not loaded — press “Load extracted fields”"
+      >
+        ·
+      </span>
+    );
+
+  const section = sections.find(
+    (s) => (s.classification ?? "unclassified") === column.classification,
+  );
+  if (!section)
+    return (
+      <span
+        className="rc-mono text-[12px] text-[var(--rc-ink-faint)]"
+        title={`This document has no ${column.classification} section`}
+      >
+        —
+      </span>
+    );
+
+  const value = flattenExtractedFields(section.fields).find(
+    (f) => f.field === column.field,
+  )?.value;
+  const score = confidenceByField(section.confidences).get(column.field);
+  const flagged = isBelowThreshold(score);
+  const text = fieldText(value);
+  return (
+    <span className="block min-w-0" title={column.field}>
+      <span
+        className="rc-mono block truncate text-[12px]"
+        style={{
+          color: text === "—" ? "var(--rc-ink-faint)" : "var(--rc-ink)",
+        }}
+      >
+        {text}
+      </span>
+      <span
+        className="rc-mono rc-tnum block text-[10px]"
+        style={{
+          color: flagged ? "var(--rc-amber)" : "var(--rc-ink-faint)",
+        }}
+        title={
+          score?.threshold === undefined || score?.threshold === null
+            ? undefined
+            : `threshold ${score.threshold.toFixed(2)}`
+        }
+      >
+        {confidenceText(score?.confidence)}
+      </span>
+    </span>
+  );
+}
+
 export default function IdpDocumentsPage() {
   const { subject: sub, isAdmin } = useReconSubject();
 
@@ -314,6 +526,17 @@ export default function IdpDocumentsPage() {
   const [showUpload, setShowUpload] = useState(false);
   const [submissions, setSubmissions] = useState<SubmissionRow[] | null>(null);
   const [submissionsError, setSubmissionsError] = useState<string | null>(null);
+  // Extractions, keyed by object key, and only for the documents somebody asked for. Reading these is
+  // one call per document plus one per section against the pipeline's API, so it is not something the
+  // tab does on load — see the button below the table.
+  const [extractions, setExtractions] = useState<
+    Record<string, ExtractedSection[]>
+  >({});
+  const [extractionsFailed, setExtractionsFailed] = useState<
+    Record<string, string>
+  >({});
+  const [loadingFields, setLoadingFields] = useState(false);
+  const [fieldsError, setFieldsError] = useState<string | null>(null);
   // The pins, read from the Config tab's own list. Null until they arrive; an error here leaves the
   // table unfiltered rather than empty, with the reason said out loud — a filter that cannot be built
   // must not be indistinguishable from a filter that matched nothing.
@@ -435,6 +658,47 @@ export default function IdpDocumentsPage() {
 
   /** Rows the pipeline returned that belong to some other deployment's configuration. */
   const hiddenByConfig = (rows?.length ?? 0) - ours.length;
+
+  /** Shown rows whose extraction has not been read yet — what the button below the table will fetch. */
+  const unloadedKeys = useMemo(
+    () =>
+      shown
+        .map((r) => r.ObjectKey)
+        .filter((k): k is string => Boolean(k))
+        .filter((k) => !(k in extractions) && !(k in extractionsFailed)),
+    [shown, extractions, extractionsFailed],
+  );
+
+  /**
+   * Read the extractions for the shown rows that have none yet.
+   *
+   * Bounded to one page of keys per press, matching the route's own ceiling, so an operator who has
+   * loaded five pages presses it more than once rather than firing one request the route refuses.
+   */
+  const loadFields = useCallback(async () => {
+    if (unloadedKeys.length === 0) return;
+    setLoadingFields(true);
+    setFieldsError(null);
+    try {
+      const batch = unloadedKeys.slice(0, 100);
+      const res = await getIdpExtractions(batch);
+      // Merged, not replaced: the operator may have loaded an earlier page's fields already, and
+      // replacing would empty every column they are currently reading.
+      setExtractions((prev) => ({ ...prev, ...res.extractions }));
+      setExtractionsFailed((prev) => ({ ...prev, ...res.failed }));
+    } catch (e) {
+      setFieldsError(String(e));
+    } finally {
+      setLoadingFields(false);
+    }
+  }, [unloadedKeys]);
+
+  // Rebuilt only when an extraction actually arrives, so the identity is stable — `DataTable` re-reads
+  // its stored layout whenever its column set changes, and this set runs to dozens of columns.
+  const fieldColumns = useMemo(
+    () => deriveFieldColumns(extractions),
+    [extractions],
+  );
 
   const columns = useMemo<DataTableColumn<IdpDocument>[]>(
     () => [
@@ -575,8 +839,47 @@ export default function IdpDocumentsPage() {
         ),
         sortValue: (d) => d.HITLReviewedBy ?? d.HITLReviewOwner ?? null,
       },
+      // --- What the extractor read out of each document ---
+      // One column per (class, field) pair among the extractions loaded so far, all hidden by default:
+      // a single notice class runs to seventeen fields and a mixed window to several times that. Empty
+      // until somebody presses "Load extracted fields", because the values are not in the rows this
+      // table already has — they are one call per document against the pipeline's API.
+      ...fieldColumns.map((f) => ({
+        id: f.id,
+        header: f.header,
+        width: "minmax(0,1.3fr)",
+        defaultHidden: true,
+        sortValue: (d: IdpDocument) => {
+          const sections = d.ObjectKey ? extractions[d.ObjectKey] : undefined;
+          if (!sections) return null;
+          const section = sections.find(
+            (s) => (s.classification ?? "unclassified") === f.classification,
+          );
+          if (!section) return null;
+          const value = flattenExtractedFields(section.fields).find(
+            (x) => x.field === f.field,
+          )?.value;
+          if (value === null || value === undefined || value === "")
+            return null;
+          if (typeof value === "number") return value;
+          const text = String(value);
+          // Amounts arrive as strings, so they sort as numbers when they are ones — a text compare would
+          // put "9,000.00" above "10,000.00", which is the wrong answer for the columns most worth
+          // sorting. A comma is stripped first because the extractor keeps the document's own grouping.
+          const asNumber = Number(text.replace(/,/g, ""));
+          return Number.isFinite(asNumber) && text.trim() !== ""
+            ? asNumber
+            : text;
+        },
+        cell: (d: IdpDocument) => (
+          <FieldCell
+            sections={d.ObjectKey ? extractions[d.ObjectKey] : undefined}
+            column={f}
+          />
+        ),
+      })),
     ],
-    [],
+    [fieldColumns, extractions],
   );
 
   const uploadColumns = useMemo<DataTableColumn<SubmissionRow>[]>(
@@ -803,14 +1106,62 @@ export default function IdpDocumentsPage() {
                   ? "Load more"
                   : "All rows loaded"}
             </button>
+            {/* Also an explicit button, and for a heavier reason than Load more: each press is one
+                request per shown document plus one per section of each. The extracted values are not in
+                the rows this table already has, so there is nothing to show until somebody asks. */}
+            <button
+              type="button"
+              className={BUTTON}
+              disabled={loadingFields || unloadedKeys.length === 0}
+              onClick={() => void loadFields()}
+            >
+              {loadingFields
+                ? "Reading fields…"
+                : unloadedKeys.length === 0
+                  ? "Extracted fields loaded"
+                  : `Load extracted fields (${unloadedKeys.length})`}
+            </button>
             <span className="rc-mono text-[11px] text-[var(--rc-ink-dim)]">
               {rows.length} loaded
               {hiddenByConfig > 0
                 ? ` · ${ours.length} on a pinned configuration`
                 : ""}
               {filter.trim() ? ` · ${shown.length} shown` : ""}
+              {fieldColumns.length > 0
+                ? ` · ${fieldColumns.length} extracted-field column${fieldColumns.length === 1 ? "" : "s"} available under Columns`
+                : ""}
             </span>
           </div>
+          {/* The whole call failed — a signing problem or the pipeline's API being unreachable. A key
+              that failed on its own is reported below instead, because those are two different
+              conversations. */}
+          {fieldsError && (
+            <p
+              className="rc-mono text-[11px] leading-relaxed"
+              style={{ color: "var(--rc-amber)" }}
+            >
+              Could not read extracted fields — {fieldsError}
+            </p>
+          )}
+          {/* Named, not silently missing. A document whose result JSON has aged out of the pipeline's
+              storage shows middle dots in every field column, and without this line that is
+              indistinguishable from a button that did nothing. */}
+          {Object.keys(extractionsFailed).length > 0 && (
+            <details className="rc-mono text-[11px] text-[var(--rc-ink-dim)]">
+              <summary className="cursor-pointer">
+                {Object.keys(extractionsFailed).length} document
+                {Object.keys(extractionsFailed).length === 1 ? "" : "s"} whose
+                extracted fields could not be read
+              </summary>
+              <div className="mt-2 space-y-1">
+                {Object.entries(extractionsFailed).map(([key, reason]) => (
+                  <p key={key} style={{ color: "var(--rc-amber)" }}>
+                    {basename(key)} — {reason}
+                  </p>
+                ))}
+              </div>
+            </details>
+          )}
         </>
       )}
 
@@ -818,15 +1169,9 @@ export default function IdpDocumentsPage() {
         <h2 className="rc-display text-[20px] font-black text-[var(--rc-ink)]">
           Recent uploads
         </h2>
-        {/* Why this is a separate table and not more rows in the one above: a knowledge-base upload
-            never reaches the extraction pipeline, and a refused file never reaches a bucket at all.
-            Neither has a row up there, and both are exactly what somebody comes to this tab to
-            check after an upload. */}
-        <p className="rc-mono text-[11px] leading-relaxed text-[var(--rc-ink-dim)]">
-          What recon sent, from its own audit record. Knowledge-base uploads and
-          refused files appear only here — the table above is the extraction
-          pipeline&rsquo;s own view, and neither ever reaches it.
-        </p>
+        {/* Recon's own audit record of every upload it accepted or refused, including the reasons
+            below. Overlaps the table above rather than complementing it — an extraction upload made
+            here appears in both — so nothing in this panel claims otherwise. */}
         {submissionsError && (
           <Placeholder kind="error">
             Failed to read uploads — {submissionsError}

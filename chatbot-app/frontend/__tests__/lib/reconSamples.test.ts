@@ -152,7 +152,13 @@ describe("recon sample payloads", () => {
 });
 
 describe("CUJ scenario coverage", () => {
-  const SCENARIOS = ["Scenario 1", "Scenario 2", "Scenario 3", "Scenario 4"];
+  const SCENARIOS = [
+    "Scenario 1",
+    "Scenario 2",
+    "Scenario 3",
+    "Scenario 4",
+    "Scenario 5",
+  ];
 
   it("every CUJ scenario has a sample", () => {
     for (const prefix of SCENARIOS) {
@@ -167,7 +173,12 @@ describe("CUJ scenario coverage", () => {
     // A ZEROED side and an ABSENT side reach different code paths: two sides (one zero) matches the
     // side_count == 2 rule and routes to record-match-review, while one side matches no rule at all.
     // The CUJ models a break as line items on both sides, one of which is zero, so these must too.
-    for (const prefix of ["Scenario 1", "Scenario 2", "Scenario 4"]) {
+    for (const prefix of [
+      "Scenario 1",
+      "Scenario 2",
+      "Scenario 4",
+      "Scenario 5",
+    ]) {
       const sides = sidesOf(sample(prefix));
       expect(sides, `${prefix} must carry both sides`).toHaveLength(2);
       const zeroed = sides.filter((s) => Number(s.attributes?.amount) === 0);
@@ -209,5 +220,104 @@ describe("CUJ scenario coverage", () => {
         }
       }
     }
+  });
+});
+
+/**
+ * Scenario 5 is the only sample whose resolution is a counterparty email, so it is the only one that
+ * keeps `counterparty-contact-draft` on a live path. Its claim rests on three things outside this file
+ * — the notice's ground truth, the `amount_type` the mapper derives, and what the break-type skill says
+ * to do with it — and each is read here rather than restated, for the reason the header gives: a sample
+ * whose claim has quietly stopped being true makes a broken pipeline look validated.
+ */
+describe("Scenario 5 — the counterparty-email path", () => {
+  const NOTICE_BASELINE = join(
+    REPO,
+    "data/input/idp-evaluation/ground-truth/baseline/02-INTEREST-RATESET",
+    "Interest Notice - Global Amount Only.pdf/sections/1/result.json",
+  );
+  const DERIVE = readFileSync(
+    join(REPO, "backend/recon_core/notice_derive.py"),
+    "utf8",
+  );
+  const SKILL = readFileSync(
+    join(REPO, "agent-blueprint/recon-agent/skills/record-match-review.md"),
+    "utf8",
+  );
+  const DRAFT_SKILL = readFileSync(
+    join(
+      REPO,
+      "agent-blueprint/recon-agent/skills/counterparty-contact-draft.md",
+    ),
+    "utf8",
+  );
+
+  const attributes = () =>
+    sample("Scenario 5").payload.items[0].attributes as Record<string, string>;
+
+  it("matches the notice on the hints the ground truth actually carries", () => {
+    // The sample can only reach that notice through fields the extraction really produces. Read from
+    // the committed baseline, so a re-extraction that drops one of them fails HERE rather than
+    // silently turning the scenario into a no-match.
+    const truth = JSON.parse(readFileSync(NOTICE_BASELINE, "utf8"))
+      .inference_result as Record<string, string>;
+    const attrs = attributes();
+    for (const key of [
+      "counterparty",
+      "fund",
+      "facility",
+      "value_date",
+      "activity_type",
+    ])
+      expect(attrs[key], `Scenario 5's ${key} is not the notice's`).toBe(
+        truth[key],
+      );
+  });
+
+  it("depends on a notice that has NO fund-level amount", () => {
+    // The whole scenario is "the lender's share is absent". A baseline that gained an `amount` would
+    // make the agent able to settle it internally, and the email path would go untested again.
+    const truth = JSON.parse(readFileSync(NOTICE_BASELINE, "utf8"))
+      .inference_result as Record<string, string>;
+    expect(truth.amount, "the notice now carries a fund-level amount").toBe(
+      undefined,
+    );
+    expect(truth.global_amount).toBe("418255.00");
+  });
+
+  it("is the GLOBAL_ONLY branch the mapper actually derives", () => {
+    // Pinned against the derivation, not against the string: `amount_type` is what the skill switches
+    // on, and a rename would leave this sample's expectation describing a branch that no longer exists.
+    expect(DERIVE).toContain('AMOUNT_TYPE_GLOBAL_ONLY = "GLOBAL_ONLY"');
+    expect(sample("Scenario 5").expectation).toContain("GLOBAL_ONLY");
+  });
+
+  it("the break-type skill still forbids computing the share itself", () => {
+    // If this guidance is ever relaxed the agent would compute an allocation and settle the case, and
+    // Scenario 5 would stop being an email scenario — the expectation text would then be wrong.
+    expect(SKILL).toContain("GLOBAL_ONLY");
+    // Whitespace-normalised: the skill is hard-wrapped prose, so the sentence spans a line break and
+    // a literal substring match would fail on a reflow that changed nothing.
+    expect(SKILL.replace(/\s+/g, " ")).toContain(
+      "Do not compute a share yourself — the allocation is the agent bank's to state",
+    );
+  });
+
+  it("the draft skill still routes the ask through submit_proposal's email_draft", () => {
+    // The deliverable is a persisted draft, not a send. If the skill ever grows a send tool this
+    // sample's expectation ("an `email_draft` ... is the resolution") stops describing the outcome.
+    expect(DRAFT_SKILL).toContain("email_draft");
+    expect(DRAFT_SKILL).toContain("You have no send tool");
+  });
+
+  it("is the only sample that claims an email draft", () => {
+    // Not a style rule: if a second sample claimed the path, an operator demoing the email flow would
+    // have no way to know which one reliably produces a draft.
+    const claiming = RECON_SAMPLES.filter((s) =>
+      s.expectation.includes("email_draft"),
+    );
+    expect(claiming.map((s) => s.label)).toEqual([
+      "Scenario 5 — notice states the facility total only",
+    ]);
   });
 });

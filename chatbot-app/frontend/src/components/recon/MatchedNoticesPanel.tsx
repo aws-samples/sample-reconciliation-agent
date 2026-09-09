@@ -1,22 +1,32 @@
 "use client";
 
 import { useState } from "react";
-import type { ReasoningStep } from "@/lib/reconApi";
+import type { NoticeSearch, ReasoningStep } from "@/lib/reconApi";
 import { Eyebrow, Panel } from "@/components/recon/ui";
 import { FieldValue, humanizeKey } from "@/components/recon/IdpDocumentPanel";
 import SourceDocumentPreview from "@/components/recon/SourceDocumentPreview";
 
-// The counterparty notices the investigation actually matched, read back out of the trace.
+// The counterparty notices the investigation actually matched.
 //
-// There is no BFF route behind this and deliberately so: `search_notices` already records its full
-// result set in the trace as JSON, so the rows are on the case payload the page has fetched. Adding a
-// route that re-read the notices table would show the notice as it is NOW, not as the agent saw it —
-// and the panel sits under the evidence table, whose whole claim is what the agent had in front of it.
+// There is no BFF route behind this and deliberately so: the rows are already on the case payload the
+// page has fetched. Adding a route that re-read the notices table would show the notice as it is NOW,
+// not as the agent saw it — and the panel sits under the evidence table, whose whole claim is what the
+// agent had in front of it.
 //
 // It answers the question the Evidence Score raises and cannot itself answer. Three of the score's
 // steps (`fund_alias_match`, `asset_identity_match`, `fund_level_amount_available`) are answered from a
 // notice, so when they report "returned nothing" the next question is always whether a notice was found
 // at all. An empty match is therefore rendered, not hidden: it is the reason for the score.
+//
+// TWO SOURCES, in priority order, and the reason is a bug this panel used to have:
+//   1. `case.notice_search` — the full rows, persisted by the agent. Authoritative.
+//   2. the trace, for cases proposed before (1) existed.
+// (2) can only ever be best-effort. The trace's `tool_output` is a 600-character DISPLAY SUMMARY
+// (`harness_agent.stream._summarize`) and one notice row is larger than that, so what is stored is a
+// JSON *fragment*. This panel used to parse that fragment, swallow the failure, and render "matched no
+// notices" on cases that had matched five — while the evidence table beside it cited those notices by
+// id. A parse failure is therefore now reported AS a parse failure; it is never rendered as an empty
+// result, because those two things lead an analyst to opposite conclusions about the same case.
 
 /** One row as `search_notices` returns it. Every field is optional — the tool omits what a notice class does not carry. */
 interface NoticeRow {
@@ -36,7 +46,7 @@ interface NoticeRow {
   [key: string]: unknown;
 }
 
-/** What the trace records for the `search_notices` calls on one case. */
+/** What this panel renders, from whichever source supplied it. */
 interface NoticeSearchOutcome {
   /** Whether any `search_notices` call is present at all. False on a harness-produced trace. */
   searched: boolean;
@@ -46,6 +56,16 @@ interface NoticeSearchOutcome {
   matchedOn: string[];
   /** A tool-level error string, when a call failed rather than returning rows. */
   error: string | null;
+  /**
+   * A `search_notices` result was recorded but could not be read.
+   *
+   * Only ever true on the trace fallback, where the stored output is a truncated fragment. It is a
+   * SEPARATE field from `error` (a tool that failed) and from an empty `notices` (a tool that matched
+   * nothing) because all three want different copy — conflating the third with this one is the bug.
+   */
+  unreadable: boolean;
+  /** Rows a size guard dropped upstream. Named in the UI so it never implies completeness. */
+  omitted: number;
 }
 
 /**
@@ -73,11 +93,14 @@ const FIELD_ORDER: readonly string[] = [
 ];
 
 /**
- * Pull every notice `search_notices` returned out of a case's trace.
+ * Pull every notice `search_notices` returned out of a case's trace — the FALLBACK source.
  *
- * Defensive about the payload on purpose: `tool_output` is a plain string, and a denied or failed
- * tool call puts an `{"error": ...}` object there instead of rows. A parse failure must not take the
- * page down, so it is treated as "this call contributed nothing".
+ * Only for cases proposed before the agent began persisting `notice_search`. Best-effort by
+ * construction: `tool_output` is capped at 600 characters, so any case whose notices did not fit is
+ * unrecoverable from here. That is reported as `unreadable`, never as an empty result — a parse
+ * failure and "the search matched nothing" are opposite conclusions about the same case.
+ *
+ * A denied or failed tool call puts `{"error": ...}` in that string instead of rows, which does parse.
  *
  * @param steps - the case's reasoning steps; may be undefined on a case with no trace.
  * @returns what the trace says about notice matching.
@@ -92,12 +115,16 @@ export function noticesFromTrace(
   const matchedOn = new Set<string>();
   const seen = new Set<string>();
   let error: string | null = null;
+  let unreadable = false;
 
   for (const call of calls) {
     let parsed: unknown;
     try {
       parsed = JSON.parse(call.tool_output ?? "");
     } catch {
+      // Almost always the 600-char truncation. Recorded rather than swallowed: this call DID return
+      // something, and the panel must not go on to describe the case as having matched nothing.
+      unreadable = true;
       continue;
     }
     if (typeof parsed !== "object" || parsed === null) continue;
@@ -129,6 +156,39 @@ export function noticesFromTrace(
     notices,
     matchedOn: [...matchedOn],
     error,
+    unreadable,
+    // The trace never carried a count of anything dropped upstream, so it cannot report one.
+    omitted: 0,
+  };
+}
+
+/**
+ * Choose the source for the panel: the persisted rows when the case has them, else the trace.
+ *
+ * Split out from the component so the precedence is testable on its own. `notice_search` wins
+ * unconditionally when present — it is the agent's own untruncated record, and mixing the two sources
+ * could show a row from one beside a row the other had lost.
+ *
+ * @param noticeSearch - the case's persisted `notice_search`, absent on older cases.
+ * @param steps - the case's reasoning steps, used only when `noticeSearch` is absent.
+ * @returns the notices to render and how to describe them.
+ */
+export function resolveNoticeSearch({
+  noticeSearch,
+  steps,
+}: {
+  noticeSearch: NoticeSearch | null | undefined;
+  steps: readonly ReasoningStep[] | undefined;
+}): NoticeSearchOutcome {
+  if (!noticeSearch) return noticesFromTrace(steps);
+  return {
+    searched: noticeSearch.searched,
+    notices: (noticeSearch.rows ?? []) as NoticeRow[],
+    matchedOn: noticeSearch.matched_on ?? [],
+    error: noticeSearch.error ?? null,
+    // Persisted rows are stored structured, not as a string, so there is nothing left to fail to parse.
+    unreadable: false,
+    omitted: noticeSearch.omitted ?? 0,
   };
 }
 
@@ -262,19 +322,26 @@ function NoticeRowView({ row, index }: { row: NoticeRow; index: number }) {
 /**
  * The notices this case's investigation matched, listed under the evidence table.
  *
- * Renders nothing when the trace records no `search_notices` call at all — that is normal for a
+ * Renders nothing when no `search_notices` call is recorded at all — that is normal for a
  * harness-produced case, and an empty panel claiming "no notices matched" would misreport a search
  * that never happened as a search that found nothing.
  *
- * @param steps - the case's reasoning steps.
+ * @param noticeSearch - the case's persisted `notice_search`; preferred when present.
+ * @param steps - the case's reasoning steps, the fallback source for older cases.
  */
 export function MatchedNoticesPanel({
+  noticeSearch,
   steps,
 }: {
+  noticeSearch?: NoticeSearch | null;
   steps: readonly ReasoningStep[] | undefined;
 }) {
-  const { searched, notices, matchedOn, error } = noticesFromTrace(steps);
+  const { searched, notices, matchedOn, error, unreadable, omitted } =
+    resolveNoticeSearch({ noticeSearch, steps });
   if (!searched) return null;
+
+  const matchedOnSuffix =
+    matchedOn.length > 0 ? ` (matched on: ${matchedOn.join(", ")})` : "";
 
   return (
     <Panel className="rc-rise min-w-0 p-6">
@@ -291,14 +358,24 @@ export function MatchedNoticesPanel({
             The notice search failed, so this case was investigated without
             notice evidence — {error}
           </p>
+        ) : notices.length === 0 && unreadable ? (
+          // NOT the empty state. The search returned something this page cannot read, and saying
+          // "matched no notices" here is what previously contradicted the evidence table above.
+          <p
+            className="rc-mono text-[12px]"
+            style={{ color: "var(--rc-amber)" }}
+          >
+            The notices this case matched cannot be shown: it was investigated
+            before the agent stored them, and the only remaining copy is the
+            trace summary above, which is truncated mid-record. The evidence
+            table is unaffected — it cites the notices the agent actually read.
+            Re-investigating this case will populate this panel.
+          </p>
         ) : notices.length === 0 ? (
           <p className="rc-mono text-[12px] text-[var(--rc-ink-faint)]">
-            search_notices ran and matched no notices
-            {matchedOn.length > 0
-              ? ` (matched on: ${matchedOn.join(", ")})`
-              : ""}
-            . Any evidence step above that reads from a notice therefore
-            returned nothing.
+            search_notices ran and matched no notices{matchedOnSuffix}. Any
+            evidence step above that reads from a notice therefore returned
+            nothing.
           </p>
         ) : (
           <>
@@ -314,6 +391,17 @@ export function MatchedNoticesPanel({
             {matchedOn.length > 0 && (
               <p className="rc-mono mt-2 text-[11px] text-[var(--rc-ink-faint)]">
                 matched on: {matchedOn.join(", ")}
+              </p>
+            )}
+            {/* A count, not a silent cut: the panel must never imply it is showing everything. */}
+            {omitted > 0 && (
+              <p
+                className="rc-mono mt-2 text-[11px]"
+                style={{ color: "var(--rc-amber)" }}
+              >
+                {omitted} further matched {omitted === 1 ? "notice" : "notices"}{" "}
+                {omitted === 1 ? "is" : "are"} not shown — the search exceeded
+                the number of rows stored per case.
               </p>
             )}
           </>

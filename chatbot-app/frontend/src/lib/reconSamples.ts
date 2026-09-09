@@ -5,11 +5,16 @@
 // matched" is not. The pipeline branch each one drives has not been dropped; it moved into the
 // `expectation` text, where it belongs with the rest of what to expect.
 //
-// ⚠️ Scenarios 1, 2, 3 and 4 all carry TWO sides and therefore reach the SAME Tier-1 classification.
+// ⚠️ Scenarios 1 through 5 all carry TWO sides and therefore reach the SAME Tier-1 classification.
 // `BREAK_TYPE_RULES` partitions on side count and cannot see which side is zero, so it cannot tell a
 // missing booking from missing cash. That is a known limitation, not a bug in these samples, and every
-// one of those four expectations says so — a modal implying a discrimination the platform does not make
+// one of those five expectations says so — a modal implying a discrimination the platform does not make
 // is the single most likely thing for a demo audience to take away wrongly.
+//
+// Only ONE of them resolves by writing to the counterparty: Scenario 5. `counterparty-contact-draft`
+// applies when the missing detail exists nowhere internal, and a GLOBAL_ONLY notice is the corpus's
+// unconditional example of that. Scenario 2 can also produce a draft, but only past its grace period,
+// so it cannot demonstrate the email path on demand.
 //
 // The branches are pinned to what actually decides them:
 //   - auto-clear vs escalate: `backend/tier1/handler.py`'s `_RULES` — domain `cash`, match_attr
@@ -171,6 +176,52 @@ export const RECON_SAMPLES: ReconSamplePayload[] = [
             activity_type: "Rollover",
             facility: "NORTHWIND REVOLVING CREDIT FACILITY",
             value_date: "2026-01-26",
+          },
+        },
+      ],
+    },
+  },
+  // The ONLY sample whose resolution is a counterparty email, and the reason it exists. Every other
+  // scenario settles from internal sources or hands the case to a human: Scenario 2 can produce a
+  // chase, but only once the grace period has elapsed, so it cannot be demonstrated on demand. A
+  // GLOBAL_ONLY notice is unconditional — the missing figure is one the agent bank has to state, so
+  // `counterparty-contact-draft` is the correct outcome on the first run, every run.
+  {
+    label: "Scenario 5 — notice states the facility total only",
+    expectation:
+      "Bank cash arrived and the ledger has nothing against it, so the agent looks for the notice " +
+      "that explains it — and the only candidate carries amount_type=GLOBAL_ONLY: a facility-wide " +
+      "418,255.00 with no lender-level share, because the agent bank issues allocations separately. " +
+      "`record-match-review` forbids computing the share, so fund_level_amount_available is NOT " +
+      "satisfied and confidence caps at MEDIUM. The missing figure exists nowhere internal, which " +
+      "makes an `email_draft` asking the agent bank for the lender-level allocation the resolution — " +
+      "this is the sample that exercises that path. Tier-1 sees the same shape as Scenario 1 and " +
+      "cannot tell them apart: the overlay comes from the NOTICE, not the item.",
+    payload: {
+      domain: "cash",
+      items: [
+        {
+          item_id: "manual-scenario5-1",
+          sides: [
+            {
+              // Not a share of 418,255.00 that anything internal can check — that is the point. A
+              // figure derivable from the notice would let the agent settle it and skip the draft.
+              name: "bank",
+              attributes: { amount: "13275.94", currency: "USD" },
+            },
+            { name: "ledger", attributes: { amount: "0.00", currency: "USD" } },
+          ],
+          source_refs: ["manual-submission"],
+          // The notice carries no `reference` and no fund-level `amount`, so neither can find it. What
+          // is left is the match `record-match-review` prescribes — fund AND date AND activity — plus
+          // the facility, which alone is never sufficient. These values are read off
+          // data/input/02-interest-and-rate-set-notices/Interest Notice - Global Amount Only.pdf.
+          attributes: {
+            activity_type: "Interest",
+            counterparty: "CINDERMOOR LOGISTICS HOLDINGS INC.",
+            facility: "CINDERMOOR REVOLVING CREDIT FACILITY $200MM",
+            fund: "Direct Lending Fund I",
+            value_date: "2026-03-02",
           },
         },
       ],

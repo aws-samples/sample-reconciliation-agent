@@ -24,7 +24,11 @@ from typing import Optional
 
 import boto3
 
-from backend.idp_hook.explainability import alert_count, extraction_confidence
+from backend.idp_hook.explainability import (
+    below_threshold_count,
+    field_confidences,
+    mean_confidence,
+)
 from backend.idp_hook.mapper import split_s3_uri
 
 
@@ -145,6 +149,14 @@ class IdpOutputReader:
                 "fields": inference_result,
                 "output_uri": f"s3://{bucket}/{key}",
             }
+            # Flatten ONCE. Both aggregates below reduce these same records, and the records
+            # themselves are kept and stored on the notice so the Documents tab can render what was
+            # read without calling back into the pipeline. Before this they were walked three times
+            # per section and discarded every time.
+            records = field_confidences(
+                explainability_info=explainability, inference_result=inference_result
+            )
+            rec["field_confidences"] = records
             # IDP's confidence in the EXTRACTION, in preference order. It is stored as the notice's
             # `extraction_confidence` and read as a prompt hint + by the gateway interceptor. It is
             # not an input to any score. Preference order:
@@ -159,18 +171,14 @@ class IdpOutputReader:
             if doc_class.get("confidence") is not None:
                 rec["classification_confidence"] = doc_class["confidence"]
             else:
-                derived = extraction_confidence(
-                    explainability_info=explainability, inference_result=inference_result
-                )
+                derived = mean_confidence(records)
                 if derived is not None:
                     rec["classification_confidence"] = derived
             # Count of extracted fields IDP scored below their OWN confidence_threshold. Derived
             # here rather than read off the event, whose ConfidenceAlertCount field is absent in
             # practice — and an absent count leaves the downstream penalty inert. Always present
             # (0 is meaningful: "checked, nothing flagged").
-            rec["confidence_alert_count"] = alert_count(
-                explainability_info=explainability, inference_result=inference_result
-            )
+            rec["confidence_alert_count"] = below_threshold_count(records)
             out.append(rec)
         return out
 

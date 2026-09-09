@@ -1,20 +1,25 @@
 /**
- * The Matched Notices panel reads its rows out of the trace rather than from a route, so the parse
- * is the part that can silently go wrong: `tool_output` is an untyped string, and a denied tool call
- * puts an error object where the rows would be. Every case below is one shape a real trace produces.
+ * The Matched Notices panel takes its rows from the case's persisted `notice_search` when it has one,
+ * and from the trace otherwise. Both sources are covered here.
  *
- * The distinction the tests care about most is "searched and found nothing" versus "never searched".
- * Collapsing them would make a harness-produced case — which records no `search_notices` call at all
- * — claim that the notice search came back empty, which is a statement about evidence that was never
- * gathered.
+ * The distinctions the tests care about most are the three ways this panel can have no rows to show,
+ * because they lead an analyst to opposite conclusions and the panel used to conflate two of them:
+ *   - never searched          → render nothing (a harness-produced case gathered no notice evidence);
+ *   - searched, matched none  → "matched no notices", which explains the evidence score;
+ *   - searched, unreadable    → say the rows cannot be read. NOT "matched no notices".
+ *
+ * That last case is the regression: the trace's `tool_output` is capped at 600 characters, one notice
+ * row is larger, and the panel parsed the fragment, swallowed the failure, and reported an empty match
+ * on cases whose evidence table cited five notices by id.
  */
 
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
-import type { ReasoningStep } from "@/lib/reconApi";
+import type { NoticeSearch, ReasoningStep } from "@/lib/reconApi";
 import {
   MatchedNoticesPanel,
   noticesFromTrace,
+  resolveNoticeSearch,
 } from "@/components/recon/MatchedNoticesPanel";
 
 // The preview fetches bytes with an auth header and hands them to an <iframe> as an object URL.
@@ -55,6 +60,30 @@ const ROW = {
   fields_unavailable: [],
 };
 
+/** A `search_notices` step whose output was cut at 600 chars, exactly as the trace stores it. */
+function truncatedNoticeCall(): ReasoningStep {
+  const full = JSON.stringify({
+    rows: [{ ...ROW, notes: "z".repeat(800) }],
+    matched_on: ["amount"],
+  });
+  return {
+    ...noticeCall({}),
+    tool_output: full.slice(0, 600),
+  } as ReasoningStep;
+}
+
+/** A persisted `notice_search` attribute, as the agent now writes it. */
+function persisted(overrides: Partial<NoticeSearch> = {}): NoticeSearch {
+  return {
+    searched: true,
+    rows: [ROW],
+    matched_on: ["amount"],
+    error: null,
+    omitted: 0,
+    ...overrides,
+  };
+}
+
 describe("noticesFromTrace", () => {
   it("distinguishes a search that found nothing from no search at all", () => {
     expect(noticesFromTrace(undefined).searched).toBe(false);
@@ -83,15 +112,61 @@ describe("noticesFromTrace", () => {
     expect(out.notices).toHaveLength(2);
   });
 
-  it("survives a tool_output that is not JSON", () => {
+  it("survives a tool_output that is not JSON, and flags it as unreadable", () => {
     const broken = {
       ...noticeCall({}),
       tool_output: "AccessDenied: not JSON at all",
     } as ReasoningStep;
-    // searched is still true: the call happened. It simply contributed no rows.
+    // searched is still true: the call happened. It contributed no rows AND could not be read —
+    // which the panel must report differently from a search that matched nothing.
     const out = noticesFromTrace([broken]);
     expect(out.searched).toBe(true);
     expect(out.notices).toEqual([]);
+    expect(out.unreadable).toBe(true);
+  });
+
+  it("flags the 600-char truncation rather than reporting an empty match", () => {
+    // The exact regression: a real row is larger than the trace's cap, so the stored output is a JSON
+    // fragment. Reporting this as "no notices" contradicted the evidence table on the same screen.
+    const out = noticesFromTrace([truncatedNoticeCall()]);
+    expect(out.searched).toBe(true);
+    expect(out.notices).toEqual([]);
+    expect(out.unreadable).toBe(true);
+  });
+
+  it("does not flag a readable, genuinely empty result as unreadable", () => {
+    const out = noticesFromTrace([noticeCall({ rows: [] })]);
+    expect(out.unreadable).toBe(false);
+  });
+});
+
+describe("resolveNoticeSearch", () => {
+  it("prefers the persisted rows over the trace", () => {
+    // The persisted rows are the agent's own untruncated record. When both exist the trace is ignored
+    // outright rather than merged — a row one source lost would otherwise appear beside one it kept.
+    const out = resolveNoticeSearch({
+      noticeSearch: persisted({ rows: [ROW, { notice_id: "NTC-2" }] }),
+      steps: [truncatedNoticeCall()],
+    });
+    expect(out.notices).toHaveLength(2);
+    expect(out.unreadable).toBe(false);
+  });
+
+  it("falls back to the trace when the case has no persisted rows", () => {
+    const out = resolveNoticeSearch({
+      noticeSearch: null,
+      steps: [noticeCall({ rows: [ROW], matched_on: ["amount"] })],
+    });
+    expect(out.notices).toHaveLength(1);
+    expect(out.matchedOn).toEqual(["amount"]);
+  });
+
+  it("carries the persisted omitted count through", () => {
+    const out = resolveNoticeSearch({
+      noticeSearch: persisted({ omitted: 4 }),
+      steps: undefined,
+    });
+    expect(out.omitted).toBe(4);
   });
 
   it("reports a tool-level error instead of treating it as an empty match", () => {
@@ -186,5 +261,43 @@ describe("MatchedNoticesPanel", () => {
 
     expect(screen.queryByTestId("source-preview")).toBeNull();
     expect(screen.getByText(/records no source document/)).toBeTruthy();
+  });
+
+  it("lists the persisted notices, ignoring a truncated trace on the same case", () => {
+    render(
+      <MatchedNoticesPanel
+        noticeSearch={persisted({
+          rows: [ROW, { notice_id: "NTC-2", notice_class: "paydown_notice" }],
+        })}
+        steps={[truncatedNoticeCall()]}
+      />,
+    );
+
+    expect(screen.getByText("Matched Notices (2)")).toBeTruthy();
+    expect(screen.getByText("NTC-20260302-0001")).toBeTruthy();
+    expect(screen.getByText("NTC-2")).toBeTruthy();
+    expect(screen.queryByText(/matched no notices/)).toBeNull();
+  });
+
+  it("says the rows cannot be read, not that none matched, on a truncated old case", () => {
+    render(<MatchedNoticesPanel steps={[truncatedNoticeCall()]} />);
+
+    expect(screen.getByText(/cannot be shown/)).toBeTruthy();
+    // The claim that broke trust in the panel must not appear.
+    expect(screen.queryByText(/matched no notices/)).toBeNull();
+    // And it must say the evidence table above is still sound.
+    expect(screen.getByText(/evidence table is unaffected/)).toBeTruthy();
+  });
+
+  it("names how many matched notices are not shown when the store capped them", () => {
+    render(
+      <MatchedNoticesPanel
+        noticeSearch={persisted({ omitted: 7 })}
+        steps={undefined}
+      />,
+    );
+    expect(
+      screen.getByText(/7 further matched notices are not shown/),
+    ).toBeTruthy();
   });
 });

@@ -46,6 +46,12 @@ variable "idp_input_bucket_arn" {
   default     = ""
 }
 
+variable "idp_state_machine_arn" {
+  description = "ARN of the document pipeline's Step Functions state machine, from that stack's outputs. Recon owns an EventBridge rule on its SUCCEEDED events, which is what invokes the ingest hook. Empty creates no rule, so nothing reaches the hook and the notices table stays empty -- the state this variable was added after finding in recon-dev."
+  type        = string
+  default     = ""
+}
+
 variable "recon_domain" {
   description = "Recon domain the IDP hook stamps on ingested items."
   type        = string

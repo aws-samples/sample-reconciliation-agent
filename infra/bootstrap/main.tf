@@ -9,7 +9,7 @@
 # BucketAlreadyOwnedByYou rather than adopt it. Import first:
 #
 #   cd infra/bootstrap && terraform init
-#   BUCKET="recon-dev-tfstate-$(aws sts get-caller-identity --profile huthmac \
+#   BUCKET="recon-dev-tfstate-$(aws sts get-caller-identity --profile <your-profile> \
 #     --query Account --output text)"
 #   terraform import aws_s3_bucket.tfstate                                  "$BUCKET"
 #   terraform import aws_s3_bucket_versioning.tfstate                       "$BUCKET"

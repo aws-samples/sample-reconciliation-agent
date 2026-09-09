@@ -1,5 +1,5 @@
 output "idp_hook_function_arn" {
-  description = "Set this as IDP's PostProcessingLambdaHookFunctionArn (IDP-side, separate config)."
+  description = "The ingest hook. Invoked by this stack's own EventBridge rule when idp_state_machine_arn is set; only needs wiring on the IDP side when it is not."
   value       = module.idp_hook.hook_function_arn
 }
 
@@ -20,7 +20,11 @@ output "okta_redirect_uri_to_register" {
 output "post_deploy_checklist" {
   description = "Out-of-band steps Terraform cannot perform. Review after every apply."
   value = compact([
-    "IDP: set PostProcessingLambdaHookFunctionArn = ${module.idp_hook.hook_function_arn}",
+    # Listed only when this stack has NOT been told which state machine to watch. With
+    # idp_state_machine_arn set, the rule in the idp-hook module is the trigger and the IDP-side hook
+    # setting must stay unset -- both would fire the hook on the same document. Telling an operator to
+    # set it unconditionally is how the platform ends up ingesting every notice twice.
+    var.idp_state_machine_arn != "" ? "" : "IDP: nothing invokes the ingest hook. Either set idp_state_machine_arn to the document-processing state machine (preferred -- this stack then owns the rule), or set IDP's PostProcessingLambdaHookFunctionArn = ${module.idp_hook.hook_function_arn}. Until one of the two is done, uploads complete and the notices table stays empty with no error anywhere.",
     var.auth_provider != "okta" ? "" : "Okta: add '${module.frontend.okta_redirect_uri_to_register}' to the OIDC app's Sign-in redirect URIs (and 'https://${module.frontend.distribution_domain}' to Sign-out redirect URIs).",
     var.auth_provider != "okta" || module.frontend.okta_redirect_uri_is_pinned ? "" : "Okta: the callback URL above is DERIVED from the current CloudFront domain and will change if the distribution is recreated, breaking login. Pin it by setting the okta_redirect_uri variable to that value.",
   ])

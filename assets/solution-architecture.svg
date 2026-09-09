@@ -260,9 +260,6 @@
         ></rect>
         <text x="890" y="176" class="service-text-bold">DynamoDB</text>
 
-        <!-- IDP to AgentCore Runtime -->
-        <path class="arrow" d="M715,230 L715,284"></path>
-
         <!-- ========== USER ACCESS FLOW ========== -->
         <rect class="service-box" x="30" y="352" width="70" height="45"></rect>
         <text x="65" y="378" class="service-text-bold">User</text>

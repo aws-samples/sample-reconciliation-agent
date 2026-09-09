@@ -6,7 +6,7 @@ per-session microVM — no container, no orchestration code). A/B-selectable aga
 container runtime via the `agent_backend` Terraform variable + the `AGENT_BACKEND` env on the
 agent-worker Lambda.
 
-## Task 1 spike findings (2026-07-23, account `0264…8683` / profile `huthmac` / us-east-1)
+## Task 1 spike findings (2026-07-23, us-east-1)
 
 Run `python infra/scripts/spike_harness.py` (safe, read-only) to reproduce.
 

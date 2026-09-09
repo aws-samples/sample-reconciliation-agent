@@ -5,10 +5,16 @@
  * session is gone — the auth wrapper's `expired` listener, its "Sign in again" button, and the
  * 401 backstop in `reconFetch`.
  *
- * Why a top-level redirect and not silent renew:
+ * This is the FALLBACK, not the first response to an expiring session: `okta-renew.ts` renews
+ * silently with the refresh token, and this module is where the app lands when that is impossible
+ * or was refused.
  *
- * `@okta/okta-auth-js` renews tokens by loading the provider's /authorize endpoint in a hidden
- * iframe (`prompt=none`). That never worked here and never can:
+ * Why a top-level redirect and not the SDK's own silent renew:
+ *
+ * `@okta/okta-auth-js` has two renewal mechanisms and picks between them by whether a refresh token
+ * is in storage. The refresh-token one is a POST to /token, and that is the one `okta-renew.ts`
+ * uses. The other loads the provider's /authorize endpoint in a hidden iframe (`prompt=none`), and
+ * that one never worked here and never can:
  *
  *  1. The CloudFront CSP is `default-src 'self'` with no `frame-src`, so the browser refuses to
  *     load the frame. No postMessage ever arrives and the SDK waits out its full 120 s timeout —
@@ -22,7 +28,8 @@
  * is the correct outcome. The cost is a full page load, and `originalUri` puts the user back on
  * the page they were on.
  *
- * Silent renew is switched off in the SDK to match — see `getOktaInstance` in OktaAuthWrapper.
+ * `autoRenew` stays off in the SDK so the iframe path is unreachable — see
+ * `oktaTokenManagerOptions` for why that is what enforces it.
  */
 
 const PROVIDER = process.env.NEXT_PUBLIC_AUTH_PROVIDER ?? "entra";
@@ -115,11 +122,13 @@ async function oktaReauth(originalUri: string): Promise<boolean> {
  * @param originalUri absolute URL to return to once sign-in completes.
  */
 async function entraReauth(originalUri: string): Promise<boolean> {
-  const [{ PublicClientApplication }, { msalConfig, HAS_ENTRA_CONFIG, tokenRequest }] =
-    await Promise.all([
-      import("@azure/msal-browser"),
-      import("@/lib/msal-config"),
-    ]);
+  const [
+    { PublicClientApplication },
+    { msalConfig, HAS_ENTRA_CONFIG, tokenRequest },
+  ] = await Promise.all([
+    import("@azure/msal-browser"),
+    import("@/lib/msal-config"),
+  ]);
   if (!HAS_ENTRA_CONFIG) return false;
 
   const w = window as unknown as {
@@ -129,7 +138,10 @@ async function entraReauth(originalUri: string): Promise<boolean> {
   w.__msal_instance = instance;
 
   // MSAL's equivalent of Okta's originalUri.
-  await instance.loginRedirect({ ...tokenRequest, redirectStartPage: originalUri });
+  await instance.loginRedirect({
+    ...tokenRequest,
+    redirectStartPage: originalUri,
+  });
   return true;
 }
 

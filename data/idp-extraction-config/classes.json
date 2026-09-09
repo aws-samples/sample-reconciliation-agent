@@ -1,0 +1,909 @@
+[
+  {
+    "$id": "borrowing_notice",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "An agent-bank notice telling a lender that a borrowing (drawdown) has occurred or will occur on a facility, stating the lender's share of the new advance alongside the facility-wide total. Look for a drawdown or borrowing activity label, a new-contract or current-contract block with rate components, and an unfunded commitment before/after pair. Distinguish from a paydown notice by direction: a borrowing increases the outstanding balance. IMPORTANT: many agent banks print these on a template titled `Activity Memo` with the real activity named in a banner line below it, such as `*** Prime Borrowing ***` or `*** LIBOR Drawdown ***`. Classify by the banner, not the template title -- a document headed `Activity Memo` that announces a borrowing on a single facility is a `borrowing_notice`, not an `activity_memo`.",
+    "properties": {
+      "activity_type": {
+        "description": "The source document's OWN word for what it reports, copied as printed rather than mapped to a standard vocabulary: `Prime Borrowing`, `Commitment Fee`, `Interest`, `Rollover`, `Mandatory Paydown`. Usually the activity or transaction-type label, or the notice's own title. Give the ACTIVITY ALONE: strip any leading interest-rate option, tenor or currency the label is prefixed with, because those describe pricing rather than activity -- a description reading `Term SOFR 3 Month Principal Payment` yields `Principal Payment`, and `USD Loan Repricing for the Deal X/Decrease` yields `Repricing`. Never include a deal name, facility name or amount here.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_bank": {
+        "description": "The institution SENDING the notice -- the administrative agent, on the letterhead or in the `From:` block. Not the borrower and not the recipient fund. Copy as printed, including the legal suffix.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_contact_name": {
+        "description": "The named person or desk at the AGENT BANK -- the sender's contact, in the letterhead, signature block, footer or a `Contact:` line (`Delia Cranmore`, `AGENCY SERVICES`). A team or desk name is a valid value where no individual is named. LOOK AT THE BOTTOM OF THE PAGE FIRST: these notices carry the agent's contact on a `Contact:` line or in a closing block after the figures, frequently as initial and surname (`T. OKAFOR`, `MICHAEL REED`). Prefer that over the `ATTN:` line of the recipient's address block, which names the fund's own staff (`PORTFOLIO ADMIN`, `Fee Administration`) rather than the sender's -- but where `ATTN:` holds the only personal name on the page, use it rather than leaving the field empty.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_email": {
+        "description": "The agent bank's contact email address, verbatim, with the printed capitalisation kept as-is. Do not invent a domain. This is often in a mail header at the very top of the page rather than in a contact block -- `Mail Sent From:`, `Message Originated From:`, `From:` and `Sender:` lines all carry it, and all count: take it. A `Contact:` line further down that pairs a name with an address is equally valid. Only omit the key when the page shows no email address at all.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "agent_telephone": {
+        "description": "The agent bank's contact telephone number, exactly as printed including any country code, spaces, dots or dashes (`212-555-0100`, `+1-555-0177`).",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "amount": {
+        "description": "The FUND-ATTRIBUTABLE amount only -- the recipient's share. Agent notices print a facility-wide total and the recipient's share side by side, typically labelled `Global Amount` and `Your Share`; this field is `Your Share`. If the document prints ONLY a facility-wide total and no recipient share, OMIT this key entirely and put the total in `global_amount` -- do not fall back to the global figure here. Emitting a facility-wide total as `amount` makes the reconciliation compare the wrong two numbers. Emit as a plain decimal number with no thousands separators, no currency symbol and no parentheses: `67,900.00` becomes `67900.00`.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "NUMERIC_EXACT"
+      },
+      "counterparty": {
+        "description": "The borrower or issuer the notice is about -- the obligor named on the deal, NOT the fund receiving the notice and NOT the agent bank sending it. Usually printed against a label such as `Borrower:`, `Issuer:` or `Deal:`. Copy the name as printed, including its legal suffix. Together with `notice_date` this is the platform's index key, so it matters more than any other field on the page.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "currency": {
+        "description": "The ISO 4217 three-letter code for the currency the amounts are denominated in (`USD`, `EUR`). Convert a symbol or a spelled-out name to the code.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "facility": {
+        "description": "The credit facility or tranche the notice concerns, as named on the document (`2023 Delayed Draw`, `USD 450M Revolving Credit Facility`, `TERM LOAN A`, `INITIAL TERM LOANS`). The descriptive name, not the id -- the id goes in `facility_id_source_raw`. NOT the interest-rate option: `Term SOFR 3 Month`, `Base Rate`, `LIBOR 1 Month` and `Prime` name how the loan is priced, not which facility it is, and a notice normally prints both. The facility is the loan itself -- a term loan, revolver or delayed-draw tranche -- and is often on the `Re:` or `Deal:` line after the borrower name rather than on the description or rate line.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "fund": {
+        "description": "The fund or portfolio the notice concerns -- the lender side, as distinct from `counterparty`, which is the borrower. PREFER AN EXPLICITLY LABELLED VALUE: when the document carries a `Portfolio:`, `Fund:`, `Lender:` or `Investor:` label, take that value verbatim, even where it is a short internal name (`Senior Credit Fund`, `DL Fund II`) and a longer legal entity is named elsewhere on the page. Only when no such label exists fall back to the addressee on the `TO:` line or in the address block. The labelled value is the one the platform holds; the addressee is often the same fund's registered legal name (`HARBORLIGHT SENIOR LOAN FUND LP`) and does not match. Never a servicing platform, vendor or software name.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "global_amount": {
+        "description": "The facility-wide total, typically labelled `Global Amount`, `Global Prime Borrowing` or `Total Facility Amount`. Never the recipient's share -- that is `amount`. Emit as a plain decimal number with no thousands separators, no currency symbol and no parentheses: `67,900.00` becomes `67900.00`.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "NUMERIC_EXACT"
+      },
+      "notice_comment": {
+        "description": "Free-text remarks, notes or comments the notice carries, gathered into one string in document order. Includes the producing office, run-date footers and any explanatory paragraph. Emit an empty string when the document has a remarks area that is blank; omit the key when it has no remarks area at all.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "LLM"
+      },
+      "notice_date": {
+        "description": "The date the agent bank issued this notice, as printed on the document. Normalise to ISO 8601 `YYYY-MM-DD` regardless of how the document prints it (`2/2/2026`, `02-Feb-2026` and `February 2, 2026` all become `2026-02-02`). This field and `counterparty` are the two the reconciliation platform indexes on; prioritise them above everything else. If the document prints only an effective or value date and no issue date, leave this absent and populate `value_date`.",
+        "format": "date",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "notice_date_source_raw": {
+        "description": "The notice date exactly as printed on the document, before any normalisation, including its original separators and month spelling (`2/2/2026`, `17-Nov-2026`). Copy the characters verbatim; do not reformat, reorder or expand them.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "value_date": {
+        "description": "The date the cash actually moves or the rate takes effect -- the document's effective date, settlement date or payment date. Normalise to ISO 8601 `YYYY-MM-DD` regardless of how the document prints it (`2/2/2026`, `02-Feb-2026` and `February 2, 2026` all become `2026-02-02`). Often equal to `notice_date`; emit both when both are printed, because the platform falls back to this one.",
+        "format": "date",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      }
+    },
+    "type": "object",
+    "x-aws-idp-document-type": "borrowing_notice"
+  },
+  {
+    "$id": "interest_rate_set_notice",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "An agent-bank notice that both sets a new interest rate AND reports an interest payment on the same document -- rate components (base rate, spread, all-in rate) together with a cash interest amount due. Cash moves. Distinguish from `rollover_rate_set_notice`, which sets a rate for a new period WITHOUT an accompanying payment: that difference decides whether cash was expected at all, so do not merge the two. A banner reading `****** Interest Payment ******` puts the document here even when the amount columns show only a facility-wide `Global Amount` and no `Your Share`: a missing share column means the share was not disclosed, not that no payment was made. Likewise, the word `Rollover` appearing inside a rate description (`Term SOFR Rollover Interest`) names the rate basis, not the document type -- it does not make this a rollover notice.",
+    "properties": {
+      "activity_type": {
+        "description": "The source document's OWN word for what it reports, copied as printed rather than mapped to a standard vocabulary: `Prime Borrowing`, `Commitment Fee`, `Interest`, `Rollover`, `Mandatory Paydown`. Usually the activity or transaction-type label, or the notice's own title. Give the ACTIVITY ALONE: strip any leading interest-rate option, tenor or currency the label is prefixed with, because those describe pricing rather than activity -- a description reading `Term SOFR 3 Month Principal Payment` yields `Principal Payment`, and `USD Loan Repricing for the Deal X/Decrease` yields `Repricing`. Never include a deal name, facility name or amount here.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_bank": {
+        "description": "The institution SENDING the notice -- the administrative agent, on the letterhead or in the `From:` block. Not the borrower and not the recipient fund. Copy as printed, including the legal suffix.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_contact_name": {
+        "description": "The named person or desk at the AGENT BANK -- the sender's contact, in the letterhead, signature block, footer or a `Contact:` line (`Delia Cranmore`, `AGENCY SERVICES`). A team or desk name is a valid value where no individual is named. LOOK AT THE BOTTOM OF THE PAGE FIRST: these notices carry the agent's contact on a `Contact:` line or in a closing block after the figures, frequently as initial and surname (`T. OKAFOR`, `MICHAEL REED`). Prefer that over the `ATTN:` line of the recipient's address block, which names the fund's own staff (`PORTFOLIO ADMIN`, `Fee Administration`) rather than the sender's -- but where `ATTN:` holds the only personal name on the page, use it rather than leaving the field empty.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_email": {
+        "description": "The agent bank's contact email address, verbatim, with the printed capitalisation kept as-is. Do not invent a domain. This is often in a mail header at the very top of the page rather than in a contact block -- `Mail Sent From:`, `Message Originated From:`, `From:` and `Sender:` lines all carry it, and all count: take it. A `Contact:` line further down that pairs a name with an address is equally valid. Only omit the key when the page shows no email address at all.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "agent_telephone": {
+        "description": "The agent bank's contact telephone number, exactly as printed including any country code, spaces, dots or dashes (`212-555-0100`, `+1-555-0177`).",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "amount": {
+        "description": "The FUND-ATTRIBUTABLE amount only -- the recipient's share. Agent notices print a facility-wide total and the recipient's share side by side, typically labelled `Global Amount` and `Your Share`; this field is `Your Share`. If the document prints ONLY a facility-wide total and no recipient share, OMIT this key entirely and put the total in `global_amount` -- do not fall back to the global figure here. Emitting a facility-wide total as `amount` makes the reconciliation compare the wrong two numbers. Emit as a plain decimal number with no thousands separators, no currency symbol and no parentheses: `67,900.00` becomes `67900.00`.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "NUMERIC_EXACT"
+      },
+      "contract_id": {
+        "description": "The identifier of the interest contract the notice prices -- the OLD or maturing contract where the notice both pays interest and rolls the period (`CT-204811-A`). Verbatim. Omit the key entirely when the notice carries no contract identifier; many interest notices do not.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "counterparty": {
+        "description": "The borrower or issuer the notice is about -- the obligor named on the deal, NOT the fund receiving the notice and NOT the agent bank sending it. Usually printed against a label such as `Borrower:`, `Issuer:` or `Deal:`. Copy the name as printed, including its legal suffix. Together with `notice_date` this is the platform's index key, so it matters more than any other field on the page.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "currency": {
+        "description": "The ISO 4217 three-letter code for the currency the amounts are denominated in (`USD`, `EUR`). Convert a symbol or a spelled-out name to the code.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "cusip": {
+        "description": "The FACILITY-level CUSIP, not the deal-level one. Notices often print both, labelled `Facility CUSIP:` and `Deal CUSIP:`; take the facility one. Verbatim. If the document prints ONLY a deal-level CUSIP, OMIT this key entirely -- do not fall back to the deal value, which identifies a different instrument.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "facility": {
+        "description": "The credit facility or tranche the notice concerns, as named on the document (`2023 Delayed Draw`, `USD 450M Revolving Credit Facility`, `TERM LOAN A`, `INITIAL TERM LOANS`). The descriptive name, not the id -- the id goes in `facility_id_source_raw`. NOT the interest-rate option: `Term SOFR 3 Month`, `Base Rate`, `LIBOR 1 Month` and `Prime` name how the loan is priced, not which facility it is, and a notice normally prints both. The facility is the loan itself -- a term loan, revolver or delayed-draw tranche -- and is often on the `Re:` or `Deal:` line after the borrower name rather than on the description or rate line.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "facility_id_source_raw": {
+        "description": "The facility identifier exactly as printed, prefix and all (`SL-311907`, not `311907`). Verbatim: do not strip a prefix, pad, or reformat. Absent on documents that name a facility without giving it an id.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "fund": {
+        "description": "The fund or portfolio the notice concerns -- the lender side, as distinct from `counterparty`, which is the borrower. PREFER AN EXPLICITLY LABELLED VALUE: when the document carries a `Portfolio:`, `Fund:`, `Lender:` or `Investor:` label, take that value verbatim, even where it is a short internal name (`Senior Credit Fund`, `DL Fund II`) and a longer legal entity is named elsewhere on the page. Only when no such label exists fall back to the addressee on the `TO:` line or in the address block. The labelled value is the one the platform holds; the addressee is often the same fund's registered legal name (`HARBORLIGHT SENIOR LOAN FUND LP`) and does not match. Never a servicing platform, vendor or software name.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "global_amount": {
+        "description": "The facility-wide total, typically labelled `Global Amount`, `Global Prime Borrowing` or `Total Facility Amount`. Never the recipient's share -- that is `amount`. Emit as a plain decimal number with no thousands separators, no currency symbol and no parentheses: `67,900.00` becomes `67900.00`.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "NUMERIC_EXACT"
+      },
+      "isin": {
+        "description": "The FACILITY-level ISIN, not the deal-level one, on the same rule as `cusip`. Verbatim. A document that prints only a `Deal ISIN:` and no facility ISIN must OMIT this key rather than carry the deal value.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "loanx_id": {
+        "description": "The LoanX identifier, printed against a `LoanXid:` or `LoanX ID:` label (`LX204811XXXX1`). Verbatim. Omit the key entirely when the document carries no such label.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "new_contract_id": {
+        "description": "The identifier of the NEW contract the notice creates for the next interest period (`CT-204811-B`). Verbatim. Only present where the notice both pays interest and starts a new period; omit the key when the notice names a single contract or none. Never repeat `contract_id` here -- two fields holding the same id says a new period began when none did.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "notice_comment": {
+        "description": "Free-text remarks, notes or comments the notice carries, gathered into one string in document order. Includes the producing office, run-date footers and any explanatory paragraph. Emit an empty string when the document has a remarks area that is blank; omit the key when it has no remarks area at all.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "LLM"
+      },
+      "notice_date": {
+        "description": "The date the agent bank issued this notice, as printed on the document. Normalise to ISO 8601 `YYYY-MM-DD` regardless of how the document prints it (`2/2/2026`, `02-Feb-2026` and `February 2, 2026` all become `2026-02-02`). This field and `counterparty` are the two the reconciliation platform indexes on; prioritise them above everything else. If the document prints only an effective or value date and no issue date, leave this absent and populate `value_date`.",
+        "format": "date",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "notice_date_source_raw": {
+        "description": "The notice date exactly as printed on the document, before any normalisation, including its original separators and month spelling (`2/2/2026`, `17-Nov-2026`). Copy the characters verbatim; do not reformat, reorder or expand them.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "reference": {
+        "description": "The wire, payment or transaction reference the notice carries (`WIRE-20260302-EVG`, `MF-FEE-EUR-1119`). Verbatim. Not the facility id and not the contract id. Take it from an explicit `Reference:` label, or from the reference line inside a payment or wire-instruction block -- both of which give the string the paying bank quotes, sometimes a code and sometimes a borrower name with a size and date (`MISTFELL FOODS (04/23)`). Copy it whole, keeping its capitalisation, dropping only a trailing comma. OMIT the key when neither is present: the `Re:` subject line at the top of a notice is NOT a payment reference, and using it produces a value the platform has nothing to match against.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "value_date": {
+        "description": "The date the cash actually moves or the rate takes effect -- the document's effective date, settlement date or payment date. Normalise to ISO 8601 `YYYY-MM-DD` regardless of how the document prints it (`2/2/2026`, `02-Feb-2026` and `February 2, 2026` all become `2026-02-02`). Often equal to `notice_date`; emit both when both are printed, because the platform falls back to this one.",
+        "format": "date",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      }
+    },
+    "type": "object",
+    "x-aws-idp-document-type": "interest_rate_set_notice"
+  },
+  {
+    "$id": "rollover_rate_set_notice",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "An agent-bank notice that rolls an existing contract into a new interest period and sets the new rate, WITHOUT reporting any cash payment. REQUIRED evidence: the maturing contract id and the new contract id are BOTH printed, so the document shows one contract being replaced by another. Without that pair this is not a rollover, no matter what the rate rows are called. Two things that are NOT evidence of a rollover: an amount column that shows only a global total with no recipient share, and the word `Rollover` inside a rate description row. If the document announces an interest payment, it is an `interest_rate_set_notice` instead.",
+    "properties": {
+      "activity_type": {
+        "description": "The source document's OWN word for what it reports, copied as printed rather than mapped to a standard vocabulary: `Prime Borrowing`, `Commitment Fee`, `Interest`, `Rollover`, `Mandatory Paydown`. Usually the activity or transaction-type label, or the notice's own title. Give the ACTIVITY ALONE: strip any leading interest-rate option, tenor or currency the label is prefixed with, because those describe pricing rather than activity -- a description reading `Term SOFR 3 Month Principal Payment` yields `Principal Payment`, and `USD Loan Repricing for the Deal X/Decrease` yields `Repricing`. Never include a deal name, facility name or amount here.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_bank": {
+        "description": "The institution SENDING the notice -- the administrative agent, on the letterhead or in the `From:` block. Not the borrower and not the recipient fund. Copy as printed, including the legal suffix.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_contact_name": {
+        "description": "The named person or desk at the AGENT BANK -- the sender's contact, in the letterhead, signature block, footer or a `Contact:` line (`Delia Cranmore`, `AGENCY SERVICES`). A team or desk name is a valid value where no individual is named. LOOK AT THE BOTTOM OF THE PAGE FIRST: these notices carry the agent's contact on a `Contact:` line or in a closing block after the figures, frequently as initial and surname (`T. OKAFOR`, `MICHAEL REED`). Prefer that over the `ATTN:` line of the recipient's address block, which names the fund's own staff (`PORTFOLIO ADMIN`, `Fee Administration`) rather than the sender's -- but where `ATTN:` holds the only personal name on the page, use it rather than leaving the field empty.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_email": {
+        "description": "The agent bank's contact email address, verbatim, with the printed capitalisation kept as-is. Do not invent a domain. This is often in a mail header at the very top of the page rather than in a contact block -- `Mail Sent From:`, `Message Originated From:`, `From:` and `Sender:` lines all carry it, and all count: take it. A `Contact:` line further down that pairs a name with an address is equally valid. Only omit the key when the page shows no email address at all.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "agent_telephone": {
+        "description": "The agent bank's contact telephone number, exactly as printed including any country code, spaces, dots or dashes (`212-555-0100`, `+1-555-0177`).",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "contract_id": {
+        "description": "The identifier of the contract being rolled over or repriced -- the OLD or maturing contract (`CT-204811-A`). Verbatim.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "counterparty": {
+        "description": "The borrower or issuer the notice is about -- the obligor named on the deal, NOT the fund receiving the notice and NOT the agent bank sending it. Usually printed against a label such as `Borrower:`, `Issuer:` or `Deal:`. Copy the name as printed, including its legal suffix. Together with `notice_date` this is the platform's index key, so it matters more than any other field on the page.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "currency": {
+        "description": "The ISO 4217 three-letter code for the currency the amounts are denominated in (`USD`, `EUR`). Convert a symbol or a spelled-out name to the code.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "facility": {
+        "description": "The credit facility or tranche the notice concerns, as named on the document (`2023 Delayed Draw`, `USD 450M Revolving Credit Facility`, `TERM LOAN A`, `INITIAL TERM LOANS`). The descriptive name, not the id -- the id goes in `facility_id_source_raw`. NOT the interest-rate option: `Term SOFR 3 Month`, `Base Rate`, `LIBOR 1 Month` and `Prime` name how the loan is priced, not which facility it is, and a notice normally prints both. The facility is the loan itself -- a term loan, revolver or delayed-draw tranche -- and is often on the `Re:` or `Deal:` line after the borrower name rather than on the description or rate line.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "facility_id_source_raw": {
+        "description": "The facility identifier exactly as printed, prefix and all (`SL-311907`, not `311907`). Verbatim: do not strip a prefix, pad, or reformat. Absent on documents that name a facility without giving it an id.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "fund": {
+        "description": "The fund or portfolio the notice concerns -- the lender side, as distinct from `counterparty`, which is the borrower. PREFER AN EXPLICITLY LABELLED VALUE: when the document carries a `Portfolio:`, `Fund:`, `Lender:` or `Investor:` label, take that value verbatim, even where it is a short internal name (`Senior Credit Fund`, `DL Fund II`) and a longer legal entity is named elsewhere on the page. Only when no such label exists fall back to the addressee on the `TO:` line or in the address block. The labelled value is the one the platform holds; the addressee is often the same fund's registered legal name (`HARBORLIGHT SENIOR LOAN FUND LP`) and does not match. Never a servicing platform, vendor or software name.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "global_amount": {
+        "description": "The facility-wide total, typically labelled `Global Amount`, `Global Prime Borrowing` or `Total Facility Amount`. Never the recipient's share -- that is `amount`. Emit as a plain decimal number with no thousands separators, no currency symbol and no parentheses: `67,900.00` becomes `67900.00`.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "NUMERIC_EXACT"
+      },
+      "loanx_id": {
+        "description": "The LoanX identifier, printed against a `LoanXid:` or `LoanX ID:` label (`LX204811XXXX1`). Verbatim. Omit the key entirely when the document carries no such label.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "new_contract_id": {
+        "description": "The identifier of the NEW contract created by the rollover or repricing (`CT-204811-B`). Verbatim. Distinguish carefully from `contract_id`: the rollover's whole point is that these differ.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "notice_comment": {
+        "description": "Free-text remarks, notes or comments the notice carries, gathered into one string in document order. Includes the producing office, run-date footers and any explanatory paragraph. Emit an empty string when the document has a remarks area that is blank; omit the key when it has no remarks area at all.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "LLM"
+      },
+      "notice_date": {
+        "description": "The date the agent bank issued this notice, as printed on the document. Normalise to ISO 8601 `YYYY-MM-DD` regardless of how the document prints it (`2/2/2026`, `02-Feb-2026` and `February 2, 2026` all become `2026-02-02`). This field and `counterparty` are the two the reconciliation platform indexes on; prioritise them above everything else. If the document prints only an effective or value date and no issue date, leave this absent and populate `value_date`.",
+        "format": "date",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "notice_date_source_raw": {
+        "description": "The notice date exactly as printed on the document, before any normalisation, including its original separators and month spelling (`2/2/2026`, `17-Nov-2026`). Copy the characters verbatim; do not reformat, reorder or expand them.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "value_date": {
+        "description": "The date the cash actually moves or the rate takes effect -- the document's effective date, settlement date or payment date. Normalise to ISO 8601 `YYYY-MM-DD` regardless of how the document prints it (`2/2/2026`, `02-Feb-2026` and `February 2, 2026` all become `2026-02-02`). Often equal to `notice_date`; emit both when both are printed, because the platform falls back to this one.",
+        "format": "date",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      }
+    },
+    "type": "object",
+    "x-aws-idp-document-type": "rollover_rate_set_notice"
+  },
+  {
+    "$id": "commitment_fee_notice",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "An agent-bank notice billing a periodic commitment, facility or unused-line fee on undrawn capacity. Recognisable by a fee rate expressed as a percentage per annum, a fee accrual period, and an unused or available commitment base the fee is computed on. Not a principal or interest movement.",
+    "properties": {
+      "activity_type": {
+        "description": "The source document's OWN word for what it reports, copied as printed rather than mapped to a standard vocabulary: `Prime Borrowing`, `Commitment Fee`, `Interest`, `Rollover`, `Mandatory Paydown`. Usually the activity or transaction-type label, or the notice's own title. Give the ACTIVITY ALONE: strip any leading interest-rate option, tenor or currency the label is prefixed with, because those describe pricing rather than activity -- a description reading `Term SOFR 3 Month Principal Payment` yields `Principal Payment`, and `USD Loan Repricing for the Deal X/Decrease` yields `Repricing`. Never include a deal name, facility name or amount here.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_bank": {
+        "description": "The institution SENDING the notice -- the administrative agent, on the letterhead or in the `From:` block. Not the borrower and not the recipient fund. Copy as printed, including the legal suffix.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_contact_name": {
+        "description": "The named person or desk at the AGENT BANK -- the sender's contact, in the letterhead, signature block, footer or a `Contact:` line (`Delia Cranmore`, `AGENCY SERVICES`). A team or desk name is a valid value where no individual is named. LOOK AT THE BOTTOM OF THE PAGE FIRST: these notices carry the agent's contact on a `Contact:` line or in a closing block after the figures, frequently as initial and surname (`T. OKAFOR`, `MICHAEL REED`). Prefer that over the `ATTN:` line of the recipient's address block, which names the fund's own staff (`PORTFOLIO ADMIN`, `Fee Administration`) rather than the sender's -- but where `ATTN:` holds the only personal name on the page, use it rather than leaving the field empty.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_email": {
+        "description": "The agent bank's contact email address, verbatim, with the printed capitalisation kept as-is. Do not invent a domain. This is often in a mail header at the very top of the page rather than in a contact block -- `Mail Sent From:`, `Message Originated From:`, `From:` and `Sender:` lines all carry it, and all count: take it. A `Contact:` line further down that pairs a name with an address is equally valid. Only omit the key when the page shows no email address at all.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "agent_telephone": {
+        "description": "The agent bank's contact telephone number, exactly as printed including any country code, spaces, dots or dashes (`212-555-0100`, `+1-555-0177`).",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "amount": {
+        "description": "The FUND-ATTRIBUTABLE amount only -- the recipient's share. Agent notices print a facility-wide total and the recipient's share side by side, typically labelled `Global Amount` and `Your Share`; this field is `Your Share`. If the document prints ONLY a facility-wide total and no recipient share, OMIT this key entirely and put the total in `global_amount` -- do not fall back to the global figure here. Emitting a facility-wide total as `amount` makes the reconciliation compare the wrong two numbers. Emit as a plain decimal number with no thousands separators, no currency symbol and no parentheses: `67,900.00` becomes `67900.00`.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "NUMERIC_EXACT"
+      },
+      "counterparty": {
+        "description": "The borrower or issuer the notice is about -- the obligor named on the deal, NOT the fund receiving the notice and NOT the agent bank sending it. Usually printed against a label such as `Borrower:`, `Issuer:` or `Deal:`. Copy the name as printed, including its legal suffix. Together with `notice_date` this is the platform's index key, so it matters more than any other field on the page.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "currency": {
+        "description": "The ISO 4217 three-letter code for the currency the amounts are denominated in (`USD`, `EUR`). Convert a symbol or a spelled-out name to the code.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "cusip": {
+        "description": "The FACILITY-level CUSIP, not the deal-level one. Notices often print both, labelled `Facility CUSIP:` and `Deal CUSIP:`; take the facility one. Verbatim. If the document prints ONLY a deal-level CUSIP, OMIT this key entirely -- do not fall back to the deal value, which identifies a different instrument.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "facility": {
+        "description": "The credit facility or tranche the notice concerns, as named on the document (`2023 Delayed Draw`, `USD 450M Revolving Credit Facility`, `TERM LOAN A`, `INITIAL TERM LOANS`). The descriptive name, not the id -- the id goes in `facility_id_source_raw`. NOT the interest-rate option: `Term SOFR 3 Month`, `Base Rate`, `LIBOR 1 Month` and `Prime` name how the loan is priced, not which facility it is, and a notice normally prints both. The facility is the loan itself -- a term loan, revolver or delayed-draw tranche -- and is often on the `Re:` or `Deal:` line after the borrower name rather than on the description or rate line.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "facility_id_source_raw": {
+        "description": "The facility identifier exactly as printed, prefix and all (`SL-311907`, not `311907`). Verbatim: do not strip a prefix, pad, or reformat. Absent on documents that name a facility without giving it an id.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "fee_amount": {
+        "description": "The fee charged, on notices that report a fee. On a commitment fee notice this is normally the recipient's share of the fee and equals `amount`. Emit as a plain decimal number with no thousands separators, no currency symbol and no parentheses: `67,900.00` becomes `67900.00`.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "NUMERIC_EXACT"
+      },
+      "fee_percentage": {
+        "description": "The fee rate as a percentage NUMBER, without the `%` sign: `0.375%` becomes `0.375`. Do not convert to a decimal fraction -- `0.375` means 0.375 percent here, not 37.5 percent.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "NUMERIC_EXACT"
+      },
+      "fund": {
+        "description": "The fund or portfolio the notice concerns -- the lender side, as distinct from `counterparty`, which is the borrower. PREFER AN EXPLICITLY LABELLED VALUE: when the document carries a `Portfolio:`, `Fund:`, `Lender:` or `Investor:` label, take that value verbatim, even where it is a short internal name (`Senior Credit Fund`, `DL Fund II`) and a longer legal entity is named elsewhere on the page. Only when no such label exists fall back to the addressee on the `TO:` line or in the address block. The labelled value is the one the platform holds; the addressee is often the same fund's registered legal name (`HARBORLIGHT SENIOR LOAN FUND LP`) and does not match. Never a servicing platform, vendor or software name.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "global_amount": {
+        "description": "The facility-wide total, typically labelled `Global Amount`, `Global Prime Borrowing` or `Total Facility Amount`. Never the recipient's share -- that is `amount`. Emit as a plain decimal number with no thousands separators, no currency symbol and no parentheses: `67,900.00` becomes `67900.00`.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "NUMERIC_EXACT"
+      },
+      "notice_comment": {
+        "description": "Free-text remarks, notes or comments the notice carries, gathered into one string in document order. Includes the producing office, run-date footers and any explanatory paragraph. Emit an empty string when the document has a remarks area that is blank; omit the key when it has no remarks area at all.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "LLM"
+      },
+      "notice_date": {
+        "description": "The date the agent bank issued this notice, as printed on the document. Normalise to ISO 8601 `YYYY-MM-DD` regardless of how the document prints it (`2/2/2026`, `02-Feb-2026` and `February 2, 2026` all become `2026-02-02`). This field and `counterparty` are the two the reconciliation platform indexes on; prioritise them above everything else. If the document prints only an effective or value date and no issue date, leave this absent and populate `value_date`.",
+        "format": "date",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "notice_date_source_raw": {
+        "description": "The notice date exactly as printed on the document, before any normalisation, including its original separators and month spelling (`2/2/2026`, `17-Nov-2026`). Copy the characters verbatim; do not reformat, reorder or expand them.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "reference": {
+        "description": "The wire, payment or transaction reference the notice carries (`WIRE-20260302-EVG`, `MF-FEE-EUR-1119`). Verbatim. Not the facility id and not the contract id. Take it from an explicit `Reference:` label, or from the reference line inside a payment or wire-instruction block -- both of which give the string the paying bank quotes, sometimes a code and sometimes a borrower name with a size and date (`MISTFELL FOODS (04/23)`). Copy it whole, keeping its capitalisation, dropping only a trailing comma. OMIT the key when neither is present: the `Re:` subject line at the top of a notice is NOT a payment reference, and using it produces a value the platform has nothing to match against.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "value_date": {
+        "description": "The date the cash actually moves or the rate takes effect -- the document's effective date, settlement date or payment date. Normalise to ISO 8601 `YYYY-MM-DD` regardless of how the document prints it (`2/2/2026`, `02-Feb-2026` and `February 2, 2026` all become `2026-02-02`). Often equal to `notice_date`; emit both when both are printed, because the platform falls back to this one.",
+        "format": "date",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      }
+    },
+    "type": "object",
+    "x-aws-idp-document-type": "commitment_fee_notice"
+  },
+  {
+    "$id": "paydown_notice",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "An agent-bank notice reporting a repayment of principal -- mandatory or optional prepayment, scheduled amortisation, or a paydown bundled with interest. REQUIRED evidence: an explicit principal repayment -- a principal amount being repaid, or an outstanding balance that decreases. Distinguish from a borrowing notice by direction: a paydown reduces the outstanding balance. Interest alone is NEVER a paydown: a notice that announces an interest payment and moves no principal is an `interest_rate_set_notice`, however large the interest amount. Only when principal is genuinely repaid does a document that reports both principal and interest belong here.",
+    "properties": {
+      "activity_type": {
+        "description": "The source document's OWN word for what it reports, copied as printed rather than mapped to a standard vocabulary: `Prime Borrowing`, `Commitment Fee`, `Interest`, `Rollover`, `Mandatory Paydown`. Usually the activity or transaction-type label, or the notice's own title. Give the ACTIVITY ALONE: strip any leading interest-rate option, tenor or currency the label is prefixed with, because those describe pricing rather than activity -- a description reading `Term SOFR 3 Month Principal Payment` yields `Principal Payment`, and `USD Loan Repricing for the Deal X/Decrease` yields `Repricing`. Never include a deal name, facility name or amount here.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_bank": {
+        "description": "The institution SENDING the notice -- the administrative agent, on the letterhead or in the `From:` block. Not the borrower and not the recipient fund. Copy as printed, including the legal suffix.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_contact_name": {
+        "description": "The named person or desk at the AGENT BANK -- the sender's contact, in the letterhead, signature block, footer or a `Contact:` line (`Delia Cranmore`, `AGENCY SERVICES`). A team or desk name is a valid value where no individual is named. LOOK AT THE BOTTOM OF THE PAGE FIRST: these notices carry the agent's contact on a `Contact:` line or in a closing block after the figures, frequently as initial and surname (`T. OKAFOR`, `MICHAEL REED`). Prefer that over the `ATTN:` line of the recipient's address block, which names the fund's own staff (`PORTFOLIO ADMIN`, `Fee Administration`) rather than the sender's -- but where `ATTN:` holds the only personal name on the page, use it rather than leaving the field empty.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_email": {
+        "description": "The agent bank's contact email address, verbatim, with the printed capitalisation kept as-is. Do not invent a domain. This is often in a mail header at the very top of the page rather than in a contact block -- `Mail Sent From:`, `Message Originated From:`, `From:` and `Sender:` lines all carry it, and all count: take it. A `Contact:` line further down that pairs a name with an address is equally valid. Only omit the key when the page shows no email address at all.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "agent_telephone": {
+        "description": "The agent bank's contact telephone number, exactly as printed including any country code, spaces, dots or dashes (`212-555-0100`, `+1-555-0177`).",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "amount": {
+        "description": "The FUND-ATTRIBUTABLE amount only -- the recipient's share. Agent notices print a facility-wide total and the recipient's share side by side, typically labelled `Global Amount` and `Your Share`; this field is `Your Share`. If the document prints ONLY a facility-wide total and no recipient share, OMIT this key entirely and put the total in `global_amount` -- do not fall back to the global figure here. Emitting a facility-wide total as `amount` makes the reconciliation compare the wrong two numbers. Emit as a plain decimal number with no thousands separators, no currency symbol and no parentheses: `67,900.00` becomes `67900.00`.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "NUMERIC_EXACT"
+      },
+      "counterparty": {
+        "description": "The borrower or issuer the notice is about -- the obligor named on the deal, NOT the fund receiving the notice and NOT the agent bank sending it. Usually printed against a label such as `Borrower:`, `Issuer:` or `Deal:`. Copy the name as printed, including its legal suffix. Together with `notice_date` this is the platform's index key, so it matters more than any other field on the page.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "currency": {
+        "description": "The ISO 4217 three-letter code for the currency the amounts are denominated in (`USD`, `EUR`). Convert a symbol or a spelled-out name to the code.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "cusip": {
+        "description": "The FACILITY-level CUSIP, not the deal-level one. Notices often print both, labelled `Facility CUSIP:` and `Deal CUSIP:`; take the facility one. Verbatim. If the document prints ONLY a deal-level CUSIP, OMIT this key entirely -- do not fall back to the deal value, which identifies a different instrument.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "facility": {
+        "description": "The credit facility or tranche the notice concerns, as named on the document (`2023 Delayed Draw`, `USD 450M Revolving Credit Facility`, `TERM LOAN A`, `INITIAL TERM LOANS`). The descriptive name, not the id -- the id goes in `facility_id_source_raw`. NOT the interest-rate option: `Term SOFR 3 Month`, `Base Rate`, `LIBOR 1 Month` and `Prime` name how the loan is priced, not which facility it is, and a notice normally prints both. The facility is the loan itself -- a term loan, revolver or delayed-draw tranche -- and is often on the `Re:` or `Deal:` line after the borrower name rather than on the description or rate line.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "facility_id_source_raw": {
+        "description": "The facility identifier exactly as printed, prefix and all (`SL-311907`, not `311907`). Verbatim: do not strip a prefix, pad, or reformat. Absent on documents that name a facility without giving it an id.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "fund": {
+        "description": "The fund or portfolio the notice concerns -- the lender side, as distinct from `counterparty`, which is the borrower. PREFER AN EXPLICITLY LABELLED VALUE: when the document carries a `Portfolio:`, `Fund:`, `Lender:` or `Investor:` label, take that value verbatim, even where it is a short internal name (`Senior Credit Fund`, `DL Fund II`) and a longer legal entity is named elsewhere on the page. Only when no such label exists fall back to the addressee on the `TO:` line or in the address block. The labelled value is the one the platform holds; the addressee is often the same fund's registered legal name (`HARBORLIGHT SENIOR LOAN FUND LP`) and does not match. Never a servicing platform, vendor or software name.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "global_amount": {
+        "description": "The facility-wide total, typically labelled `Global Amount`, `Global Prime Borrowing` or `Total Facility Amount`. Never the recipient's share -- that is `amount`. Emit as a plain decimal number with no thousands separators, no currency symbol and no parentheses: `67,900.00` becomes `67900.00`.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "NUMERIC_EXACT"
+      },
+      "isin": {
+        "description": "The FACILITY-level ISIN, not the deal-level one, on the same rule as `cusip`. Verbatim. A document that prints only a `Deal ISIN:` and no facility ISIN must OMIT this key rather than carry the deal value.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "loanx_id": {
+        "description": "The LoanX identifier, printed against a `LoanXid:` or `LoanX ID:` label (`LX204811XXXX1`). Verbatim. Omit the key entirely when the document carries no such label.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "notice_comment": {
+        "description": "Free-text remarks, notes or comments the notice carries, gathered into one string in document order. Includes the producing office, run-date footers and any explanatory paragraph. Emit an empty string when the document has a remarks area that is blank; omit the key when it has no remarks area at all.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "LLM"
+      },
+      "notice_date": {
+        "description": "The date the agent bank issued this notice, as printed on the document. Normalise to ISO 8601 `YYYY-MM-DD` regardless of how the document prints it (`2/2/2026`, `02-Feb-2026` and `February 2, 2026` all become `2026-02-02`). This field and `counterparty` are the two the reconciliation platform indexes on; prioritise them above everything else. If the document prints only an effective or value date and no issue date, leave this absent and populate `value_date`.",
+        "format": "date",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "notice_date_source_raw": {
+        "description": "The notice date exactly as printed on the document, before any normalisation, including its original separators and month spelling (`2/2/2026`, `17-Nov-2026`). Copy the characters verbatim; do not reformat, reorder or expand them.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "reference": {
+        "description": "The wire, payment or transaction reference the notice carries (`WIRE-20260302-EVG`, `MF-FEE-EUR-1119`). Verbatim. Not the facility id and not the contract id. Take it from an explicit `Reference:` label, or from the reference line inside a payment or wire-instruction block -- both of which give the string the paying bank quotes, sometimes a code and sometimes a borrower name with a size and date (`MISTFELL FOODS (04/23)`). Copy it whole, keeping its capitalisation, dropping only a trailing comma. OMIT the key when neither is present: the `Re:` subject line at the top of a notice is NOT a payment reference, and using it produces a value the platform has nothing to match against.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "value_date": {
+        "description": "The date the cash actually moves or the rate takes effect -- the document's effective date, settlement date or payment date. Normalise to ISO 8601 `YYYY-MM-DD` regardless of how the document prints it (`2/2/2026`, `02-Feb-2026` and `February 2, 2026` all become `2026-02-02`). Often equal to `notice_date`; emit both when both are printed, because the platform falls back to this one.",
+        "format": "date",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      }
+    },
+    "type": "object",
+    "x-aws-idp-document-type": "paydown_notice"
+  },
+  {
+    "$id": "cancellation_notice",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "An agent-bank notice withdrawing or cancelling a previously announced activity -- a cancelled borrowing, a rescinded drawdown, a reversed transaction. Recognisable by explicit cancellation, withdrawal or reversal language referring back to an earlier notice. Typically carries no recipient-share cash amount, because the cancelled activity moves nothing.",
+    "properties": {
+      "activity_type": {
+        "description": "The source document's OWN word for what it reports, copied as printed rather than mapped to a standard vocabulary: `Prime Borrowing`, `Commitment Fee`, `Interest`, `Rollover`, `Mandatory Paydown`. Usually the activity or transaction-type label, or the notice's own title. Give the ACTIVITY ALONE: strip any leading interest-rate option, tenor or currency the label is prefixed with, because those describe pricing rather than activity -- a description reading `Term SOFR 3 Month Principal Payment` yields `Principal Payment`, and `USD Loan Repricing for the Deal X/Decrease` yields `Repricing`. Never include a deal name, facility name or amount here.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_bank": {
+        "description": "The institution SENDING the notice -- the administrative agent, on the letterhead or in the `From:` block. Not the borrower and not the recipient fund. Copy as printed, including the legal suffix.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_contact_name": {
+        "description": "The named person or desk at the AGENT BANK -- the sender's contact, in the letterhead, signature block, footer or a `Contact:` line (`Delia Cranmore`, `AGENCY SERVICES`). A team or desk name is a valid value where no individual is named. LOOK AT THE BOTTOM OF THE PAGE FIRST: these notices carry the agent's contact on a `Contact:` line or in a closing block after the figures, frequently as initial and surname (`T. OKAFOR`, `MICHAEL REED`). Prefer that over the `ATTN:` line of the recipient's address block, which names the fund's own staff (`PORTFOLIO ADMIN`, `Fee Administration`) rather than the sender's -- but where `ATTN:` holds the only personal name on the page, use it rather than leaving the field empty.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_email": {
+        "description": "The agent bank's contact email address, verbatim, with the printed capitalisation kept as-is. Do not invent a domain. This is often in a mail header at the very top of the page rather than in a contact block -- `Mail Sent From:`, `Message Originated From:`, `From:` and `Sender:` lines all carry it, and all count: take it. A `Contact:` line further down that pairs a name with an address is equally valid. Only omit the key when the page shows no email address at all.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "agent_telephone": {
+        "description": "The agent bank's contact telephone number, exactly as printed including any country code, spaces, dots or dashes (`212-555-0100`, `+1-555-0177`).",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "counterparty": {
+        "description": "The borrower or issuer the notice is about -- the obligor named on the deal, NOT the fund receiving the notice and NOT the agent bank sending it. Usually printed against a label such as `Borrower:`, `Issuer:` or `Deal:`. Copy the name as printed, including its legal suffix. Together with `notice_date` this is the platform's index key, so it matters more than any other field on the page.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "facility": {
+        "description": "The credit facility or tranche the notice concerns, as named on the document (`2023 Delayed Draw`, `USD 450M Revolving Credit Facility`, `TERM LOAN A`, `INITIAL TERM LOANS`). The descriptive name, not the id -- the id goes in `facility_id_source_raw`. NOT the interest-rate option: `Term SOFR 3 Month`, `Base Rate`, `LIBOR 1 Month` and `Prime` name how the loan is priced, not which facility it is, and a notice normally prints both. The facility is the loan itself -- a term loan, revolver or delayed-draw tranche -- and is often on the `Re:` or `Deal:` line after the borrower name rather than on the description or rate line.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "fund": {
+        "description": "The fund or portfolio the notice concerns -- the lender side, as distinct from `counterparty`, which is the borrower. PREFER AN EXPLICITLY LABELLED VALUE: when the document carries a `Portfolio:`, `Fund:`, `Lender:` or `Investor:` label, take that value verbatim, even where it is a short internal name (`Senior Credit Fund`, `DL Fund II`) and a longer legal entity is named elsewhere on the page. Only when no such label exists fall back to the addressee on the `TO:` line or in the address block. The labelled value is the one the platform holds; the addressee is often the same fund's registered legal name (`HARBORLIGHT SENIOR LOAN FUND LP`) and does not match. Never a servicing platform, vendor or software name.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "global_amount": {
+        "description": "The facility-wide total, typically labelled `Global Amount`, `Global Prime Borrowing` or `Total Facility Amount`. Never the recipient's share -- that is `amount`. Emit as a plain decimal number with no thousands separators, no currency symbol and no parentheses: `67,900.00` becomes `67900.00`.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "NUMERIC_EXACT"
+      },
+      "notice_date": {
+        "description": "The date the agent bank issued this notice, as printed on the document. Normalise to ISO 8601 `YYYY-MM-DD` regardless of how the document prints it (`2/2/2026`, `02-Feb-2026` and `February 2, 2026` all become `2026-02-02`). This field and `counterparty` are the two the reconciliation platform indexes on; prioritise them above everything else. If the document prints only an effective or value date and no issue date, leave this absent and populate `value_date`.",
+        "format": "date",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "notice_date_source_raw": {
+        "description": "The notice date exactly as printed on the document, before any normalisation, including its original separators and month spelling (`2/2/2026`, `17-Nov-2026`). Copy the characters verbatim; do not reformat, reorder or expand them.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      }
+    },
+    "type": "object",
+    "x-aws-idp-document-type": "cancellation_notice"
+  },
+  {
+    "$id": "activity_memo",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A memo accompanying an aggregated wire that itemises the individual activities the wire covers, ACROSS SEVERAL facilities, contracts or deals. The defining evidence is plurality: two or more distinct activities itemised against one payment. The words `Activity Memo` alone are NOT enough -- many agent banks use that phrase as a template title for single-activity notices, and a memo announcing one borrowing, one paydown or one interest payment on one facility belongs to that activity's class, not here. Distinguish from `consolidated_payment_advice`, which states the settlement and the net wire, and from `summary_statement`, which states positions rather than activities.",
+    "properties": {
+      "activity_type": {
+        "description": "The source document's OWN word for what it reports, copied as printed rather than mapped to a standard vocabulary: `Prime Borrowing`, `Commitment Fee`, `Interest`, `Rollover`, `Mandatory Paydown`. Usually the activity or transaction-type label, or the notice's own title. Give the ACTIVITY ALONE: strip any leading interest-rate option, tenor or currency the label is prefixed with, because those describe pricing rather than activity -- a description reading `Term SOFR 3 Month Principal Payment` yields `Principal Payment`, and `USD Loan Repricing for the Deal X/Decrease` yields `Repricing`. Never include a deal name, facility name or amount here.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_bank": {
+        "description": "The institution SENDING the notice -- the administrative agent, on the letterhead or in the `From:` block. Not the borrower and not the recipient fund. Copy as printed, including the legal suffix.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_contact_name": {
+        "description": "The named person or desk at the AGENT BANK -- the sender's contact, in the letterhead, signature block, footer or a `Contact:` line (`Delia Cranmore`, `AGENCY SERVICES`). A team or desk name is a valid value where no individual is named. LOOK AT THE BOTTOM OF THE PAGE FIRST: these notices carry the agent's contact on a `Contact:` line or in a closing block after the figures, frequently as initial and surname (`T. OKAFOR`, `MICHAEL REED`). Prefer that over the `ATTN:` line of the recipient's address block, which names the fund's own staff (`PORTFOLIO ADMIN`, `Fee Administration`) rather than the sender's -- but where `ATTN:` holds the only personal name on the page, use it rather than leaving the field empty.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_email": {
+        "description": "The agent bank's contact email address, verbatim, with the printed capitalisation kept as-is. Do not invent a domain. This is often in a mail header at the very top of the page rather than in a contact block -- `Mail Sent From:`, `Message Originated From:`, `From:` and `Sender:` lines all carry it, and all count: take it. A `Contact:` line further down that pairs a name with an address is equally valid. Only omit the key when the page shows no email address at all.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "agent_telephone": {
+        "description": "The agent bank's contact telephone number, exactly as printed including any country code, spaces, dots or dashes (`212-555-0100`, `+1-555-0177`).",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "amount": {
+        "description": "The FUND-ATTRIBUTABLE amount only -- the recipient's share. Agent notices print a facility-wide total and the recipient's share side by side, typically labelled `Global Amount` and `Your Share`; this field is `Your Share`. If the document prints ONLY a facility-wide total and no recipient share, OMIT this key entirely and put the total in `global_amount` -- do not fall back to the global figure here. Emitting a facility-wide total as `amount` makes the reconciliation compare the wrong two numbers. Emit as a plain decimal number with no thousands separators, no currency symbol and no parentheses: `67,900.00` becomes `67900.00`.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "NUMERIC_EXACT"
+      },
+      "counterparty": {
+        "description": "The borrower or issuer the notice is about -- the obligor named on the deal, NOT the fund receiving the notice and NOT the agent bank sending it. Usually printed against a label such as `Borrower:`, `Issuer:` or `Deal:`. Copy the name as printed, including its legal suffix. Together with `notice_date` this is the platform's index key, so it matters more than any other field on the page.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "currency": {
+        "description": "The ISO 4217 three-letter code for the currency the amounts are denominated in (`USD`, `EUR`). Convert a symbol or a spelled-out name to the code.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "cusip": {
+        "description": "The FACILITY-level CUSIP, not the deal-level one. Notices often print both, labelled `Facility CUSIP:` and `Deal CUSIP:`; take the facility one. Verbatim. If the document prints ONLY a deal-level CUSIP, OMIT this key entirely -- do not fall back to the deal value, which identifies a different instrument.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "fee_amount": {
+        "description": "The fee charged, on notices that report a fee. On a commitment fee notice this is normally the recipient's share of the fee and equals `amount`. Emit as a plain decimal number with no thousands separators, no currency symbol and no parentheses: `67,900.00` becomes `67900.00`.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "NUMERIC_EXACT"
+      },
+      "fund": {
+        "description": "The fund or portfolio the notice concerns -- the lender side, as distinct from `counterparty`, which is the borrower. PREFER AN EXPLICITLY LABELLED VALUE: when the document carries a `Portfolio:`, `Fund:`, `Lender:` or `Investor:` label, take that value verbatim, even where it is a short internal name (`Senior Credit Fund`, `DL Fund II`) and a longer legal entity is named elsewhere on the page. Only when no such label exists fall back to the addressee on the `TO:` line or in the address block. The labelled value is the one the platform holds; the addressee is often the same fund's registered legal name (`HARBORLIGHT SENIOR LOAN FUND LP`) and does not match. Never a servicing platform, vendor or software name.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "notice_comment": {
+        "description": "Free-text remarks, notes or comments the notice carries, gathered into one string in document order. Includes the producing office, run-date footers and any explanatory paragraph. Emit an empty string when the document has a remarks area that is blank; omit the key when it has no remarks area at all.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "LLM"
+      },
+      "notice_date": {
+        "description": "The date the agent bank issued this notice, as printed on the document. Normalise to ISO 8601 `YYYY-MM-DD` regardless of how the document prints it (`2/2/2026`, `02-Feb-2026` and `February 2, 2026` all become `2026-02-02`). This field and `counterparty` are the two the reconciliation platform indexes on; prioritise them above everything else. If the document prints only an effective or value date and no issue date, leave this absent and populate `value_date`.",
+        "format": "date",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "notice_date_source_raw": {
+        "description": "The notice date exactly as printed on the document, before any normalisation, including its original separators and month spelling (`2/2/2026`, `17-Nov-2026`). Copy the characters verbatim; do not reformat, reorder or expand them.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "reference": {
+        "description": "The wire, payment or transaction reference the notice carries (`WIRE-20260302-EVG`, `MF-FEE-EUR-1119`). Verbatim. Not the facility id and not the contract id. Take it from an explicit `Reference:` label, or from the reference line inside a payment or wire-instruction block -- both of which give the string the paying bank quotes, sometimes a code and sometimes a borrower name with a size and date (`MISTFELL FOODS (04/23)`). Copy it whole, keeping its capitalisation, dropping only a trailing comma. OMIT the key when neither is present: the `Re:` subject line at the top of a notice is NOT a payment reference, and using it produces a value the platform has nothing to match against.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "value_date": {
+        "description": "The date the cash actually moves or the rate takes effect -- the document's effective date, settlement date or payment date. Normalise to ISO 8601 `YYYY-MM-DD` regardless of how the document prints it (`2/2/2026`, `02-Feb-2026` and `February 2, 2026` all become `2026-02-02`). Often equal to `notice_date`; emit both when both are printed, because the platform falls back to this one.",
+        "format": "date",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      }
+    },
+    "type": "object",
+    "x-aws-idp-document-type": "activity_memo"
+  },
+  {
+    "$id": "consolidated_payment_advice",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A payment advice covering one wire that settles several facilities or activities at once, stating the net amount actually transferred and the wire reference. Recognisable by payment advice or remittance language plus a single net settlement figure, on a document that is ITSELF the advice. Wire or payment instructions printed as the tail of another notice do NOT belong here: that page is part of the notice above it and takes the notice's class. Distinguish from `activity_memo`, which itemises the underlying activities without being the advice itself.",
+    "properties": {
+      "activity_type": {
+        "description": "The source document's OWN word for what it reports, copied as printed rather than mapped to a standard vocabulary: `Prime Borrowing`, `Commitment Fee`, `Interest`, `Rollover`, `Mandatory Paydown`. Usually the activity or transaction-type label, or the notice's own title. Give the ACTIVITY ALONE: strip any leading interest-rate option, tenor or currency the label is prefixed with, because those describe pricing rather than activity -- a description reading `Term SOFR 3 Month Principal Payment` yields `Principal Payment`, and `USD Loan Repricing for the Deal X/Decrease` yields `Repricing`. Never include a deal name, facility name or amount here.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_bank": {
+        "description": "The institution SENDING the notice -- the administrative agent, on the letterhead or in the `From:` block. Not the borrower and not the recipient fund. Copy as printed, including the legal suffix.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_email": {
+        "description": "The agent bank's contact email address, verbatim, with the printed capitalisation kept as-is. Do not invent a domain. This is often in a mail header at the very top of the page rather than in a contact block -- `Mail Sent From:`, `Message Originated From:`, `From:` and `Sender:` lines all carry it, and all count: take it. A `Contact:` line further down that pairs a name with an address is equally valid. Only omit the key when the page shows no email address at all.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "agent_telephone": {
+        "description": "The agent bank's contact telephone number, exactly as printed including any country code, spaces, dots or dashes (`212-555-0100`, `+1-555-0177`).",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "amount": {
+        "description": "The FUND-ATTRIBUTABLE amount only -- the recipient's share. Agent notices print a facility-wide total and the recipient's share side by side, typically labelled `Global Amount` and `Your Share`; this field is `Your Share`. If the document prints ONLY a facility-wide total and no recipient share, OMIT this key entirely and put the total in `global_amount` -- do not fall back to the global figure here. Emitting a facility-wide total as `amount` makes the reconciliation compare the wrong two numbers. Emit as a plain decimal number with no thousands separators, no currency symbol and no parentheses: `67,900.00` becomes `67900.00`.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "NUMERIC_EXACT"
+      },
+      "counterparty": {
+        "description": "The borrower or issuer the notice is about -- the obligor named on the deal, NOT the fund receiving the notice and NOT the agent bank sending it. Usually printed against a label such as `Borrower:`, `Issuer:` or `Deal:`. Copy the name as printed, including its legal suffix. Together with `notice_date` this is the platform's index key, so it matters more than any other field on the page.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "currency": {
+        "description": "The ISO 4217 three-letter code for the currency the amounts are denominated in (`USD`, `EUR`). Convert a symbol or a spelled-out name to the code.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "fund": {
+        "description": "The fund or portfolio the notice concerns -- the lender side, as distinct from `counterparty`, which is the borrower. PREFER AN EXPLICITLY LABELLED VALUE: when the document carries a `Portfolio:`, `Fund:`, `Lender:` or `Investor:` label, take that value verbatim, even where it is a short internal name (`Senior Credit Fund`, `DL Fund II`) and a longer legal entity is named elsewhere on the page. Only when no such label exists fall back to the addressee on the `TO:` line or in the address block. The labelled value is the one the platform holds; the addressee is often the same fund's registered legal name (`HARBORLIGHT SENIOR LOAN FUND LP`) and does not match. Never a servicing platform, vendor or software name.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "loanx_id": {
+        "description": "The LoanX identifier, printed against a `LoanXid:` or `LoanX ID:` label (`LX204811XXXX1`). Verbatim. Omit the key entirely when the document carries no such label.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "notice_comment": {
+        "description": "Free-text remarks, notes or comments the notice carries, gathered into one string in document order. Includes the producing office, run-date footers and any explanatory paragraph. Emit an empty string when the document has a remarks area that is blank; omit the key when it has no remarks area at all.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "LLM"
+      },
+      "notice_date": {
+        "description": "The date the agent bank issued this notice, as printed on the document. Normalise to ISO 8601 `YYYY-MM-DD` regardless of how the document prints it (`2/2/2026`, `02-Feb-2026` and `February 2, 2026` all become `2026-02-02`). This field and `counterparty` are the two the reconciliation platform indexes on; prioritise them above everything else. If the document prints only an effective or value date and no issue date, leave this absent and populate `value_date`.",
+        "format": "date",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "notice_date_source_raw": {
+        "description": "The notice date exactly as printed on the document, before any normalisation, including its original separators and month spelling (`2/2/2026`, `17-Nov-2026`). Copy the characters verbatim; do not reformat, reorder or expand them.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "reference": {
+        "description": "The wire, payment or transaction reference the notice carries (`WIRE-20260302-EVG`, `MF-FEE-EUR-1119`). Verbatim. Not the facility id and not the contract id. Take it from an explicit `Reference:` label, or from the reference line inside a payment or wire-instruction block -- both of which give the string the paying bank quotes, sometimes a code and sometimes a borrower name with a size and date (`MISTFELL FOODS (04/23)`). Copy it whole, keeping its capitalisation, dropping only a trailing comma. OMIT the key when neither is present: the `Re:` subject line at the top of a notice is NOT a payment reference, and using it produces a value the platform has nothing to match against.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "value_date": {
+        "description": "The date the cash actually moves or the rate takes effect -- the document's effective date, settlement date or payment date. Normalise to ISO 8601 `YYYY-MM-DD` regardless of how the document prints it (`2/2/2026`, `02-Feb-2026` and `February 2, 2026` all become `2026-02-02`). Often equal to `notice_date`; emit both when both are printed, because the platform falls back to this one.",
+        "format": "date",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      }
+    },
+    "type": "object",
+    "x-aws-idp-document-type": "consolidated_payment_advice"
+  },
+  {
+    "$id": "summary_statement",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A position or balance statement summarising a lender's holdings across facilities as at a date, rather than reporting a single activity. Recognisable by statement or position language, an as-of date, and totals by facility. Often carries no wire reference, because it settles nothing.",
+    "properties": {
+      "activity_type": {
+        "description": "The source document's OWN word for what it reports, copied as printed rather than mapped to a standard vocabulary: `Prime Borrowing`, `Commitment Fee`, `Interest`, `Rollover`, `Mandatory Paydown`. Usually the activity or transaction-type label, or the notice's own title. Give the ACTIVITY ALONE: strip any leading interest-rate option, tenor or currency the label is prefixed with, because those describe pricing rather than activity -- a description reading `Term SOFR 3 Month Principal Payment` yields `Principal Payment`, and `USD Loan Repricing for the Deal X/Decrease` yields `Repricing`. Never include a deal name, facility name or amount here.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_bank": {
+        "description": "The institution SENDING the notice -- the administrative agent, on the letterhead or in the `From:` block. Not the borrower and not the recipient fund. Copy as printed, including the legal suffix.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_email": {
+        "description": "The agent bank's contact email address, verbatim, with the printed capitalisation kept as-is. Do not invent a domain. This is often in a mail header at the very top of the page rather than in a contact block -- `Mail Sent From:`, `Message Originated From:`, `From:` and `Sender:` lines all carry it, and all count: take it. A `Contact:` line further down that pairs a name with an address is equally valid. Only omit the key when the page shows no email address at all.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "agent_telephone": {
+        "description": "The agent bank's contact telephone number, exactly as printed including any country code, spaces, dots or dashes (`212-555-0100`, `+1-555-0177`).",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "amount": {
+        "description": "The FUND-ATTRIBUTABLE amount only -- the recipient's share. Agent notices print a facility-wide total and the recipient's share side by side, typically labelled `Global Amount` and `Your Share`; this field is `Your Share`. If the document prints ONLY a facility-wide total and no recipient share, OMIT this key entirely and put the total in `global_amount` -- do not fall back to the global figure here. Emitting a facility-wide total as `amount` makes the reconciliation compare the wrong two numbers. Emit as a plain decimal number with no thousands separators, no currency symbol and no parentheses: `67,900.00` becomes `67900.00`.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "NUMERIC_EXACT"
+      },
+      "counterparty": {
+        "description": "The borrower or issuer the notice is about -- the obligor named on the deal, NOT the fund receiving the notice and NOT the agent bank sending it. Usually printed against a label such as `Borrower:`, `Issuer:` or `Deal:`. Copy the name as printed, including its legal suffix. Together with `notice_date` this is the platform's index key, so it matters more than any other field on the page.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "currency": {
+        "description": "The ISO 4217 three-letter code for the currency the amounts are denominated in (`USD`, `EUR`). Convert a symbol or a spelled-out name to the code.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "facility": {
+        "description": "The credit facility or tranche the notice concerns, as named on the document (`2023 Delayed Draw`, `USD 450M Revolving Credit Facility`, `TERM LOAN A`, `INITIAL TERM LOANS`). The descriptive name, not the id -- the id goes in `facility_id_source_raw`. NOT the interest-rate option: `Term SOFR 3 Month`, `Base Rate`, `LIBOR 1 Month` and `Prime` name how the loan is priced, not which facility it is, and a notice normally prints both. The facility is the loan itself -- a term loan, revolver or delayed-draw tranche -- and is often on the `Re:` or `Deal:` line after the borrower name rather than on the description or rate line.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "fund": {
+        "description": "The fund or portfolio the notice concerns -- the lender side, as distinct from `counterparty`, which is the borrower. PREFER AN EXPLICITLY LABELLED VALUE: when the document carries a `Portfolio:`, `Fund:`, `Lender:` or `Investor:` label, take that value verbatim, even where it is a short internal name (`Senior Credit Fund`, `DL Fund II`) and a longer legal entity is named elsewhere on the page. Only when no such label exists fall back to the addressee on the `TO:` line or in the address block. The labelled value is the one the platform holds; the addressee is often the same fund's registered legal name (`HARBORLIGHT SENIOR LOAN FUND LP`) and does not match. Never a servicing platform, vendor or software name.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "global_amount": {
+        "description": "The facility-wide total, typically labelled `Global Amount`, `Global Prime Borrowing` or `Total Facility Amount`. Never the recipient's share -- that is `amount`. Emit as a plain decimal number with no thousands separators, no currency symbol and no parentheses: `67,900.00` becomes `67900.00`.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "NUMERIC_EXACT"
+      },
+      "notice_date": {
+        "description": "The date the agent bank issued this notice, as printed on the document. Normalise to ISO 8601 `YYYY-MM-DD` regardless of how the document prints it (`2/2/2026`, `02-Feb-2026` and `February 2, 2026` all become `2026-02-02`). This field and `counterparty` are the two the reconciliation platform indexes on; prioritise them above everything else. If the document prints only an effective or value date and no issue date, leave this absent and populate `value_date`.",
+        "format": "date",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "notice_date_source_raw": {
+        "description": "The notice date exactly as printed on the document, before any normalisation, including its original separators and month spelling (`2/2/2026`, `17-Nov-2026`). Copy the characters verbatim; do not reformat, reorder or expand them.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "value_date": {
+        "description": "The date the cash actually moves or the rate takes effect -- the document's effective date, settlement date or payment date. Normalise to ISO 8601 `YYYY-MM-DD` regardless of how the document prints it (`2/2/2026`, `02-Feb-2026` and `February 2, 2026` all become `2026-02-02`). Often equal to `notice_date`; emit both when both are printed, because the platform falls back to this one.",
+        "format": "date",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      }
+    },
+    "type": "object",
+    "x-aws-idp-document-type": "summary_statement"
+  },
+  {
+    "$id": "incomplete_notice",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A document that arrived truncated, illegible or incomplete -- a partial fax, a bare cover sheet, a scan missing pages. Classify a document here rather than guessing the class it would have been: a wrong class with confident fields is worse than an honest incomplete. Recognisable by a cover sheet with no substantive body, a page-count line the document does not satisfy, or a body cut off mid-table. Extract only the few fields actually legible.",
+    "properties": {
+      "agent_bank": {
+        "description": "The institution SENDING the notice -- the administrative agent, on the letterhead or in the `From:` block. Not the borrower and not the recipient fund. Copy as printed, including the legal suffix.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_contact_name": {
+        "description": "The named person or desk at the AGENT BANK -- the sender's contact, in the letterhead, signature block, footer or a `Contact:` line (`Delia Cranmore`, `AGENCY SERVICES`). A team or desk name is a valid value where no individual is named. LOOK AT THE BOTTOM OF THE PAGE FIRST: these notices carry the agent's contact on a `Contact:` line or in a closing block after the figures, frequently as initial and surname (`T. OKAFOR`, `MICHAEL REED`). Prefer that over the `ATTN:` line of the recipient's address block, which names the fund's own staff (`PORTFOLIO ADMIN`, `Fee Administration`) rather than the sender's -- but where `ATTN:` holds the only personal name on the page, use it rather than leaving the field empty.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "counterparty": {
+        "description": "The borrower or issuer the notice is about -- the obligor named on the deal, NOT the fund receiving the notice and NOT the agent bank sending it. Usually printed against a label such as `Borrower:`, `Issuer:` or `Deal:`. Copy the name as printed, including its legal suffix. Together with `notice_date` this is the platform's index key, so it matters more than any other field on the page.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      }
+    },
+    "type": "object",
+    "x-aws-idp-document-type": "incomplete_notice"
+  },
+  {
+    "$id": "unclassified",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A document that is legible and complete but is not one of the loan notice types above. Use this rather than forcing a poor fit or failing the extraction -- the platform has a path for an unclassified notice and no path for a missing one. Do NOT use this for a truncated or illegible document; that is `incomplete_notice`.",
+    "properties": {
+      "activity_type": {
+        "description": "The source document's OWN word for what it reports, copied as printed rather than mapped to a standard vocabulary: `Prime Borrowing`, `Commitment Fee`, `Interest`, `Rollover`, `Mandatory Paydown`. Usually the activity or transaction-type label, or the notice's own title. Give the ACTIVITY ALONE: strip any leading interest-rate option, tenor or currency the label is prefixed with, because those describe pricing rather than activity -- a description reading `Term SOFR 3 Month Principal Payment` yields `Principal Payment`, and `USD Loan Repricing for the Deal X/Decrease` yields `Repricing`. Never include a deal name, facility name or amount here.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "agent_bank": {
+        "description": "The institution SENDING the notice -- the administrative agent, on the letterhead or in the `From:` block. Not the borrower and not the recipient fund. Copy as printed, including the legal suffix.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "counterparty": {
+        "description": "The borrower or issuer the notice is about -- the obligor named on the deal, NOT the fund receiving the notice and NOT the agent bank sending it. Usually printed against a label such as `Borrower:`, `Issuer:` or `Deal:`. Copy the name as printed, including its legal suffix. Together with `notice_date` this is the platform's index key, so it matters more than any other field on the page.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "FUZZY"
+      },
+      "notice_comment": {
+        "description": "Free-text remarks, notes or comments the notice carries, gathered into one string in document order. Includes the producing office, run-date footers and any explanatory paragraph. Emit an empty string when the document has a remarks area that is blank; omit the key when it has no remarks area at all.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "LLM"
+      },
+      "notice_date": {
+        "description": "The date the agent bank issued this notice, as printed on the document. Normalise to ISO 8601 `YYYY-MM-DD` regardless of how the document prints it (`2/2/2026`, `02-Feb-2026` and `February 2, 2026` all become `2026-02-02`). This field and `counterparty` are the two the reconciliation platform indexes on; prioritise them above everything else. If the document prints only an effective or value date and no issue date, leave this absent and populate `value_date`.",
+        "format": "date",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      },
+      "notice_date_source_raw": {
+        "description": "The notice date exactly as printed on the document, before any normalisation, including its original separators and month spelling (`2/2/2026`, `17-Nov-2026`). Copy the characters verbatim; do not reformat, reorder or expand them.",
+        "type": "string",
+        "x-aws-idp-evaluation-method": "EXACT"
+      }
+    },
+    "type": "object",
+    "x-aws-idp-document-type": "unclassified"
+  }
+]

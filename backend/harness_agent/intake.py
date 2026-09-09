@@ -28,7 +28,11 @@ from backend.recon_core.confidence import (
     score_proposal,
 )
 from backend.recon_core.email_policy import build_persisted_draft, coerce_email_draft
-from backend.recon_core.proposal_service import judge_cited_evidence
+from backend.recon_core.proposal_service import (
+    as_result_dict,
+    judge_cited_evidence,
+    notice_search_summary,
+)
 from backend.recon_core.schema import Proposal, ReasoningStep
 from backend.recon_core.tier1_hint import read_hint, warn_on_disagreement
 
@@ -38,7 +42,7 @@ def _rows_from(tool_outputs: dict, tool: str, *, key: str = "rows") -> list[dict
 
     Two shapes, one adapter: ``search_notices`` packs its records under ``rows`` and a guidance retrieval
     packs them under ``retrievalResults``. Both arrive either as dicts or as JSON strings depending on
-    whether the call went through the live gateway, which is what :func:`_as_result_dict` normalises.
+    whether the call went through the live gateway, which is what :func:`~backend.recon_core.proposal_service.as_result_dict` normalises.
 
     :param tool_outputs: StreamResult.tool_outputs (short tool name -> list of results).
     :param tool: the short tool name.
@@ -47,7 +51,7 @@ def _rows_from(tool_outputs: dict, tool: str, *, key: str = "rows") -> list[dict
     """
     records: list[dict] = []
     for result in tool_outputs.get(tool, []) or []:
-        parsed = _as_result_dict(result)
+        parsed = as_result_dict(result)
         if parsed is None:
             continue
         for record in parsed.get(key, []) or []:
@@ -56,40 +60,13 @@ def _rows_from(tool_outputs: dict, tool: str, *, key: str = "rows") -> list[dict
     return records
 
 
-def _as_result_dict(result: object) -> dict | None:
-    """Coerce one recorded ``search_ledger`` result into a dict, tolerant of the LIVE shape.
-
-    The live AgentCore gateway returns MCP tool results as ``text`` content parts — a
-    stringified-JSON blob — so ``stream._extract_payload`` yields a ``str`` and
-    ``tool_outputs["search_ledger"]`` holds JSON *strings*, not dicts (unit-test fixtures use
-    structured ``{"json": {...}}`` parts, which is why this went unnoticed). A raw ``str`` here
-    silently produced zero references → ``proposed_action=None`` → every clean single-match case
-    escalated instead of auto-resolving, regardless of confidence. Parse the string; anything
-    that is neither a dict nor JSON-decodable to one is skipped.
-
-    :param result: one element of ``tool_outputs["search_ledger"]`` (dict | JSON str | other).
-    :returns: the result as a dict, or None when it is not / does not decode to one.
-    """
-    import json
-
-    if isinstance(result, dict):
-        return result
-    if isinstance(result, str):
-        try:
-            decoded = json.loads(result)
-        except (json.JSONDecodeError, ValueError):
-            return None
-        return decoded if isinstance(decoded, dict) else None
-    return None
-
-
 def derive_reference(tool_outputs: dict) -> str | None:
     """The single ledger reference the agent's search_ledger calls matched, or None if 0/>1.
 
     Thin shape-adapter over the SHARED rule in ``recon_core.proposal_service`` (one
     implementation for both backends): collect every reference across the recorded
     ``search_ledger`` results, then exactly-one-distinct wins. Results may be dicts (fixtures)
-    or JSON strings (live gateway text parts) — see :func:`_as_result_dict`.
+    or JSON strings (live gateway text parts) — see :func:`~backend.recon_core.proposal_service.as_result_dict`.
 
     :param tool_outputs: StreamResult.tool_outputs (short tool name → list of results).
     :returns: the sole matched reference, or None.
@@ -98,7 +75,7 @@ def derive_reference(tool_outputs: dict) -> str | None:
 
     refs: list[str] = []
     for result in tool_outputs.get("search_ledger", []) or []:
-        parsed = _as_result_dict(result)
+        parsed = as_result_dict(result)
         rows = parsed.get("rows", []) if parsed is not None else []
         for row in rows:
             ref = row.get("reference") if isinstance(row, dict) else None
@@ -124,7 +101,7 @@ def derive_notice_id(tool_outputs: dict) -> str | None:
 
     ids: list[str] = []
     for result in tool_outputs.get("search_notices", []) or []:
-        parsed = _as_result_dict(result)
+        parsed = as_result_dict(result)
         rows = parsed.get("rows", []) if parsed is not None else []
         for row in rows:
             notice_id = row.get("notice_id") if isinstance(row, dict) else None
@@ -290,6 +267,11 @@ def build_proposal(
     # Derive the executable action: only when there's a single clean ledger ref AND a status.
     reference = derive_reference(stream_result.tool_outputs)
     notice_id = derive_notice_id(stream_result.tool_outputs)
+    # Built here, beside the verdict that reads the same tool_outputs, so the rows the UI shows and
+    # the rows the verdict judged can never be two different derivations that disagree.
+    notice_search = notice_search_summary(
+        results=stream_result.tool_outputs.get("search_notices", []) or []
+    )
     verdict, verdict_reason = judge_cited_evidence(
         notice_rows=_rows_from(stream_result.tool_outputs, "search_notices"),
         guidance_results=_rows_from(
@@ -402,6 +384,7 @@ def build_proposal(
         steps=steps,
         proposed_action=proposed_action,
         proposed_email=proposed_email,
+        notice_search=notice_search,
     )
 
 
@@ -454,6 +437,9 @@ def persist(*, cases: CaseStore, proposal: Proposal) -> None:
         },
         proposed_action=proposal.proposed_action,
         proposed_email=proposal.proposed_email,
+        # Decimal-safe like the steps: notice rows carry float amounts and extraction confidences
+        # straight from the tool, and DynamoDB rejects a raw float.
+        notice_search=to_decimal_safe(proposal.notice_search),
     )
     cases.transition("item_id", proposal.item_id, CaseStatus.PROPOSED)
 

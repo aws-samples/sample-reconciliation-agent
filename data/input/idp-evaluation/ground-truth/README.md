@@ -45,8 +45,8 @@ input bucket starts processing immediately, and if its baseline is not there yet
 against nothing:
 
 ```bash
-aws s3 sync data/input/idp-evaluation/ground-truth/baseline/ s3://<EvaluationBaselineBucket>/ --profile huthmac+demo
-aws s3 sync data/input/idp-evaluation/ground-truth/input/    s3://<InputBucket>/               --profile huthmac+demo
+aws s3 sync data/input/idp-evaluation/ground-truth/baseline/ s3://<EvaluationBaselineBucket>/ --profile <your-profile>
+aws s3 sync data/input/idp-evaluation/ground-truth/input/    s3://<InputBucket>/               --profile <your-profile>
 ```
 
 Run from the repo root; the generator's `--print-sync-commands` prints the same two lines with absolute

@@ -256,6 +256,18 @@ variable "uploads_table_index_arn" {
   default     = ""
 }
 
+variable "notices_table" {
+  description = "Name of the notices table. The Documents tab reads the per-section extraction the post-processing hook embedded on each notice row -- see the read-only grant in main.tf for why nothing here may write to it."
+  type        = string
+  default     = ""
+}
+
+variable "notices_table_arn" {
+  description = "ARN of the same table. No index ARN: the tab reads by notice id (GetItem/BatchGetItem) and never queries an index."
+  type        = string
+  default     = ""
+}
+
 variable "idp_input_bucket" {
   description = "The document pipeline's input bucket. An extraction-routed upload is put here."
   type        = string
@@ -370,6 +382,12 @@ variable "comment_requirement_param" {
 # --- Harness backend selector + evals (Config + Evals tabs) ---
 variable "agent_backend_param" {
   description = "SSM parameter name of the runtime agent-backend selector (runtime|harness)."
+  type        = string
+  default     = ""
+}
+
+variable "agent_model_id_param" {
+  description = "SSM parameter name of the live Tier-2 model selection, read and written by the Config tab."
   type        = string
   default     = ""
 }

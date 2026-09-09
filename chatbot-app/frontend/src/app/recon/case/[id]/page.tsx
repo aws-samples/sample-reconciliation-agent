@@ -29,6 +29,7 @@ import {
 import { IdpDocumentPanel } from "@/components/recon/IdpDocumentPanel";
 import { MatchedNoticesPanel } from "@/components/recon/MatchedNoticesPanel";
 import { Tier1RoutingPanel } from "@/components/recon/Tier1RoutingPanel";
+import { Tier1ResolutionPanel } from "@/components/recon/Tier1ResolutionPanel";
 import { EmailDraftPanel } from "@/components/recon/EmailDraftPanel";
 
 /**
@@ -415,6 +416,15 @@ export default function CaseDetailPage({
   const idp = recon.item?.attributes;
   const components = recon.confidence_components;
 
+  // Whether the deterministic tier resolved this case, in which case none of the agent panels below
+  // apply and all of them are suppressed in favour of Tier1ResolutionPanel.
+  //
+  // Gated on `tier`, deliberately, and NEVER on the agent fields being empty. A Tier-2 case whose
+  // agent produced no trace and no proposal looks identical here, and for that case the emptiness IS
+  // the finding an analyst needs to see. `tier` is the only thing that separates "no agent ran" from
+  // "the agent ran and came back with nothing".
+  const isTier1Resolved = recon.tier === 1 && !!recon.category;
+
   // One row per evidence step, ordered as the agent reported them, then the required steps it never
   // reported at all. Two sources are needed because the two facts live in different places: the
   // agent's per-step note is only on the trace entry, while a step that produced NO trace entry
@@ -724,75 +734,90 @@ export default function CaseDetailPage({
           min-w-0 stays on the wide panels so a long unbroken tool-output line still wraps rather
           than widening the page into a horizontal scrollbar. */}
       <div className="space-y-6">
+        {/* 0. How the deterministic tier cleared this case. Leads the page and REPLACES every agent
+              panel below, rather than sitting above a column of empty ones. An empty panel reads as
+              "something failed to produce this", which on a straight-through auto-clear is both
+              wrong and the opposite of the point — and the proposed-action panel used to say
+              outright that the case escalated for a human decision. */}
+        {isTier1Resolved && (
+          <Tier1ResolutionPanel
+            match={recon.tier1_match}
+            category={recon.category}
+          />
+        )}
+
         {/* 1. The score, and what the agent wants to do about it. The number decides whether this
               case can clear without a human, so it leads; the proposed step and the agent's own
               account sit under it because they are the answer to "and therefore what?" — they
               were a separate panel below the evidence table until 2026-09-03, which put the
               table between the score and its consequence. */}
-        <Panel className="rc-rise min-w-0 p-6" scan>
-          <Eyebrow title="Evidence completeness: the fraction of the matched skill's required investigation steps that returned data answering them. This is the number the auto-resolve threshold compares against. It measures how COMPLETE the evidence is, never whether the answer is right.">
-            Evidence Score
-          </Eyebrow>
-          {recon.confidence == null ? (
-            <div className="rc-display mt-3 text-[34px] font-bold text-[var(--rc-ink-faint)]">
-              —
-            </div>
-          ) : (
-            <>
-              <div className="mt-3 flex items-baseline gap-3">
-                <span className="rc-display text-[34px] font-bold leading-none text-[var(--rc-cyan)]">
-                  {(Number(recon.confidence) * 100).toFixed(0)}%
-                </span>
-                {!components?.unscoreable && (
-                  <span className="rc-mono text-[13px] text-[var(--rc-ink-dim)]">
-                    {components?.satisfied ?? 0} of{" "}
-                    {components?.prescribed ?? 0} required evidence steps
-                    satisfied
-                  </span>
-                )}
-              </div>
-              <div className="mt-4">
-                <ConfidenceMeter value={recon.confidence} />
-              </div>
-            </>
-          )}
-          {components && (
-            <div className="rc-mono mt-3 space-y-1 text-[11px] text-[var(--rc-ink-faint)]">
-              {components.unscoreable ? (
-                <div style={{ color: "var(--rc-amber)" }}>
-                  {components.unscoreable} — no evidence was prescribed, so this
-                  case cannot auto-resolve
+        {!isTier1Resolved && (
+          <>
+            <Panel className="rc-rise min-w-0 p-6" scan>
+              <Eyebrow title="Evidence completeness: the fraction of the matched skill's required investigation steps that returned data answering them. This is the number the auto-resolve threshold compares against. It measures how COMPLETE the evidence is, never whether the answer is right.">
+                Evidence Score
+              </Eyebrow>
+              {recon.confidence == null ? (
+                <div className="rc-display mt-3 text-[34px] font-bold text-[var(--rc-ink-faint)]">
+                  —
                 </div>
-              ) : null}
-              {(components.unsatisfied_step_ids ?? []).length > 0 && (
-                <div style={{ color: "var(--rc-amber)" }}>
-                  returned nothing:{" "}
-                  {components.unsatisfied_step_ids?.join(", ")}
-                </div>
+              ) : (
+                <>
+                  <div className="mt-3 flex items-baseline gap-3">
+                    <span className="rc-display text-[34px] font-bold leading-none text-[var(--rc-cyan)]">
+                      {(Number(recon.confidence) * 100).toFixed(0)}%
+                    </span>
+                    {!components?.unscoreable && (
+                      <span className="rc-mono text-[13px] text-[var(--rc-ink-dim)]">
+                        {components?.satisfied ?? 0} of{" "}
+                        {components?.prescribed ?? 0} required evidence steps
+                        satisfied
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-4">
+                    <ConfidenceMeter value={recon.confidence} />
+                  </div>
+                </>
               )}
-              {(components.unattempted_step_ids ?? []).length > 0 && (
-                <div style={{ color: "var(--rc-amber)" }}>
-                  not attempted: {components.unattempted_step_ids?.join(", ")}
-                </div>
-              )}
-              {/* A reported id the skill never declared. Shown because it is the one entry
+              {components && (
+                <div className="rc-mono mt-3 space-y-1 text-[11px] text-[var(--rc-ink-faint)]">
+                  {components.unscoreable ? (
+                    <div style={{ color: "var(--rc-amber)" }}>
+                      {components.unscoreable} — no evidence was prescribed, so
+                      this case cannot auto-resolve
+                    </div>
+                  ) : null}
+                  {(components.unsatisfied_step_ids ?? []).length > 0 && (
+                    <div style={{ color: "var(--rc-amber)" }}>
+                      returned nothing:{" "}
+                      {components.unsatisfied_step_ids?.join(", ")}
+                    </div>
+                  )}
+                  {(components.unattempted_step_ids ?? []).length > 0 && (
+                    <div style={{ color: "var(--rc-amber)" }}>
+                      not attempted:{" "}
+                      {components.unattempted_step_ids?.join(", ")}
+                    </div>
+                  )}
+                  {/* A reported id the skill never declared. Shown because it is the one entry
                     here that reports a defect in the AGENT's reporting rather than in the
                     evidence: the step it was meant to report shows up as "not attempted"
                     above, and without this line that looks like the agent skipped work it
                     actually did. */}
-              {(components.undeclared_step_ids ?? []).length > 0 && (
-                <div
-                  style={{ color: "var(--rc-amber)" }}
-                  title="The agent reported an evidence step this skill does not declare, so it was ignored for scoring. Usually means it renamed a prescribed step — compare with 'not attempted' above."
-                >
-                  reported but not prescribed (ignored):{" "}
-                  {components.undeclared_step_ids?.join(", ")}
+                  {(components.undeclared_step_ids ?? []).length > 0 && (
+                    <div
+                      style={{ color: "var(--rc-amber)" }}
+                      title="The agent reported an evidence step this skill does not declare, so it was ignored for scoring. Usually means it renamed a prescribed step — compare with 'not attempted' above."
+                    >
+                      reported but not prescribed (ignored):{" "}
+                      {components.undeclared_step_ids?.join(", ")}
+                    </div>
+                  )}
                 </div>
               )}
-            </div>
-          )}
 
-          {/* Context for the score: which skill's step list the fraction above is measured
+              {/* Context for the score: which skill's step list the fraction above is measured
                 against, and what else the agent had in front of it when it chose.
 
                 The IDP document class used to sit here as well. It is the document pipeline's
@@ -800,162 +825,170 @@ export default function CaseDetailPage({
                 pipeline's own extraction-confidence alert count — a different quantity from
                 this score, produced by a different system), and printing it directly beside
                 the recon skill invited reading the two as one field. */}
-          <div className="mt-5 border-t border-[var(--rc-line-soft)] pt-4">
-            {/* The label carries the whole sentence, so the value beside it needs no trailing
+              <div className="mt-5 border-t border-[var(--rc-line-soft)] pt-4">
+                {/* The label carries the whole sentence, so the value beside it needs no trailing
                   qualifier. The agent classifies each case into exactly ONE break type and
                   investigates against that skill's procedure, and that skill's declared evidence
                   steps are the denominator of the Evidence Score above — which is what "drove the
                   score" means here. */}
-            <div
-              className="rc-eyebrow mb-1"
-              title="The reconciliation skill this investigation ran under. Its declared evidence steps are the denominator of the Evidence Score above. Not the IDP document class — that is the document pipeline's own classification, on the panel above."
-            >
-              Skill that drove the score
-            </div>
-            <div className="rc-mono text-[13px] text-[var(--rc-ink)]">
-              {/* The classification rationale is a tooltip rather than a paragraph. It used to be
+                <div
+                  className="rc-eyebrow mb-1"
+                  title="The reconciliation skill this investigation ran under. Its declared evidence steps are the denominator of the Evidence Score above. Not the IDP document class — that is the document pipeline's own classification, on the panel above."
+                >
+                  Skill that drove the score
+                </div>
+                <div className="rc-mono text-[13px] text-[var(--rc-ink)]">
+                  {/* The classification rationale is a tooltip rather than a paragraph. It used to be
                     rendered here in full, directly above the agent's final narrative, and two
                     paragraphs of agent prose stacked on one panel read as one continuous account
                     when they are answers to different questions ("why this skill?" versus "what
                     should happen?"). It is one line of context about a single field, so it belongs
                     on that field. */}
-              <span
-                title={
-                  recon.classification_reasoning
-                    ? `Why this skill: ${recon.classification_reasoning}`
-                    : "No classification reasoning was recorded."
-                }
-              >
-                {drivingSkill ?? "—"}
-              </span>
-            </div>
-            <div
-              className="rc-mono mt-2 text-[11px] text-[var(--rc-ink-faint)]"
-              title="Steps the agent took to reconcile, and which Gateway tools it invoked."
-            >
-              {stepSummary}
-            </div>
-          </div>
+                  <span
+                    title={
+                      recon.classification_reasoning
+                        ? `Why this skill: ${recon.classification_reasoning}`
+                        : "No classification reasoning was recorded."
+                    }
+                  >
+                    {drivingSkill ?? "—"}
+                  </span>
+                </div>
+                <div
+                  className="rc-mono mt-2 text-[11px] text-[var(--rc-ink-faint)]"
+                  title="Steps the agent took to reconcile, and which Gateway tools it invoked."
+                >
+                  {stepSummary}
+                </div>
+              </div>
 
-          {/* The proposed next step. Rendered from the STRUCTURED action when the agent produced
+              {/* The proposed next step. Rendered from the STRUCTURED action when the agent produced
                 one, because that is the thing that would actually execute; the prose is the agent's
                 account of it and can describe a step the action does not contain. */}
-          <div className="mt-5 border-t border-[var(--rc-line-soft)] pt-4">
-            <div
-              className="rc-eyebrow mb-2"
-              title="The executable step the agent proposes. Absent when the investigation found nothing safely actionable — such a case always escalates to a human regardless of its score."
-            >
-              Proposed next step
-            </div>
-            {recon.proposed_action ? (
-              <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
-                {Object.entries(recon.proposed_action).map(([k, v]) => (
-                  <Fragment key={k}>
-                    <dt className="rc-mono text-[12px] text-[var(--rc-ink-faint)]">
-                      {k}
-                    </dt>
-                    <dd className="rc-mono break-words text-[12px] text-[var(--rc-ink)]">
-                      {typeof v === "object" && v !== null
-                        ? JSON.stringify(v)
-                        : String(v)}
-                    </dd>
-                  </Fragment>
-                ))}
-              </dl>
-            ) : (
-              <p className="rc-mono text-[12px] text-[var(--rc-amber)]">
-                No executable action was proposed — this case escalates for a
-                human decision.
-              </p>
-            )}
-          </div>
+              <div className="mt-5 border-t border-[var(--rc-line-soft)] pt-4">
+                <div
+                  className="rc-eyebrow mb-2"
+                  title="The executable step the agent proposes. Absent when the investigation found nothing safely actionable — such a case always escalates to a human regardless of its score."
+                >
+                  Proposed next step
+                </div>
+                {recon.proposed_action ? (
+                  <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+                    {Object.entries(recon.proposed_action).map(([k, v]) => (
+                      <Fragment key={k}>
+                        <dt className="rc-mono text-[12px] text-[var(--rc-ink-faint)]">
+                          {k}
+                        </dt>
+                        <dd className="rc-mono break-words text-[12px] text-[var(--rc-ink)]">
+                          {typeof v === "object" && v !== null
+                            ? JSON.stringify(v)
+                            : String(v)}
+                        </dd>
+                      </Fragment>
+                    ))}
+                  </dl>
+                ) : (
+                  <p className="rc-mono text-[12px] text-[var(--rc-amber)]">
+                    No executable action was proposed — this case escalates for
+                    a human decision.
+                  </p>
+                )}
+              </div>
 
-          {/* The agent's own account, kept but demoted. It carries reasoning the structured
+              {/* The agent's own account, kept but demoted. It carries reasoning the structured
                 fields above cannot, and it is the wrong thing to lead with.
 
                 This is the ONLY agent prose on the panel, deliberately. It is the `resolution` the
                 agent submitted with its proposal — the same string the trace's final `propose`
                 entry carries — so it is the account of the conclusion, written after the
                 investigation. Nothing else on this panel should be a paragraph. */}
-          <div className="mt-5 border-t border-[var(--rc-line-soft)] pt-4">
-            <div
-              className="rc-eyebrow mb-2"
-              title="The agent's final account of the case, as submitted with its proposal. Not the classification rationale — that is a tooltip on the skill above."
-            >
-              Agent&apos;s narrative
-            </div>
-            <p className="text-[13px] leading-relaxed text-[var(--rc-ink-dim)]">
-              {recon.resolution ?? "—"}
-            </p>
-          </div>
-        </Panel>
+              <div className="mt-5 border-t border-[var(--rc-line-soft)] pt-4">
+                <div
+                  className="rc-eyebrow mb-2"
+                  title="The agent's final account of the case, as submitted with its proposal. Not the classification rationale — that is a tooltip on the skill above."
+                >
+                  Agent&apos;s narrative
+                </div>
+                <p className="text-[13px] leading-relaxed text-[var(--rc-ink-dim)]">
+                  {recon.resolution ?? "—"}
+                </p>
+              </div>
+            </Panel>
 
-        {/* 2. Where the score came from. Its own section now that it has the full width: the
+            {/* 2. Where the score came from. Its own section now that it has the full width: the
               "what was found" column is a sentence per row, and it was the thing the old
               two-column layout squeezed hardest.
 
               This table replaced a single paragraph of the agent's prose: the paragraph said what
               the agent concluded but not which prescribed step each finding answered, so there
               was no way to see WHY the score was what it was without reading the whole trace. */}
-        <Panel className="rc-rise min-w-0 p-6">
-          <Eyebrow title="One row per evidence step the matched skill prescribes, and what the agent's tool calls actually returned for it. The satisfied fraction of these rows IS the Evidence Score above.">
-            Evidence Behind the Score
-          </Eyebrow>
+            <Panel className="rc-rise min-w-0 p-6">
+              <Eyebrow title="One row per evidence step the matched skill prescribes, and what the agent's tool calls actually returned for it. The satisfied fraction of these rows IS the Evidence Score above.">
+                Evidence Behind the Score
+              </Eyebrow>
 
-          <div className="mt-4">
-            {evidenceRows.length === 0 ? (
-              <p className="rc-mono text-[12px] text-[var(--rc-ink-faint)]">
-                No evidence steps were reported for this case.
-              </p>
-            ) : (
-              <div className="overflow-hidden rounded border border-[var(--rc-line-soft)]">
-                <table className="w-full table-fixed border-collapse text-left">
-                  <thead>
-                    {/* Re-weighted for the full-width layout. The step id is a short mono token and
+              <div className="mt-4">
+                {evidenceRows.length === 0 ? (
+                  <p className="rc-mono text-[12px] text-[var(--rc-ink-faint)]">
+                    No evidence steps were reported for this case.
+                  </p>
+                ) : (
+                  <div className="overflow-hidden rounded border border-[var(--rc-line-soft)]">
+                    <table className="w-full table-fixed border-collapse text-left">
+                      <thead>
+                        {/* Re-weighted for the full-width layout. The step id is a short mono token and
                         the result is one word; at the old 38/22 split they held mostly whitespace
                         while the finding — the only column with a sentence in it — wrapped into a
                         narrow ribbon. */}
-                    <tr className="bg-[var(--rc-line-soft)]/40">
-                      <th className="rc-eyebrow w-[20%] px-3 py-2">Step</th>
-                      <th className="rc-eyebrow w-[12%] px-3 py-2">Result</th>
-                      <th className="rc-eyebrow px-3 py-2">What was found</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {evidenceRows.map((row) => (
-                      <tr
-                        key={row.stepId}
-                        className="border-t border-[var(--rc-line-soft)] align-top"
-                      >
-                        <td className="rc-mono break-words px-3 py-2 text-[12px] text-[var(--rc-ink)]">
-                          {row.stepId}
-                        </td>
-                        <td
-                          className="rc-mono px-3 py-2 text-[12px]"
-                          style={{ color: row.color }}
-                          title={row.tip}
-                        >
-                          {row.label}
-                        </td>
-                        <td className="break-words px-3 py-2 text-[12px] leading-relaxed text-[var(--rc-ink-dim)]">
-                          {row.note}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                        <tr className="bg-[var(--rc-line-soft)]/40">
+                          <th className="rc-eyebrow w-[20%] px-3 py-2">Step</th>
+                          <th className="rc-eyebrow w-[12%] px-3 py-2">
+                            Result
+                          </th>
+                          <th className="rc-eyebrow px-3 py-2">
+                            What was found
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {evidenceRows.map((row) => (
+                          <tr
+                            key={row.stepId}
+                            className="border-t border-[var(--rc-line-soft)] align-top"
+                          >
+                            <td className="rc-mono break-words px-3 py-2 text-[12px] text-[var(--rc-ink)]">
+                              {row.stepId}
+                            </td>
+                            <td
+                              className="rc-mono px-3 py-2 text-[12px]"
+                              style={{ color: row.color }}
+                              title={row.tip}
+                            >
+                              {row.label}
+                            </td>
+                            <td className="break-words px-3 py-2 text-[12px] leading-relaxed text-[var(--rc-ink-dim)]">
+                              {row.note}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-        </Panel>
+            </Panel>
 
-        {/* 2b. The notices behind those rows. Directly under the evidence table because three of the
+            {/* 2b. The notices behind those rows. Directly under the evidence table because three of the
               scored steps are answered from a notice, so "returned nothing" above and "matched no
-              notices" here are the same fact stated at two levels of detail. Reads the trace rather
-              than the notices table, so it shows what the agent saw. */}
-        <MatchedNoticesPanel steps={steps} />
+              notices" here are the same fact stated at two levels of detail. Reads the case's own
+              persisted rows rather than the notices table, so it shows what the agent saw; `steps` is
+              the fallback for cases proposed before those rows were stored. */}
+            <MatchedNoticesPanel
+              noticeSearch={recon.notice_search}
+              steps={steps}
+            />
 
-        {/* 3. What Tier-1 concluded deterministically, before the agent was dispatched — read
+            {/* 3. What Tier-1 concluded deterministically, before the agent was dispatched — read
               after the agent's own findings, as the cheaper answer they either confirm or overturn.
               It sat above everything until 2026-09-03.
 
@@ -963,151 +996,158 @@ export default function CaseDetailPage({
               tier1_escalation_reason is the one key stamped on EVERY escalation, and it can
               legitimately be null, which a truthiness check would hide in exactly the case worth
               showing. */}
-        {idp?.tier1_escalation_reason !== undefined && (
-          <Tier1RoutingPanel tier1={idp} agentClass={recon.class_id} />
-        )}
+            {idp?.tier1_escalation_reason !== undefined && (
+              <Tier1RoutingPanel tier1={idp} agentClass={recon.class_id} />
+            )}
 
-        {/* 4. Agent trace: the actual steps the agent took. min-w-0 so a long tool-output line
+            {/* 4. Agent trace: the actual steps the agent took. min-w-0 so a long tool-output line
               wraps rather than widening the page. */}
-        <Panel className="rc-rise min-w-0 p-6">
-          <div className="flex items-center justify-between">
-            <Eyebrow title="The steps the agent actually took: recall → classify → run skill(s) → tool calls → evidence-step reports → propose → (execute when auto-actioned). No per-step confidence — see Evidence Score, which counts the satisfied evidence steps.">
-              Agent Trace
-            </Eyebrow>
-            <span className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">
-              {steps.length} step{steps.length === 1 ? "" : "s"}
-            </span>
-          </div>
+            <Panel className="rc-rise min-w-0 p-6">
+              <div className="flex items-center justify-between">
+                <Eyebrow title="The steps the agent actually took: recall → classify → run skill(s) → tool calls → evidence-step reports → propose → (execute when auto-actioned). No per-step confidence — see Evidence Score, which counts the satisfied evidence steps.">
+                  Agent Trace
+                </Eyebrow>
+                <span className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">
+                  {steps.length} step{steps.length === 1 ? "" : "s"}
+                </span>
+              </div>
 
-          {steps.length === 0 ? (
-            <p className="rc-mono mt-4 text-[12px] text-[var(--rc-ink-faint)]">
-              No investigation steps recorded.
-            </p>
-          ) : (
-            <ol className="mt-5 space-y-0">
-              {steps.map((s, i) => {
-                const meta = kindMeta(s.kind);
-                const failed =
-                  s.kind === "execute" && s.outcome?.startsWith("failed");
-                // An evidence step's dot carries its tri-state outcome: obtained (green), attempted
-                // and empty (amber), never attempted (faint). Amber and faint both score as
-                // unsatisfied but call for different follow-up, so they must not look alike.
-                const dot =
-                  s.kind === "execute"
-                    ? failed
-                      ? "var(--rc-red)"
-                      : "var(--rc-green)"
-                    : s.kind === "evidence_step"
-                      ? s.satisfied === true
-                        ? "var(--rc-green)"
-                        : s.satisfied === false
-                          ? "var(--rc-amber)"
-                          : "var(--rc-ink-faint)"
-                      : "var(--rc-cyan)";
-                return (
-                  <li key={i} className="relative pb-6 pl-6 last:pb-0">
-                    {/* timeline rail */}
-                    <span
-                      className="absolute left-0 top-1 h-2.5 w-2.5 rounded-full"
-                      style={{ background: dot, boxShadow: `0 0 6px ${dot}` }}
-                    />
-                    {i < steps.length - 1 && (
-                      <span className="absolute left-[4.5px] top-4 h-full w-px bg-[var(--rc-line)]" />
-                    )}
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span
-                        className="rc-mono rounded border border-[var(--rc-line)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.1em] text-[var(--rc-ink-faint)]"
-                        title={meta.tip}
-                      >
-                        {meta.label}
-                      </span>
-                      <span className="rc-mono text-[13px] font-medium text-[var(--rc-ink)]">
-                        {/* propose step's skill IS the chosen class; "unknown" means the
+              {steps.length === 0 ? (
+                <p className="rc-mono mt-4 text-[12px] text-[var(--rc-ink-faint)]">
+                  No investigation steps recorded.
+                </p>
+              ) : (
+                <ol className="mt-5 space-y-0">
+                  {steps.map((s, i) => {
+                    const meta = kindMeta(s.kind);
+                    const failed =
+                      s.kind === "execute" && s.outcome?.startsWith("failed");
+                    // An evidence step's dot carries its tri-state outcome: obtained (green), attempted
+                    // and empty (amber), never attempted (faint). Amber and faint both score as
+                    // unsatisfied but call for different follow-up, so they must not look alike.
+                    const dot =
+                      s.kind === "execute"
+                        ? failed
+                          ? "var(--rc-red)"
+                          : "var(--rc-green)"
+                        : s.kind === "evidence_step"
+                          ? s.satisfied === true
+                            ? "var(--rc-green)"
+                            : s.satisfied === false
+                              ? "var(--rc-amber)"
+                              : "var(--rc-ink-faint)"
+                          : "var(--rc-cyan)";
+                    return (
+                      <li key={i} className="relative pb-6 pl-6 last:pb-0">
+                        {/* timeline rail */}
+                        <span
+                          className="absolute left-0 top-1 h-2.5 w-2.5 rounded-full"
+                          style={{
+                            background: dot,
+                            boxShadow: `0 0 6px ${dot}`,
+                          }}
+                        />
+                        {i < steps.length - 1 && (
+                          <span className="absolute left-[4.5px] top-4 h-full w-px bg-[var(--rc-line)]" />
+                        )}
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span
+                            className="rc-mono rounded border border-[var(--rc-line)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.1em] text-[var(--rc-ink-faint)]"
+                            title={meta.tip}
+                          >
+                            {meta.label}
+                          </span>
+                          <span className="rc-mono text-[13px] font-medium text-[var(--rc-ink)]">
+                            {/* propose step's skill IS the chosen class; "unknown" means the
                             classifier fell below threshold / off-catalog — say so plainly
                             instead of surfacing a bare "unknown" that reads like a glitch. */}
-                        {s.kind === "propose" && s.skill === "unknown"
-                          ? "Unclassified"
-                          : s.skill}
-                      </span>
-                      {s.ts && (
-                        <span
-                          className="rc-mono text-[11px] text-[var(--rc-ink-faint)]"
-                          title="When this step was recorded (UTC)"
-                        >
-                          {new Date(s.ts).toLocaleString()}
-                        </span>
-                      )}
-                      {s.kind === "evidence_step" && (
-                        <span
-                          className="rc-mono rounded px-1.5 py-0.5 text-[10px] uppercase tracking-[0.1em]"
-                          style={{ border: `1px solid ${dot}`, color: dot }}
-                          title="Whether this prescribed step's tool call returned data answering it. 'Not attempted' means the agent made no such call — the same score as empty, but a different finding."
-                        >
-                          {s.step_id ?? "step"} ·{" "}
-                          {s.satisfied === true
-                            ? "Obtained"
-                            : s.satisfied === false
-                              ? "Returned nothing"
-                              : "Not attempted"}
-                        </span>
-                      )}
-                      {s.kind === "execute" && s.outcome && (
-                        <span
-                          className="rc-mono rounded px-1.5 py-0.5 text-[10px] uppercase tracking-[0.1em]"
-                          style={{
-                            border: `1px solid ${failed ? "var(--rc-red)" : "var(--rc-green)"}`,
-                            color: failed ? "var(--rc-red)" : "var(--rc-green)",
-                          }}
-                          title="Whether the resolution write actually executed."
-                        >
-                          {failed ? "Failed" : "Executed"}
-                        </span>
-                      )}
-                    </div>
-                    <p className="mt-2 text-[13px] leading-relaxed text-[var(--rc-ink-dim)]">
-                      {s.reasoning}
-                    </p>
-                    {/* tool_call: show the invocation and its result. */}
-                    {s.kind === "tool_call" && (
-                      <div className="rc-mono mt-2 rounded border border-[var(--rc-line)] bg-[var(--rc-panel-2)] p-2 text-[11px] text-[var(--rc-ink-faint)]">
-                        <div className="text-[var(--rc-ink-dim)]">
-                          {s.tool}({JSON.stringify(s.tool_input ?? {})})
+                            {s.kind === "propose" && s.skill === "unknown"
+                              ? "Unclassified"
+                              : s.skill}
+                          </span>
+                          {s.ts && (
+                            <span
+                              className="rc-mono text-[11px] text-[var(--rc-ink-faint)]"
+                              title="When this step was recorded (UTC)"
+                            >
+                              {new Date(s.ts).toLocaleString()}
+                            </span>
+                          )}
+                          {s.kind === "evidence_step" && (
+                            <span
+                              className="rc-mono rounded px-1.5 py-0.5 text-[10px] uppercase tracking-[0.1em]"
+                              style={{ border: `1px solid ${dot}`, color: dot }}
+                              title="Whether this prescribed step's tool call returned data answering it. 'Not attempted' means the agent made no such call — the same score as empty, but a different finding."
+                            >
+                              {s.step_id ?? "step"} ·{" "}
+                              {s.satisfied === true
+                                ? "Obtained"
+                                : s.satisfied === false
+                                  ? "Returned nothing"
+                                  : "Not attempted"}
+                            </span>
+                          )}
+                          {s.kind === "execute" && s.outcome && (
+                            <span
+                              className="rc-mono rounded px-1.5 py-0.5 text-[10px] uppercase tracking-[0.1em]"
+                              style={{
+                                border: `1px solid ${failed ? "var(--rc-red)" : "var(--rc-green)"}`,
+                                color: failed
+                                  ? "var(--rc-red)"
+                                  : "var(--rc-green)",
+                              }}
+                              title="Whether the resolution write actually executed."
+                            >
+                              {failed ? "Failed" : "Executed"}
+                            </span>
+                          )}
                         </div>
-                        {s.tool_output && (
-                          <div className="mt-1 break-all">
-                            → {s.tool_output}
+                        <p className="mt-2 text-[13px] leading-relaxed text-[var(--rc-ink-dim)]">
+                          {s.reasoning}
+                        </p>
+                        {/* tool_call: show the invocation and its result. */}
+                        {s.kind === "tool_call" && (
+                          <div className="rc-mono mt-2 rounded border border-[var(--rc-line)] bg-[var(--rc-panel-2)] p-2 text-[11px] text-[var(--rc-ink-faint)]">
+                            <div className="text-[var(--rc-ink-dim)]">
+                              {s.tool}({JSON.stringify(s.tool_input ?? {})})
+                            </div>
+                            {s.tool_output && (
+                              <div className="mt-1 break-all">
+                                → {s.tool_output}
+                              </div>
+                            )}
                           </div>
                         )}
-                      </div>
-                    )}
-                    {/* execute: show the structured action performed. */}
-                    {s.kind === "execute" && s.action && (
-                      <div className="rc-mono mt-2 break-all rounded border border-[var(--rc-line)] bg-[var(--rc-panel-2)] p-2 text-[11px] text-[var(--rc-ink-faint)]">
-                        {JSON.stringify(s.action)}
-                      </div>
-                    )}
-                    {normalizeEvidence(s.evidence).length > 0 && (
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {normalizeEvidence(s.evidence).map((e, j) => (
-                          <span
-                            key={j}
-                            className="rc-mono rounded border border-[var(--rc-line)] bg-[var(--rc-panel-2)] px-2 py-1 text-[11px] text-[var(--rc-ink-faint)]"
-                          >
-                            {e}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </li>
-                );
-              })}
-            </ol>
-          )}
-        </Panel>
+                        {/* execute: show the structured action performed. */}
+                        {s.kind === "execute" && s.action && (
+                          <div className="rc-mono mt-2 break-all rounded border border-[var(--rc-line)] bg-[var(--rc-panel-2)] p-2 text-[11px] text-[var(--rc-ink-faint)]">
+                            {JSON.stringify(s.action)}
+                          </div>
+                        )}
+                        {normalizeEvidence(s.evidence).length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {normalizeEvidence(s.evidence).map((e, j) => (
+                              <span
+                                key={j}
+                                className="rc-mono rounded border border-[var(--rc-line)] bg-[var(--rc-panel-2)] px-2 py-1 text-[11px] text-[var(--rc-ink-faint)]"
+                              >
+                                {e}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ol>
+              )}
+            </Panel>
 
-        {/* 5. Latest AgentCore evaluation. Last because it scores the session the four sections
+            {/* 5. Latest AgentCore evaluation. Last because it scores the session the four sections
               above describe — there is nothing to make of it until you have read them. */}
-        <CaseEvalPanel caseId={id} status={recon?.status} />
+            <CaseEvalPanel caseId={id} status={recon?.status} />
+          </>
+        )}
       </div>
     </div>
   );

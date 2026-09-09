@@ -8,6 +8,14 @@
 // route handler runs. Use reconFetch — never a bare fetch — for anything under /api/recon.
 
 import { reconFetch } from "@/lib/recon-auth";
+// Re-exported below so callers get the strategy types from this module like every other API type.
+import type { MemoryStrategyResponse } from "@/lib/memoryStrategy";
+
+export type {
+  MemoryStrategyInfo,
+  MemoryStrategyOverride,
+  MemoryStrategyResponse,
+} from "@/lib/memoryStrategy";
 
 export type TraceKind =
   | "lesson_recall"
@@ -94,6 +102,44 @@ export interface Tier1Detail {
 }
 
 /**
+ * The comparison Tier-1 performed to auto-clear a case, as `backend/tier1/handler.py` persists it
+ * on the case's `tier1_match`.
+ *
+ * Every field is optional, for two independent reasons. Cases auto-cleared before this attribute
+ * existed have none of them, and the two auto-clear paths report different subsets: `matched_on:
+ * "rule"` compares two sides of the same item, while `"general_ledger"` compares one extracted
+ * amount against one ledger row. Read `matched_on` first, not the field presence.
+ *
+ * The amounts are STRINGS because they are `Decimal` on the backend. Do not parse them to render
+ * them — a float round-trip turns a margin of `0.02` into `0.020000000000000018`, which reads as a
+ * precision fault in the reconciliation rather than in the display.
+ */
+export interface Tier1Match {
+  /** Which deterministic path cleared the item. Absent on rows written before it was recorded. */
+  matched_on?: "rule" | "general_ledger";
+  /** The absolute margin between the two compared values, and the tolerance it had to fall inside. */
+  difference?: string;
+  tolerance?: string;
+  // --- matched_on: "rule" ---
+  rule_domain?: string;
+  match_attr?: string;
+  side_a_name?: string;
+  side_b_name?: string;
+  side_a_value?: string;
+  side_b_value?: string;
+  // --- matched_on: "general_ledger" ---
+  borrower?: string;
+  entry_type?: string;
+  extracted_amount?: string;
+  ledger_amount?: string;
+  /** How much the lookup had to choose between; a unique match out of many is a firmer one. */
+  candidates_considered?: string;
+  ledger_rows_returned?: string;
+  /** The single settling ledger row, with every value stringified on the way into DynamoDB. */
+  ledger_row?: Record<string, string>;
+}
+
+/**
  * Draft lifecycle, mirroring `backend/recon_core/email_policy.py`'s DRAFT_* constants.
  *
  * `render_failed` is not something an analyst did: the agent cited a template whose declared variables
@@ -145,6 +191,19 @@ export interface EmailDraft {
 export interface ReconCase {
   item_id: string;
   status: string;
+  /**
+   * Which tier produced this case: 1 for a deterministic auto-clear, 2 for an agent escalation.
+   *
+   * This is the ONLY signal that separates "no agent ran" from "the agent ran and found nothing",
+   * and the case screen must gate on it rather than on whether the agent fields are empty. A Tier-2
+   * case with an empty trace is a finding an analyst needs to see; a Tier-1 case with an empty trace
+   * is the deterministic tier working.
+   */
+  tier?: number;
+  /** The deterministic auto-clear reason, e.g. `amount-match` or `gl-match`. Null on escalations. */
+  category?: string | null;
+  /** How Tier-1 cleared the item. Absent on escalations and on cases cleared before it was recorded. */
+  tier1_match?: Tier1Match | null;
   class_id?: string;
   classification_reasoning?: string;
   resolution?: string;
@@ -175,8 +234,54 @@ export interface ReconCase {
   proposed_action?: Record<string, unknown> | null;
   // Counterparty email the agent drafted, if it proposed writing to anyone. Absent on most cases.
   proposed_email?: EmailDraft | null;
+  // The notices the investigation matched, as `search_notices` returned them — persisted whole by
+  // the agent because the trace's `tool_output` is a 600-char display summary that cuts a notice row
+  // mid-field. ABSENT on cases proposed before this attribute existed; those fall back to the trace,
+  // which is why MatchedNoticesPanel still carries a trace derivation. See the panel's header.
+  notice_search?: NoticeSearch | null;
   // Full nested item as stored (carries attributes.idp_* from the hook).
-  item?: { attributes?: IdpDetail & Tier1Detail; source_refs?: string[] };
+  item?: ReconItem;
+}
+
+/**
+ * The persisted result of a case's `search_notices` calls.
+ *
+ * Mirrors `backend/harness_agent/intake.notice_search_summary`. `searched` distinguishes "the tool
+ * never ran" (a harness-produced case — the panel renders nothing) from "it ran and matched nothing".
+ */
+export interface NoticeSearch {
+  searched: boolean;
+  /** Full notice rows, de-duplicated by `notice_id`, in the order the tool first returned them. */
+  rows: Record<string, unknown>[];
+  /** The attributes the tool reports it matched on, merged across calls. */
+  matched_on: string[];
+  /** A tool-level error, when a call failed rather than returning rows. */
+  error: string | null;
+  /** Rows the backend's size guard dropped. Named rather than hidden so the panel never implies it
+   * is showing everything. 0 on any realistic search. */
+  omitted: number;
+}
+
+/**
+ * The submitted item, as `/api/recon/cases` returns it.
+ *
+ * The route unmarshalls each DynamoDB row whole with NO projection, so this is the payload the
+ * submitter sent, plus whatever the pipeline stamped onto `attributes` afterwards. It is declared here
+ * so the queue can offer those fields as columns; before that it was typed as `attributes` and
+ * `source_refs` only, which understated what was already on the wire.
+ *
+ * `sides[].attributes` values are strings by the intake contract (`"0.00"`, never `0`) — see
+ * `lib/reconSamples.ts`. The item-level `attributes` bag is free-form: `tier1_*` and `idp_*` are the
+ * keys the platform writes, and anything else in there is the submitter's own.
+ */
+export interface ReconItem {
+  item_id?: string;
+  domain?: string;
+  /** Reconciliation tier the item entered at. A number in storage. */
+  tier?: number;
+  source_refs?: string[];
+  sides?: { name?: string; attributes?: Record<string, string> }[];
+  attributes?: IdpDetail & Tier1Detail & Record<string, unknown>;
 }
 
 export interface SkillType {
@@ -491,6 +596,44 @@ export async function getMemoryRecords(): Promise<MemoryRecord[]> {
   return json(await reconFetch(`/api/recon/memory`));
 }
 
+/** Outcome of a delete: which records went, and which the service refused, with its reason. */
+export interface MemoryDeleteResult {
+  deleted: string[];
+  failed: { id: string; error: string }[];
+}
+
+/**
+ * Delete consolidated long-term memory records.
+ *
+ * Admin-gated server-side, so a non-admin caller gets a 403 naming the group they are missing.
+ *
+ * @param ids the memory record ids to delete; at most 50 per call.
+ * @returns which ids were deleted and which failed, so a partial result is visible to the caller.
+ */
+export async function deleteMemoryRecords(
+  ids: string[],
+): Promise<MemoryDeleteResult> {
+  return json(
+    await reconFetch(`/api/recon/memory`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    }),
+  );
+}
+
+/**
+ * Read the live extraction strategy behind the memory records.
+ *
+ * Read-only by design — there is no matching write call, because the strategy is owned by Terraform
+ * and changing its `type` would replace it and delete every extracted record.
+ *
+ * @returns the memory's status and its strategies, each with its extraction prompt and model.
+ */
+export async function getMemoryStrategy(): Promise<MemoryStrategyResponse> {
+  return json(await reconFetch(`/api/recon/memory/strategy`));
+}
+
 // --- Platform config: Tier-1 toggle + read-only Lambda source viewer ---
 
 export interface PlatformConfig {
@@ -501,6 +644,13 @@ export interface PlatformConfig {
   commentRequirement: "required" | "optional" | "disapprove-only";
   // Tier-2 agent backend: container Runtime or managed Harness (runtime-switchable).
   agentBackend: "runtime" | "harness";
+  // Which Bedrock model the Tier-2 agent invokes, as a cross-region inference profile id. `null`
+  // means no selection is recorded, so each backend uses the model it was deployed with — which is
+  // NOT the same statement as any particular id, and is why this is nullable rather than defaulted.
+  agentModelId: string | null;
+  // The ids the BFF will accept, served by the same GET so the UI's options cannot drift from the
+  // list the PUT validates against. Read-only.
+  agentModelIds?: readonly string[];
   // Domains a counterparty email may be addressed to. READ-ONLY here: it comes from the deploy's
   // environment (terraform `counterparty_email_domains`), and the BFF rejects an attempt to PUT it
   // rather than accepting a change the interceptor would not honor. Empty means no counterparty
@@ -1253,4 +1403,99 @@ export async function getIdpDocument(
     ),
   );
   return body.document;
+}
+
+// --- What was extracted from a document ----------------------------------------------------------
+
+// Separate from the types above because it comes from somewhere else entirely: everything above is the
+// pipeline's tracking record, and none of it says what the document SAID. The values and their
+// confidences are embedded on recon's own notice row at ingest, by the post-processing hook that
+// already holds them; `src/lib/noticeExtraction.ts` is the server-side reader, and these are the
+// shapes it returns.
+
+/** One scored field, paired with whether IDP extracted a value for it. Mirrors `ExtractedFieldConfidence`. */
+export interface ExtractedFieldConfidence {
+  /** Dotted/bracketed path, e.g. `amount` or `AccrualLineItems[1].Amount`. */
+  field: string;
+  confidence: number;
+  /** IDP's threshold for THIS field. Per-field: 0.8 and 0.9 both occur live. Null when absent. */
+  threshold: number | null;
+  extracted: boolean;
+}
+
+/** One section's extraction. `error` is set instead of the data when that section could not be read. */
+export interface ExtractedSection {
+  section_id: string | null;
+  classification: string | null;
+  page_ids: number[];
+  /** `inference_result`, verbatim. Key order is IDP's, which is the order the schema declares. */
+  fields: Record<string, unknown>;
+  confidences: ExtractedFieldConfidence[];
+  /** Mean over the fields IDP extracted a value for, or null. Never a fabricated default. */
+  mean_confidence: number | null;
+  alert_count: number;
+  error?: string;
+}
+
+/** One document's extraction, with the reason there is none when the notice carries none. */
+export interface NoticeExtraction {
+  sections: ExtractedSection[];
+  /**
+   * Why an existing notice carries no per-field detail, or null when it carries some. Distinct from an
+   * empty `sections`, which means the extractor genuinely read nothing, and from a 404, which means
+   * recon has no notice for the document at all. Three different answers, shown as three.
+   */
+  unavailable: string | null;
+}
+
+/**
+ * What the pipeline read out of one document, section by section.
+ *
+ * @param objectKey - the raw object key. Encoded once here; the route does not decode it again.
+ */
+export async function getIdpExtraction(
+  objectKey: string,
+): Promise<NoticeExtraction> {
+  const resp = await reconFetch(
+    `/api/recon/idp-documents/${encodeURIComponent(objectKey)}/extraction`,
+  );
+  // A 404 is an ANSWER, not a failure: recon holds no notice for this document, which happens for a
+  // document class the mapper does not map and for one carrying no extractable notice date. Throwing
+  // would put it under the red "failed to read" banner, which reads as a broken console rather than
+  // as a document reconciliation was never given. Every other non-ok status still throws.
+  if (resp.status === 404)
+    // The route's own message names the object key, which the panel already shows. What an operator
+    // needs instead is WHY there is no notice, so the reasons are named here.
+    return {
+      sections: [],
+      unavailable:
+        "recon holds no notice for this document, so there are no extracted fields to show. " +
+        "That happens when the extractor classified it as a document class recon does not map, " +
+        "when it carried no notice date recon could read, or when the post-processing step failed.",
+    };
+  const body = await json<NoticeExtraction>(resp);
+  // Tolerated rather than required: a response from a not-yet-redeployed route carries no
+  // `unavailable`, and that is honestly "no reason recorded" rather than a client-side failure.
+  return { sections: body.sections, unavailable: body.unavailable ?? null };
+}
+
+/**
+ * The same, for many documents at once, so the Documents table can offer extracted fields as columns.
+ *
+ * A key that could not be read comes back under `failed` rather than failing the call: one expired
+ * result must not cost the caller the rest of the page.
+ *
+ * @param objectKeys - up to 100 raw object keys.
+ */
+export async function getIdpExtractions(objectKeys: string[]): Promise<{
+  extractions: Record<string, ExtractedSection[]>;
+  failed: Record<string, string>;
+}> {
+  return json(
+    await reconFetch(`/api/recon/idp-extractions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ objectKeys }),
+    }),
+  );
 }

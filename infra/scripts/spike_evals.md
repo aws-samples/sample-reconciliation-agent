@@ -25,7 +25,7 @@ From the live harness session (`recon_dev_harness-EJrS0PkWnx`): the OTel traces 
 Required for online evaluations consuming harness traces. Check with:
 
 ```bash
-aws xray get-trace-segment-destination --profile huthmac --region us-east-1
+aws xray get-trace-segment-destination --profile <your-profile> --region us-east-1
 ```
 
 If not `CloudWatchLogs`, the account-level Transaction Search enablement is pending (one-time console step, documented in README).
