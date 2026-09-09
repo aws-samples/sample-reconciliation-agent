@@ -9,7 +9,7 @@ Usage:
     python infra/scripts/spike_harness.py                 # safe read-only checks
     python infra/scripts/spike_harness.py --create ROLE   # + live create/invoke/delete
 
-Uses the default AWS session (set AWS_PROFILE=huthmac AWS_REGION=us-east-1, or --profile/--region).
+Uses the default AWS session (set AWS_PROFILE=<your-profile> AWS_REGION=us-east-1, or --profile/--region).
 """
 
 import argparse

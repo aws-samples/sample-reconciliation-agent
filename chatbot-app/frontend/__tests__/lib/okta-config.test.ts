@@ -86,3 +86,23 @@ describe("oktaRedirectUri", () => {
     expect(() => oktaRedirectUri()).toThrow(/must end with \/login\/callback/);
   });
 });
+
+describe("silent-renewal configuration", () => {
+  it("requests offline_access", async () => {
+    // Ticking "Refresh Token" on the Okta app only PERMITS the grant. Without this scope in the
+    // /authorize request no refresh token is ever minted, and the session cannot renew itself —
+    // which is the whole reason expiry used to mean a full sign-in redirect.
+    const { oktaConfig } = await loadConfig(PINNED_URI);
+    expect(oktaConfig.scopes).toContain("offline_access");
+  });
+
+  it("leaves the SDK's own renewal switched off", async () => {
+    // Not an oversight, and not safe to flip. `autoRenew` is what gates the SDK's two iframe-based
+    // renewal paths (AutoRenewService and RenewOnTabActivationService); the CSP has no `frame-src`,
+    // so either one hangs for 120 s. Renewal is done explicitly in `okta-renew.ts`, which checks a
+    // refresh token is present first and therefore only ever POSTs to /token.
+    const { oktaTokenManagerOptions } = await loadConfig(PINNED_URI);
+    expect(oktaTokenManagerOptions.autoRenew).toBe(false);
+    expect(oktaTokenManagerOptions.autoRemove).toBe(true);
+  });
+});

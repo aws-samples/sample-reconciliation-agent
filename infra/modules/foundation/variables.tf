@@ -20,3 +20,9 @@ variable "logout_urls" {
   type        = list(string)
   default     = ["https://localhost:3000/"]
 }
+
+variable "agent_model_id" {
+  description = "Initial value seeded into the /agent-model-id parameter the Config tab then owns. Only ever read on the first apply — the lifecycle block ignores later drift, so changing this does NOT change a deployed environment's selection."
+  type        = string
+  default     = "us.anthropic.claude-sonnet-5"
+}

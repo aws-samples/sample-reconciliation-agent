@@ -158,6 +158,10 @@ class InvestigationResult(BaseModel):
     proposed_action: dict | None = None
     # None when no counterparty contact is warranted; see ``Proposal.proposed_email`` for the shape.
     proposed_email: dict | None = None
+    # The investigation's ``search_notices`` result set, for the Matched Notices panel; see
+    # ``Proposal.notice_search``. Travels on THIS object because the runtime backend's investigator is
+    # the only place that sees those results — ``proposal.build_proposal`` cannot re-derive them.
+    notice_search: dict | None = None
 
 
 class Proposal(BaseModel):
@@ -206,6 +210,18 @@ class Proposal(BaseModel):
     # a ``CaseStatus``: the draft's lifecycle is not the case's, and every new case state would also
     # have to be taught to ``status.can_transition`` and to the interceptor that enforces it.
     proposed_email: dict | None = None
+    # The FULL result set of every ``search_notices`` call — the notices the investigation actually
+    # reasoned over, shown in the case's Matched Notices panel.
+    #
+    # A separate attribute rather than something read back out of ``steps`` because the trace's
+    # ``tool_output`` is a 600-character display summary (``harness_agent.stream._summarize``) and one
+    # notice row is larger than that, so the trace only ever holds a JSON *fragment*. The UI used to
+    # re-parse that fragment, fail, and report "matched no notices" on cases that had matched five.
+    #
+    # Shape: ``{searched: bool, rows: list[dict], matched_on: list[str], error: str | None,
+    # omitted: int}`` — see ``recon_core.proposal_service.notice_search_summary``, the single
+    # derivation both backends use. ``None`` on a proposal built without a recorded notice search.
+    notice_search: dict | None = None
 
     @property
     def evidence(self) -> list[str]:

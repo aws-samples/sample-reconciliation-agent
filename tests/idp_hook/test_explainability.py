@@ -10,8 +10,10 @@ import pytest
 
 from backend.idp_hook.explainability import (
     alert_count,
+    below_threshold_count,
     extraction_confidence,
     field_confidences,
+    mean_confidence,
 )
 
 
@@ -128,6 +130,31 @@ def test_zero_is_a_valid_extracted_value_and_is_not_treated_as_absent():
     info = [{"Amount": {"confidence": 0.4, "confidence_threshold": 0.8}}]
     assert extraction_confidence(explainability_info=info, inference_result={"Amount": 0}) == 0.4
     assert alert_count(explainability_info=info, inference_result={"Amount": 0}) == 1
+
+
+def test_the_record_reductions_agree_with_the_walk_and_reduce_helpers():
+    """Reducing kept records must give exactly what walking again gives.
+
+    The caller that persists the records (``idp_output._read_sections``) reduces them directly
+    instead of re-walking. If the two paths could disagree, a notice's stored per-field detail would
+    contradict its own ``extraction_confidence`` — the number the interceptor and the prompt read.
+    """
+    records = field_confidences(explainability_info=EXPLAINABILITY, inference_result=INFERENCE)
+    assert mean_confidence(records) == extraction_confidence(
+        explainability_info=EXPLAINABILITY, inference_result=INFERENCE
+    )
+    assert below_threshold_count(records) == alert_count(
+        explainability_info=EXPLAINABILITY, inference_result=INFERENCE
+    )
+    # Pinned to the literal values so a change to either path is visible here, not just consistent.
+    assert mean_confidence(records) == pytest.approx(0.8375)
+    assert below_threshold_count(records) == 1
+
+
+def test_reducing_no_records_yields_none_and_zero_rather_than_a_default():
+    """The empty case has to behave like the walk-and-reduce one: absence stays absence."""
+    assert mean_confidence([]) is None
+    assert below_threshold_count([]) == 0
 
 
 def test_a_field_literally_named_confidence_is_not_mistaken_for_a_leaf_record():

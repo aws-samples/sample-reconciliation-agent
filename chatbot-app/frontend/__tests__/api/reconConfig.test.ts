@@ -60,6 +60,33 @@ describe("GET /api/recon/config", () => {
     const body = await (await GET()).json();
     expect("counterpartyEmailDomains" in body).toBe(false);
   });
+
+  it("reports no model selection as null rather than inventing a default", async () => {
+    // Every sibling field substitutes its deployment default here. The model cannot: the default is
+    // each BACKEND's environment variable, which this route never sees. Naming a concrete id would
+    // claim a selection nobody made, and would be wrong the moment a deploy changed that variable.
+    const body = await (await GET()).json();
+
+    expect(body.agentModelId).toBeNull();
+    // The options still come from the server, so the UI cannot offer an id the PUT would refuse.
+    expect(body.agentModelIds).toContain("us.anthropic.claude-sonnet-5");
+  });
+
+  it("surfaces the stored selection", async () => {
+    ssmSend.mockResolvedValue({
+      Parameter: { Value: "global.anthropic.claude-opus-5" },
+    });
+    const body = await (await GET()).json();
+    expect(body.agentModelId).toBe("global.anthropic.claude-opus-5");
+  });
+
+  it("reports a stored id outside the allowlist as no selection", async () => {
+    // The agent refuses this value and falls back, so reporting it as the live selection would have
+    // the UI vouch for a model that is not being invoked.
+    ssmSend.mockResolvedValue({ Parameter: { Value: "some.retired-model" } });
+    const body = await (await GET()).json();
+    expect(body.agentModelId).toBeNull();
+  });
 });
 
 describe("PUT /api/recon/config", () => {
@@ -87,6 +114,40 @@ describe("PUT /api/recon/config", () => {
     const res = await put({ tier1Enabled: false });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ tier1Enabled: false });
+  });
+
+  it.each([
+    "us.anthropic.claude-opus-5",
+    "global.anthropic.claude-opus-5",
+    "us.anthropic.claude-sonnet-5",
+    "global.anthropic.claude-sonnet-5",
+    "us.anthropic.claude-fable-5-1",
+    "global.anthropic.claude-fable-5-1",
+  ])("stores the selected model %s", async (agentModelId) => {
+    ssmSend.mockResolvedValue({});
+    const res = await put({ agentModelId });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ agentModelId });
+    // Every id the UI offers must actually be writable. The BFF allowlist and the Python one are
+    // hand-maintained copies, so an id one side accepts and the other rejects is a save that appears
+    // to succeed and then silently falls back to the deployed default.
+    expect(ssmSend).toHaveBeenCalledWith(
+      expect.objectContaining({ __cmd: "Put", Value: agentModelId }),
+    );
+  });
+
+  it("rejects an unknown model id without writing anything", async () => {
+    ssmSend.mockResolvedValue({});
+    const res = await put({
+      agentModelId: "us.anthropic.claude-nonexistent-9",
+    });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/agentModelId must be one of/);
+    // The refusal has to precede the write. A stored unknown id is refused per invocation by the
+    // agent instead, which reads as the model selection quietly having no effect.
+    expect(ssmSend).not.toHaveBeenCalled();
   });
 
   it("refuses a non-admin before touching SSM", async () => {

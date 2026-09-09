@@ -5,6 +5,7 @@ There is no classification threshold and no composite any more — both were del
 along with every model-reported confidence number."""
 
 import logging
+from decimal import Decimal
 
 import boto3
 import pytest
@@ -394,6 +395,71 @@ def test_persist_writes_decimal_safe_and_transitions(monkeypatch):
     assert row["status"] == "PROPOSED"
     assert row["proposed_action"]["reference"] == "DDTL-A-0001"
     assert row["class_id"] == "document-cross-reference"
+    # Written even when the investigation ran no notice search — `searched: False` is what tells the
+    # panel to render nothing, as distinct from an absent attribute (a case persisted before this
+    # attribute existed, which has to fall back to the trace).
+    assert row["notice_search"]["searched"] is False
+
+
+@mock_aws
+def test_persist_writes_the_full_notice_rows_untruncated(monkeypatch):
+    """The rows the panel renders reach DynamoDB whole, floats and all.
+
+    Regression: the only stored copy used to be the trace's 600-character `tool_output`, which cut a
+    notice row mid-string. The UI parsed that fragment, failed, and reported "matched no notices".
+    """
+    ddb = boto3.resource("dynamodb", region_name="us-east-1")
+    ddb.create_table(
+        TableName="recon-cases",
+        KeySchema=[{"AttributeName": "item_id", "KeyType": "HASH"}],
+        AttributeDefinitions=[{"AttributeName": "item_id", "AttributeType": "S"}],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    ddb.create_table(
+        TableName="recon-audit",
+        KeySchema=[
+            {"AttributeName": "item_id", "KeyType": "HASH"},
+            {"AttributeName": "ts", "KeyType": "RANGE"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": "item_id", "AttributeType": "S"},
+            {"AttributeName": "ts", "AttributeType": "S"},
+        ],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    cases = CaseStore(table="recon-cases", audit="recon-audit")
+    ddb.Table("recon-cases").put_item(Item={"item_id": "idp-1", "status": "IN_PROGRESS"})
+
+    sr = _stream_with_ledger(["DDTL-A-0001"])
+    # A float amount and a float confidence: boto3 rejects raw floats, so this also covers the
+    # Decimal conversion on the way in.
+    sr.tool_outputs["search_notices"] = [
+        {
+            "rows": [
+                {
+                    "notice_id": "idp-02-PAYDOWN-V11",
+                    "amount": 12500.0,
+                    "extraction_confidence": 0.98825,
+                    "notes": "y" * 700,
+                }
+            ],
+            "matched_on": ["amount"],
+        }
+    ]
+
+    prop = intake.build_proposal(
+        item=ITEM, submitted=_submitted(), stream_result=sr, catalog=CATALOG
+    )
+    intake.persist(cases=cases, proposal=prop)
+
+    stored = ddb.Table("recon-cases").get_item(Key={"item_id": "idp-1"})["Item"]["notice_search"]
+    assert stored["searched"] is True
+    assert stored["matched_on"] == ["amount"]
+    assert stored["omitted"] == 0
+    assert len(stored["rows"]) == 1
+    # The long field survives whole — the trace summary would have cut it at 600 characters.
+    assert len(stored["rows"][0]["notes"]) == 700
+    assert stored["rows"][0]["amount"] == Decimal("12500.0")
 
 
 @mock_aws

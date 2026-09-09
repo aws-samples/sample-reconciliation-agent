@@ -4,9 +4,10 @@ import {
 } from "@aws-sdk/client-bedrock-agentcore";
 
 // Writes analyst decisions into the recon AgentCore Memory as conversational events. The
-// memory's `lessons_learned` SEMANTIC strategy (namespace reconciliation/lessons/{actorId})
-// extracts + consolidates them into retrievable records; the agent recalls them before
-// classifying/investigating similar items. actorId = recon domain, so lessons group per domain.
+// memory's `lessons_learned` strategy — CUSTOM with a SEMANTIC_OVERRIDE extraction prompt, namespace
+// reconciliation/lessons/{actorId} — extracts + consolidates them into retrievable records; the agent
+// recalls them before classifying/investigating similar items. actorId = recon domain, so lessons
+// group per domain. Decisions with no rationale are not sent at all; see hasDerivableLesson.
 //
 // RECON_MEMORY_ID is distinct from the chatbot app's MEMORY_ID. Empty -> feature disabled.
 // Best-effort by design: a memory failure must never block or fail the analyst's decision.
@@ -29,8 +30,33 @@ function sanitizeId(s: string): string {
   return s.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 100);
 }
 
+/**
+ * Whether a decision carries anything a lesson could be derived from.
+ *
+ * The memory strategy's extraction prompt asks for generalizable lessons and returns an empty list
+ * when there is no rationale to generalize. A bulk `CLOSED_NO_ACTION` with no comment is exactly that
+ * case: the event says what was decided and nothing about why, so no prompt — however well written —
+ * can derive a rule from it, and sending it only spends a Bedrock invocation to produce noise.
+ *
+ * An approval with the agent's prior recommendation attached DOES qualify: the recommendation is the
+ * reasoning being ratified.
+ *
+ * The DynamoDB lessons ledger is unaffected and still records every decision, including the ones
+ * skipped here — the audit trail is its job, not long-term memory's.
+ *
+ * @param f the decision about to be recorded.
+ * @returns true when the event carries an analyst comment or a prior agent recommendation.
+ */
+export function hasDerivableLesson(f: LessonEvent): boolean {
+  return (
+    (f.user_comment ?? "").trim().length > 0 ||
+    (f.prior_recommendation ?? "").trim().length > 0
+  );
+}
+
 export async function recordLessonMemoryEvent(f: LessonEvent): Promise<void> {
   if (!RECON_MEMORY_ID) return;
+  if (!hasDerivableLesson(f)) return;
   const lines = [
     `Analyst decision for reconciliation item ${f.item_id}` +
       ` (domain ${f.domain ?? "unknown"}, class ${f.class_id ?? "unknown"}): ${f.trigger}` +

@@ -101,6 +101,8 @@ def _proposal_kwargs(item_id: str) -> dict:
         "resolution": "monitor",
         "confidence": Decimal("0.8"),
         "steps": [{"skill": "timing"}],
+        # Required keyword, no default — see cases.attach_proposal. None is a legal value.
+        "notice_search": None,
     }
 
 
@@ -311,3 +313,45 @@ def test_audit_row_raises_when_every_timestamp_is_taken(monkeypatch):
 
     with pytest.raises(RuntimeError, match="could not write an audit row"):
         cases.set_status("i-1", CaseStatus.IN_PROGRESS)
+
+
+@mock_aws
+def test_open_omits_tier1_match_entirely_when_there_is_none():
+    """No evidence means no attribute, so escalated and pre-existing cases stay byte-identical.
+
+    Writing an empty map instead would make "Tier-1 recorded nothing" indistinguishable from
+    "Tier-1 measured nothing", and the case screen has to tell those apart.
+    """
+    _make_tables()
+    _store().open(_item("i-none"), status=CaseStatus.PENDING, tier=2)
+    row = _raw_table("recon-cases").get_item(Key={"item_id": "i-none"})["Item"]
+    assert "tier1_match" not in row
+    assert "category" not in row
+
+
+@mock_aws
+def test_open_persists_tier1_match_as_a_top_level_attribute():
+    """Tier-1's finding is an output about the item, not part of the item as it arrived.
+
+    Keeping it out of ``item.attributes`` matters because that bag is replayed as the extraction
+    input; a derived verdict living inside it would look like something the source document said.
+    """
+    _make_tables()
+    evidence = {
+        "matched_on": "rule",
+        "match_attr": "amount",
+        "tolerance": "0.05",
+        "side_a_value": "100.00",
+        "side_b_value": "100.02",
+        "difference": "0.02",
+    }
+    _store().open(
+        _item("i-ev"),
+        status=CaseStatus.AUTO_CLEARED,
+        tier=1,
+        category="amount-match",
+        tier1_match=evidence,
+    )
+    row = _raw_table("recon-cases").get_item(Key={"item_id": "i-ev"})["Item"]
+    assert row["tier1_match"] == evidence
+    assert "tier1_match" not in row["item"]["attributes"]

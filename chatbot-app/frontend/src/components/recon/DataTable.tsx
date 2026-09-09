@@ -32,7 +32,16 @@ export interface DataTableColumn<T> {
    * box would take the bulk actions with it, and nothing about that would look deliberate afterwards.
    */
   pinned?: boolean;
-  /** CSS grid track for this column. Defaults to `minmax(0,1fr)`. */
+  /**
+   * CSS grid track for this column. Defaults to `minmax(0,1fr)`.
+   *
+   * Must be CONTENT-INDEPENDENT. The header and the body rows are separate grids that resolve their
+   * tracks independently, so any track whose size depends on what is in it (`auto`, `min-content`,
+   * `max-content`, or a bare `1fr` — which is `minmax(auto,1fr)`) can resolve to one width in the
+   * header and another in the rows, and the labels then sit a few pixels off their columns. Use
+   * `minmax(0,Nfr)` for a proportional column and a fixed length for a fixed one. A bare `Nfr` is
+   * rewritten to `minmax(0,Nfr)` below, since that one is always a mistake here.
+   */
   width?: string;
 }
 
@@ -67,6 +76,9 @@ export interface DataTableProps<T> {
 
 type SortDir = "asc" | "desc";
 
+/** Column count above which the picker offers a search box. Below it, the list is the menu. */
+const SEARCHABLE_FROM = 8;
+
 /** The columns as shipped, in shipped order — the reconciliation baseline for a stored layout. */
 function defaultsOf<T>(columns: DataTableColumn<T>[]): ColumnPref[] {
   return columns
@@ -89,6 +101,7 @@ export function DataTable<T>({
   const [prefs, setPrefs] = useState<ColumnPref[]>(defaults);
   const [sort, setSort] = useState<{ id: string; dir: SortDir } | null>(null);
   const [picking, setPicking] = useState(false);
+  const [search, setSearch] = useState("");
   const dragging = useRef<string | null>(null);
 
   // Re-read when the subject arrives (one render later than the first paint) and when the table's own
@@ -103,6 +116,33 @@ export function DataTable<T>({
   };
 
   const byId = useMemo(() => new Map(columns.map((c) => [c.id, c])), [columns]);
+
+  /**
+   * What to call a column in the picker.
+   *
+   * A header can be a control rather than a label (the queue's select-all box lives in one), so a
+   * non-string header falls back to the column id instead of rendering a second checkbox in the menu.
+   *
+   * @param id - the column id.
+   * @returns the picker label.
+   */
+  const labelOf = (id: string): string => {
+    const header = byId.get(id)?.header;
+    return typeof header === "string" ? header : id;
+  };
+
+  // Filters what the picker LISTS, never what the table renders: a column already shown stays shown
+  // while the search box narrows the menu around it.
+  const matching = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return prefs;
+    return prefs.filter(
+      (p) =>
+        labelOf(p.id).toLowerCase().includes(q) ||
+        p.id.toLowerCase().includes(q),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefs, search, byId]);
 
   // The rendered column order. Pinned columns stay where they were declared; everything between the
   // first and last of them is the viewer's business. Built by walking the declared array and splicing
@@ -171,8 +211,19 @@ export function DataTable<T>({
     persist(next);
   };
 
+  // One template string, used by BOTH the header grid and every body row. They are separate grids, so
+  // the tracks only line up while every one of them sizes independently of its contents — see the note
+  // on `DataTableColumn.width`. A bare `Nfr` means `minmax(auto,Nfr)`, whose auto MINIMUM is the widest
+  // thing in the track: the header holds a short label and the rows hold a long reference, so the two
+  // grids resolved that track differently and every label to its right drifted. Normalised here rather
+  // than at each call site so no future column can reintroduce it.
   const template = shownColumns
-    .map((c) => c.width ?? "minmax(0,1fr)")
+    .map((c) => {
+      const width = c.width ?? "minmax(0,1fr)";
+      return /^\d+(\.\d+)?fr$/.test(width.trim())
+        ? `minmax(0,${width.trim()})`
+        : width;
+    })
     .join(" ");
 
   return (
@@ -192,37 +243,58 @@ export function DataTable<T>({
           >
             Columns
           </button>
+          {/* The list scrolls, and the heading, the search box and Reset stay put while it does. A
+              table whose columns are derived from its data — the queue's submitted attributes, the
+              Documents tab's extracted fields — offers dozens of them, and the fixed-height list this
+              replaced would have put Reset below the bottom of the viewport with no way back to it.
+              The search box is there for the same reason: thirty checkboxes is a list you read, not a
+              menu you pick from. */}
           {picking && (
-            <div className="absolute right-0 z-20 mt-1 w-56 rounded border border-[var(--rc-line)] bg-[var(--rc-panel-2)] p-3 shadow-lg">
+            <div className="absolute right-0 z-20 mt-1 flex max-h-[60vh] w-72 flex-col rounded border border-[var(--rc-line)] bg-[var(--rc-panel-2)] p-3 shadow-lg">
               <p className="rc-eyebrow mb-2">Show columns</p>
-              {prefs.map((p) => (
-                <label
-                  key={p.id}
-                  className="rc-mono flex items-center gap-2 py-1 text-[12px] text-[var(--rc-ink-dim)]"
-                >
-                  <input
-                    type="checkbox"
-                    checked={p.visible}
-                    onChange={() =>
-                      persist(
-                        prefs.map((q) =>
-                          q.id === p.id ? { ...q, visible: !q.visible } : q,
-                        ),
-                      )
-                    }
-                    className="h-3.5 w-3.5 accent-[var(--rc-cyan)]"
-                  />
-                  {/* The header can be a control, so fall back to the id rather than rendering a
-                      checkbox inside the picker. */}
-                  {typeof byId.get(p.id)?.header === "string"
-                    ? (byId.get(p.id)?.header as string)
-                    : p.id}
-                </label>
-              ))}
+              {/* Shown only when there is enough to hunt through — on a five-column table the box
+                  would be one more thing between the operator and the checkbox they came for. */}
+              {prefs.length > SEARCHABLE_FROM && (
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Find a column…"
+                  aria-label="Find a column"
+                  className="rc-mono mb-2 w-full rounded border border-[var(--rc-line)] bg-transparent px-2 py-1 text-[12px] text-[var(--rc-ink)] outline-none focus:border-[var(--rc-cyan)]"
+                />
+              )}
+              <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+                {matching.length === 0 ? (
+                  <p className="rc-mono py-1 text-[12px] text-[var(--rc-ink-faint)]">
+                    ◇ no column matches “{search.trim()}”
+                  </p>
+                ) : (
+                  matching.map((p) => (
+                    <label
+                      key={p.id}
+                      className="rc-mono flex items-center gap-2 py-1 text-[12px] text-[var(--rc-ink-dim)]"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={p.visible}
+                        onChange={() =>
+                          persist(
+                            prefs.map((q) =>
+                              q.id === p.id ? { ...q, visible: !q.visible } : q,
+                            ),
+                          )
+                        }
+                        className="h-3.5 w-3.5 accent-[var(--rc-cyan)]"
+                      />
+                      {labelOf(p.id)}
+                    </label>
+                  ))
+                )}
+              </div>
               <button
                 type="button"
                 onClick={() => persist(defaults)}
-                className="rc-mono mt-2 text-[11px] uppercase tracking-[0.1em] text-[var(--rc-ink-faint)] hover:text-[var(--rc-ink)]"
+                className="rc-mono mt-2 shrink-0 text-left text-[11px] uppercase tracking-[0.1em] text-[var(--rc-ink-faint)] hover:text-[var(--rc-ink)]"
               >
                 Reset
               </button>
@@ -256,14 +328,19 @@ export function DataTable<T>({
                 onDrop={() => {
                   if (!c.pinned) drop(c.id);
                 }}
-                className="rc-eyebrow flex items-center gap-1"
+                // `min-w-0` to match the body cells. A grid item's default `min-width: auto` is its
+                // content's minimum, which pushes a track wider than the template asked for — so a long
+                // header label alone was enough to make the header grid and the row grid disagree.
+                className="rc-eyebrow flex min-w-0 items-center gap-1"
               >
                 {c.sortValue ? (
                   <button
                     type="button"
                     onClick={() => cycleSort(c.id)}
                     title="Sort by this column"
-                    className="rc-eyebrow hover:text-[var(--rc-ink)]"
+                    // `truncate` so a long label clips inside its own track instead of overflowing
+                    // into the next one — the button is itself a flex item with an auto minimum.
+                    className="rc-eyebrow truncate hover:text-[var(--rc-ink)]"
                     style={{ color: isSorted ? "var(--rc-cyan)" : undefined }}
                   >
                     {c.header}

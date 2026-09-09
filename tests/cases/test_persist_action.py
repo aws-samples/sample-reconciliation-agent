@@ -48,6 +48,7 @@ def test_attach_proposal_persists_action_and_typed_steps(make_case_tables, seed_
             "status": "Cancelled",
             "reason": "DRAW DATE HAS BEEN PUSHED",
         },
+        notice_search=None,
     )
 
     row = (
@@ -78,6 +79,7 @@ def test_attach_proposal_omits_action_when_none(make_case_tables, seed_case):
         steps=[],
         confidence_components={},
         proposed_action=None,
+        notice_search=None,
     )
 
     row = (
@@ -115,6 +117,7 @@ def test_attach_proposal_persists_proposed_email(make_case_tables, seed_case):
             "draft_status": "pending",
             "revision": 0,
         },
+        notice_search=None,
     )
 
     row = (
@@ -150,6 +153,7 @@ def test_proposed_email_is_optional_for_every_existing_caller(make_case_tables, 
         resolution="Escalate.",
         confidence=Decimal("0.4"),
         steps=[],
+        notice_search=None,
     )
 
     row = (

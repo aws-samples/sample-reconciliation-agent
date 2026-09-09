@@ -9,6 +9,7 @@ import {
   oktaRedirectUri,
   oktaTokenManagerOptions,
 } from "@/lib/okta-config";
+import { renewWithRefreshToken, startSilentRenew } from "@/lib/okta-renew";
 import { reauthenticate } from "@/lib/reauth";
 
 /**
@@ -147,6 +148,11 @@ export default function OktaAuthWrapper({
           await oktaAuth.handleLoginRedirect();
         }
         if (await oktaAuth.isAuthenticated()) {
+          // Arms the token manager's expiry timers. Nothing else does: the SDK sets them up in
+          // `start()` only (see core/mixin.ts), so without this call `tokenManager` never emits
+          // `expired`, the listener below never fires, and `autoRemove` never drops a dead token —
+          // the app's only notice of an expired session was a 401 from the BFF.
+          await oktaAuth.start();
           decided = true;
           setAuthed(true);
           setReady(true);
@@ -171,9 +177,18 @@ export default function OktaAuthWrapper({
     return () => window.clearTimeout(stallTimer);
   }, [isClient]);
 
-  // Expiry while the app is open. Nothing renews the token in the background (silent renew is off
-  // — see oktaTokenManagerOptions), so the token manager's `expired` event is the signal, and the
-  // response is a top-level re-auth. Dropping `authed` first unmounts the children, which stops
+  // Keeping the session alive while the app is open, and what to do when it cannot be kept alive.
+  //
+  // Two mechanisms, in order of preference:
+  //
+  //  1. `startSilentRenew` renews shortly BEFORE expiry using the refresh token. That is a POST to
+  //     /token, which the CSP already allows and the user never sees — the reason `offline_access`
+  //     is requested at all.
+  //  2. the token manager's `expired` event, as a backstop for a renewal that did not happen: a
+  //     laptop asleep through its own timer, or an Okta configuration that grants no refresh token.
+  //     It tries the same POST once before giving up.
+  //
+  // Giving up means a top-level re-auth. Dropping `authed` first unmounts the children, which stops
   // any polling that would otherwise fire a burst of 401s straight through the redirect.
   //
   // `expired` and not `removed`: signOut() clears tokens too, and reacting to that would race a
@@ -181,8 +196,10 @@ export default function OktaAuthWrapper({
   useEffect(() => {
     if (!isClient || !authed || !HAS_OKTA_CONFIG) return;
     const oktaAuth = getOktaInstance();
-    const onExpired = (key: string) => {
-      console.warn(`[Okta] ${key} expired — re-authenticating`);
+
+    /** Last resort: hand the browser to Okta and return to the page the user was on. */
+    const reauth = (reason: string): void => {
+      console.warn(`[Okta] ${reason} — re-authenticating`);
       setAuthed(false);
       reauthenticate("expired")
         .then((started) => {
@@ -201,8 +218,26 @@ export default function OktaAuthWrapper({
           setReady(true);
         });
     };
+
+    const stopRenew = startSilentRenew({ oktaAuth, onUnrecoverable: reauth });
+
+    const onExpired = (key: string) => {
+      // Async, and deliberately not awaited by the SDK: one more attempt at the POST, because
+      // reaching here means the scheduled renewal did not run rather than that renewal is
+      // impossible. Only if that also fails does the user get a navigation.
+      void (async () => {
+        if ((await renewWithRefreshToken(oktaAuth)) === "renewed") {
+          console.warn(`[Okta] ${key} expired and was renewed`);
+          return;
+        }
+        reauth(`${key} expired and could not be renewed`);
+      })();
+    };
     oktaAuth.tokenManager.on("expired", onExpired);
-    return () => oktaAuth.tokenManager.off("expired", onExpired);
+    return () => {
+      stopRenew();
+      oktaAuth.tokenManager.off("expired", onExpired);
+    };
   }, [isClient, authed]);
 
   // Pre-hydration renders the waiting screen, NOT the children. Rendering children here mounted

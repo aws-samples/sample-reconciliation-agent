@@ -108,6 +108,39 @@ def field_confidences(*, explainability_info: Any, inference_result: Any) -> lis
     return records
 
 
+def mean_confidence(records: list[dict]) -> Optional[float]:
+    """Mean confidence over the records describing fields IDP actually extracted a value for.
+
+    Takes already-flattened records so a caller holding them does not walk the tree again — see
+    :func:`field_confidences`. Returns None, never a fabricated default, when nothing was extracted.
+
+    :param records: records from :func:`field_confidences`.
+    :returns: mean confidence in [0, 1], or None when there is nothing to average.
+    """
+    extracted = [rec["confidence"] for rec in records if rec["extracted"]]
+    if not extracted:
+        return None
+    return sum(extracted) / len(extracted)
+
+
+def below_threshold_count(records: list[dict]) -> int:
+    """Count records whose confidence is below THEIR OWN threshold.
+
+    Takes already-flattened records; see :func:`alert_count` for what the number is used for and why
+    a per-field threshold is the only correct comparison.
+
+    :param records: records from :func:`field_confidences`.
+    :returns: number of below-threshold extracted fields.
+    """
+    count = 0
+    for rec in records:
+        threshold = rec["threshold"]
+        if rec["extracted"] and isinstance(threshold, (int, float)):
+            if rec["confidence"] < float(threshold):
+                count += 1
+    return count
+
+
 def extraction_confidence(*, explainability_info: Any, inference_result: Any) -> Optional[float]:
     """Mean per-field confidence over the fields IDP actually extracted a value for.
 
@@ -115,20 +148,18 @@ def extraction_confidence(*, explainability_info: Any, inference_result: Any) ->
     fabricated default — when the section carries no explainability data or extracted nothing, so
     the absence is recorded as an absence.
 
+    Kept as a walk-and-reduce convenience for callers that hold no records. A caller that needs the
+    records too should flatten once and call :func:`mean_confidence` instead.
+
     :param explainability_info: the section result's ``explainability_info``.
     :param inference_result: the section's extracted values.
     :returns: mean confidence in [0, 1], or None when there is nothing to average.
     """
-    extracted = [
-        rec["confidence"]
-        for rec in field_confidences(
+    return mean_confidence(
+        field_confidences(
             explainability_info=explainability_info, inference_result=inference_result
         )
-        if rec["extracted"]
-    ]
-    if not extracted:
-        return None
-    return sum(extracted) / len(extracted)
+    )
 
 
 def alert_count(*, explainability_info: Any, inference_result: Any) -> int:
@@ -140,16 +171,15 @@ def alert_count(*, explainability_info: Any, inference_result: Any) -> int:
     0.9 occur in live output), so this never compares against a global constant. Fields IDP extracted
     no value for are excluded: an absent optional field is not a data-quality alert.
 
+    Kept as a walk-and-reduce convenience for callers that hold no records. A caller that needs the
+    records too should flatten once and call :func:`below_threshold_count` instead.
+
     :param explainability_info: the section result's ``explainability_info``.
     :param inference_result: the section's extracted values.
     :returns: number of below-threshold extracted fields (0 when there is no explainability data).
     """
-    count = 0
-    for rec in field_confidences(
-        explainability_info=explainability_info, inference_result=inference_result
-    ):
-        threshold = rec["threshold"]
-        if rec["extracted"] and isinstance(threshold, (int, float)):
-            if rec["confidence"] < float(threshold):
-                count += 1
-    return count
+    return below_threshold_count(
+        field_confidences(
+            explainability_info=explainability_info, inference_result=inference_result
+        )
+    )

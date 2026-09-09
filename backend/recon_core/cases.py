@@ -112,12 +112,26 @@ class CaseStore:
         status: CaseStatus,
         tier: int,
         category: str | None = None,
+        tier1_match: dict | None = None,
     ) -> bool:
         """Create a case row for an item, conditionally (idempotent).
 
         Returns True if the case was newly created, False if a case already existed for the
         item (a redelivered stream record). The row carries item_id, status, created_at
         (RANGE key of the status-index GSI), tier, and optional deterministic category.
+
+        :param item: the reconciliation item the case is opened for.
+        :param status: the case status to open in.
+        :param tier: the tier that produced this case, 1 for a deterministic clear and 2 for an
+            escalation.
+        :param category: the deterministic auto-clear category, or None for an escalation.
+        :param tier1_match: the comparison Tier-1 performed to clear the item, or None. Written as a
+            top-level attribute rather than folded into ``item``: that bag is the item as it arrived,
+            and this is an output Tier-1 produced about it. Absent entirely when None, so escalated
+            cases and every case written before this field existed stay byte-identical. Its values
+            are strings, including the amounts, both because boto3 rejects Python floats and because
+            a Decimal round-trip through the BFF's JSON hop is lossy.
+        :returns: True when the case was newly created, False when one already existed.
         """
         item_dict = item.model_dump()
         row = {
@@ -130,6 +144,8 @@ class CaseStore:
         }
         if category is not None:
             row["category"] = category
+        if tier1_match is not None:
+            row["tier1_match"] = tier1_match
         try:
             self._cases.put_item(Item=row, ConditionExpression="attribute_not_exists(item_id)")
         except ClientError as exc:
@@ -265,6 +281,10 @@ class CaseStore:
         confidence_components: dict | None = None,
         proposed_action: dict | None = None,
         proposed_email: dict | None = None,
+        # REQUIRED (no default) even though None is a legal value. Both agent backends call this, and
+        # while it had a default the runtime backend silently wrote NULL here for a day — the panel
+        # reported "cannot be shown" on every case the runtime investigated. Omitting it now raises.
+        notice_search: dict | None,
     ) -> None:
         """Write the agent's proposal (classification + typed trace) onto the case.
 
@@ -281,6 +301,14 @@ class CaseStore:
         outgoing message against this row so a send can only carry text a human approved. It stays
         a separate attribute — see ``schema.Proposal.proposed_email`` for why it is not folded into
         ``proposed_action``.
+
+        ``notice_search`` is the FULL result set of the investigation's ``search_notices`` calls,
+        persisted for the case's Matched Notices panel. It is stored rather than derived from
+        ``steps`` at read time because the trace's ``tool_output`` is a 600-character display summary
+        and one notice row exceeds it — the UI reading that fragment reported "matched no notices" on
+        cases that had matched several. See ``recon_core.proposal_service.notice_search_summary``,
+        which is where BOTH backends derive it. Required rather than defaulted — see the note at the
+        parameter itself.
 
         :raises KeyError: when no case row exists for ``item_id``. ``open()`` runs first in every
             real flow; without this guard a proposal written for an unknown item created a
@@ -299,7 +327,7 @@ class CaseStore:
                 "SET class_id = :c, "
                 "classification_reasoning = :cr, resolution = :r, confidence = :conf, "
                 "steps = :st, confidence_components = :comp, proposed_action = :pa, "
-                "proposed_email = :pe"
+                "proposed_email = :pe, notice_search = :ns"
             ),
             ExpressionAttributeValues={
                 ":c": class_id,
@@ -310,6 +338,7 @@ class CaseStore:
                 ":comp": confidence_components or {},
                 ":pa": proposed_action,
                 ":pe": proposed_email,
+                ":ns": notice_search,
             },
         )
 

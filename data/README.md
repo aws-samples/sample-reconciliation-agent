@@ -6,7 +6,9 @@
 > freshly applied environment is the designed state, not a broken one.
 >
 > See `input/IDP-EXTRACTION-REQUIREMENTS.md` for the field contract extraction has to satisfy for those
-> uploads to produce useful notices.
+> uploads to produce useful notices, and `idp-extraction-config/` for a configuration that satisfies it
+> — an upload whose extraction emits the right values under the wrong key names produces a notice with
+> every field blank and reports no error at all.
 
 These files are **synthetic (fake but realistic)** versions of syndicated-loan /
 credit-agreement notices used to demo the **unapplied cash reconciliation**
@@ -88,6 +90,14 @@ the one check that looks for it.
 | `04-cancellation-notices/`           | cancellations — a DEBIT, which cannot match a credit row          |
 | `05-multi-facility-aggregated-wire/` | one wire covering several facilities, in three document shapes    |
 | `06-incomplete-notices/`             | documents that arrived truncated or unreadable                    |
+
+## The extraction configuration
+
+`idp-extraction-config/classes.json` is the class-schema half of the deployed extraction
+configuration, tracked here because it previously existed only in the document pipeline's DynamoDB
+table — where it drifted away from the contract with nothing able to notice. See that folder's README;
+`scripts/push_idp_extraction_config.py` installs it and `tests/input_corpus/test_extraction_config.py`
+holds it against both the contract and the ground truth above.
 
 ## The expected side
 

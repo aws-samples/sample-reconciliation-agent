@@ -189,6 +189,24 @@ resource "aws_ssm_parameter" "agent_backend" {
   }
 }
 
+# Which Bedrock model BOTH Tier-2 backends invoke. Selected in the Config tab alongside the backend
+# itself: switching backend was already one click while switching model needed a merge and an apply,
+# even though comparing two models on one queue is the more common experiment.
+#
+# The seed is the same default the two backend env vars carry (recon-agent `model_id`,
+# tier1 `harness_model_id`), so a fresh deploy behaves exactly as it did before this parameter
+# existed. The allowlist of selectable ids lives in backend/recon_core/model_select.py — not here,
+# because it is enforced on read by the code that invokes the model.
+resource "aws_ssm_parameter" "agent_model_id" {
+  name  = "/${var.name_prefix}/agent-model-id"
+  type  = "String"
+  value = var.agent_model_id
+
+  lifecycle {
+    ignore_changes = [value] # Selected at runtime from the Config tab, never by TF.
+  }
+}
+
 # ---------------------------------------------------------------------------------
 # S3 — raw source docs + assets (skills-catalog.json, KB seed, built SPA)
 # ---------------------------------------------------------------------------------

@@ -193,7 +193,7 @@ def main() -> int:
     parser.add_argument("--gateway-url", default=None, help="Gateway URL; default: read from Terraform.")
     parser.add_argument("--terraform-dir", default="infra/environments/recon")
     parser.add_argument("--region", default="us-east-1")
-    parser.add_argument("--profile", default="huthmac")
+    parser.add_argument("--profile", default=None, help="AWS profile; default: credential chain.")
     parser.add_argument("--tool", default=None, help="Print only this tool, with its full inputSchema.")
     parser.add_argument("--names", action="store_true", help="Print tool names only.")
     args = parser.parse_args()

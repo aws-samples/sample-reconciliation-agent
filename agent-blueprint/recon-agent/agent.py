@@ -120,6 +120,9 @@ def persist_proposal(*, cases: CaseStore, proposal: Proposal, advance: bool = Tr
         },
         proposed_action=proposal.proposed_action,
         proposed_email=proposal.proposed_email,
+        # Decimal-safe like `steps`: notice rows carry float `amount` and `extraction_confidence`, and
+        # boto3 rejects raw Python floats.
+        notice_search=to_decimal_safe(proposal.notice_search),
     )
     if advance:
         cases.transition("item_id", proposal.item_id, CaseStatus.PROPOSED)
@@ -305,8 +308,17 @@ async def handler(payload, context):  # pragma: no cover - wiring, pure parts te
     from skills_loader import catalog, catalog_s3, load_skills, load_skills_s3
     from strands_investigator import make_strands_investigator
 
+    from backend.recon_core.model_select import get_agent_model_id
+
     item = ReconItem.model_validate(payload["item"])
-    model_id = os.environ.get("MODEL_ID", "us.anthropic.claude-sonnet-5")
+    # Read PER INVOCATION, not once at import. This container is long-lived and warm-reused, so an
+    # import-time read would pin whichever model was selected when it started — exactly the staleness
+    # the live setting exists to remove. The environment variable is the fallback, so a fresh deploy
+    # and an unreachable parameter both behave as they did before.
+    model_id = get_agent_model_id(
+        os.environ.get("AGENT_MODEL_PARAM", ""),
+        default=os.environ.get("MODEL_ID", "us.anthropic.claude-sonnet-5"),
+    )
     bucket = os.environ.get("ASSETS_BUCKET", "")
     prefix = os.environ.get("SKILLS_PREFIX", "skills/")
 

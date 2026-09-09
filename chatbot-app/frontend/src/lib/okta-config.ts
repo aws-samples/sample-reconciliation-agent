@@ -64,31 +64,52 @@ export function oktaRedirectUri(): string {
   return `${window.location.origin}${CALLBACK_PATH}`;
 }
 
+/**
+ * Scopes requested at /authorize.
+ *
+ * `offline_access` is what asks Okta for a REFRESH TOKEN, and it is the difference between a
+ * session that renews itself in the background and one that bounces the user through a full
+ * sign-in redirect every time a token ages out. Ticking "Refresh Token" on the Okta app only
+ * *permits* the grant; the client still has to request it, and on this deployment's issuer — a
+ * custom authorization server, path `/oauth2/default` — the server's access-policy RULE has to
+ * grant the scope as well. Without all three, the token response simply arrives with no
+ * `refresh_token` in it and nothing anywhere reports an error.
+ *
+ * A build whose refresh token never materialises is not broken: `okta-renew.ts` checks for one
+ * before renewing, so the app falls back to the top-level redirect it used before.
+ */
 export const oktaConfig = {
   issuer,
   clientId,
-  scopes: ["openid", "profile", "email"],
+  scopes: ["openid", "profile", "email", "offline_access"],
   pkce: true,
 } as const;
 
 /**
- * Token-manager options every `OktaAuth` in this app is constructed with. They switch the SDK's
- * iframe-based silent renew OFF, and they live here rather than at one construction site because
- * there are three (the auth wrapper, `recon-auth.ts`, `reauth.ts`) and whichever runs first wins.
+ * Token-manager options every `OktaAuth` in this app is constructed with. They live here rather
+ * than at one construction site because there are three (the auth wrapper, `recon-auth.ts`,
+ * `reauth.ts`) and whichever runs first wins.
  *
- * `autoRenew` defaults to true, and with no `offline_access` scope there is no refresh token, so
- * renewal falls back to loading /authorize in a hidden iframe. The CloudFront CSP is
- * `default-src 'self'` with no `frame-src`, so the frame never loads, no postMessage arrives, and
- * `isAuthenticated()` waits out the SDK's 120 s timeout — once per token — before finally
- * returning false. That is the several minutes of unexplained "Signing in with Okta..." this
- * removes; `reauthenticate()` in `reauth.ts` explains why the answer is a top-level redirect
- * rather than a `frame-src` allowance.
+ * `autoRenew: false` deliberately, even though renewal is now wanted. It is what makes the SDK's
+ * iframe-based renewal UNREACHABLE: both paths that could reach it — `AutoRenewService`, which
+ * renews on the token manager's `expired` event, and `RenewOnTabActivationService`, which renews
+ * when a long-hidden tab comes back — gate `canStart()` on this flag. Renewal is done explicitly
+ * in `okta-renew.ts` instead, which checks a refresh token is present first and therefore only
+ * ever POSTs to /token.
+ *
+ * That distinction matters because whether a refresh token exists depends on Okta-side policy this
+ * build cannot see (see `oktaConfig.scopes`). Leaving the SDK to decide would mean a deployment
+ * whose policy has not been updated falls back to an iframe that `default-src 'self'` blocks, no
+ * postMessage ever arrives, and `isAuthenticated()` waits out the SDK's 120 s timeout — once per
+ * token. That is the several minutes of unexplained "Signing in with Okta..." that must not come
+ * back; `reauthenticate()` in `reauth.ts` explains why the fallback is a top-level redirect rather
+ * than a `frame-src` allowance.
  *
  * `autoRemove` stays on so an expired token is dropped instead of being sent to the BFF for a 401.
+ * Note that it only takes effect once something calls `oktaAuth.start()` — see the wrapper.
  *
  * These go in `tokenManager` rather than `services` deliberately: the SDK's ServiceManager reads
- * `autoRenew`/`autoRemove`/`syncStorage` from the token manager's options, so setting them here
- * also stops the background AutoRenewService from firing its own blocked-iframe renews on a timer.
+ * `autoRenew`/`autoRemove`/`syncStorage` from the token manager's options.
  */
 export const oktaTokenManagerOptions = {
   autoRenew: false,

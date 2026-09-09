@@ -214,7 +214,17 @@ def handle(event, _context=None):  # pragma: no cover - live wiring; loop tested
     region = os.environ.get("AWS_REGION", "us-east-1")
     bucket = os.environ.get("ASSETS_BUCKET", "")
     prefix = os.environ.get("SKILLS_PREFIX", "skills/")
-    model = os.environ.get("HARNESS_MODEL_ID", "us.anthropic.claude-sonnet-5")
+    # The operator's live selection from the Config tab, with the deploy-time value as the fallback.
+    # This is the BASE model: a deployed harness config version still overrides it below, which is
+    # deliberate — that pin is how the Evals tab reproduces a scored configuration. The Config tab
+    # says so, because otherwise switching models and watching the harness ignore it reads as the
+    # control being broken.
+    from backend.recon_core.model_select import get_agent_model_id
+
+    model = get_agent_model_id(
+        os.environ.get("AGENT_MODEL_PARAM", ""),
+        default=os.environ.get("HARNESS_MODEL_ID", "us.anthropic.claude-sonnet-5"),
+    )
 
     from backend.recon_core.prompt_source import CORE_PROMPT_KEY, HARNESS_CONTRACT_KEY, compose_prompt
 

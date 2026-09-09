@@ -17,9 +17,19 @@ const isLoginRedirect = vi.fn(() => false);
 const handleLoginRedirect = vi.fn();
 const isAuthenticated = vi.fn();
 const signInWithRedirect = vi.fn();
+const start = vi.fn();
 const tokenManagerOn = vi.fn();
 const tokenManagerOff = vi.fn();
+const getTokensSync = vi.fn();
+const setTokens = vi.fn();
+const renewTokens = vi.fn();
 const reauthenticate = vi.fn();
+
+/** An hour of life left, expressed the way the SDK stores it: epoch SECONDS. */
+function unexpiredTokens(extra: Record<string, unknown> = {}) {
+  const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+  return { accessToken: { expiresAt }, idToken: { expiresAt }, ...extra };
+}
 
 vi.mock("@/lib/okta-config", () => ({
   HAS_OKTA_CONFIG: true,
@@ -44,7 +54,14 @@ vi.mock("@okta/okta-auth-js", () => ({
     handleLoginRedirect = handleLoginRedirect;
     isAuthenticated = isAuthenticated;
     signInWithRedirect = signInWithRedirect;
-    tokenManager = { on: tokenManagerOn, off: tokenManagerOff };
+    start = start;
+    tokenManager = {
+      on: tokenManagerOn,
+      off: tokenManagerOff,
+      getTokensSync,
+      setTokens,
+    };
+    token = { renewTokens };
   },
 }));
 
@@ -72,8 +89,15 @@ describe("OktaAuthWrapper", () => {
     handleLoginRedirect.mockReset().mockResolvedValue(undefined);
     isAuthenticated.mockReset().mockResolvedValue(true);
     signInWithRedirect.mockReset().mockResolvedValue(undefined);
+    start.mockReset().mockResolvedValue(undefined);
     tokenManagerOn.mockReset();
     tokenManagerOff.mockReset();
+    // No refresh token by default: that is the state of any deployment whose Okta authorization
+    // server does not grant `offline_access`, and the fallback behaviour is what most of these
+    // tests are about.
+    getTokensSync.mockReset().mockReturnValue(unexpiredTokens());
+    setTokens.mockReset();
+    renewTokens.mockReset();
     reauthenticate.mockReset().mockResolvedValue(true);
     delete (window as unknown as { __okta_instance?: unknown }).__okta_instance;
     pretendDeployedHost();
@@ -174,6 +198,86 @@ describe("OktaAuthWrapper", () => {
       screen.getByText("https://recon.example.com/login/callback"),
     ).toBeTruthy();
     consoleError.mockRestore();
+  });
+
+  it("arms the SDK's expiry timers once the session is confirmed", async () => {
+    // `oktaAuth.start()` is the only thing that sets them up. Without it the token manager never
+    // emits `expired`, so every listener below is dead code and `autoRemove` never drops a dead
+    // token — the app's sole notice of an expired session was a 401 from the BFF.
+    render(
+      <OktaAuthWrapper>
+        <p>{PROTECTED_TEXT}</p>
+      </OktaAuthWrapper>,
+    );
+    await waitFor(() => expect(screen.getByText(PROTECTED_TEXT)).toBeTruthy());
+    expect(start).toHaveBeenCalled();
+  });
+
+  it("renews the session ahead of expiry instead of redirecting", async () => {
+    // Expiry inside the renewal lead window, so the scheduled renewal is due right away.
+    const expiresAt = Math.floor(Date.now() / 1000) + 30;
+    getTokensSync.mockReturnValue({
+      accessToken: { expiresAt },
+      idToken: { expiresAt },
+      refreshToken: { refreshToken: "r-1" },
+    });
+    const renewed = unexpiredTokens({ refreshToken: { refreshToken: "r-2" } });
+    renewTokens.mockImplementation(async () => {
+      // The renewal has to actually move the expiry, or the scheduler refuses to arm another one.
+      getTokensSync.mockReturnValue(renewed);
+      return renewed;
+    });
+    vi.useFakeTimers();
+
+    render(
+      <OktaAuthWrapper>
+        <p>{PROTECTED_TEXT}</p>
+      </OktaAuthWrapper>,
+    );
+    // Two steps: the first lets the sign-in handshake settle so `authed` flips and the effect that
+    // installs the renewal actually runs; only then does the renewal timer exist to advance onto.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_100);
+    });
+
+    expect(renewTokens).toHaveBeenCalled();
+    // renewTokens() hands the tokens back without storing them; skipping this would leave the app
+    // holding the ones that were about to expire while believing it had renewed.
+    expect(setTokens).toHaveBeenCalledWith(renewed);
+    // The whole point: no navigation, and the app never came down.
+    expect(reauthenticate).not.toHaveBeenCalled();
+    expect(signInWithRedirect).not.toHaveBeenCalled();
+    expect(screen.getByText(PROTECTED_TEXT)).toBeTruthy();
+  });
+
+  it("renews rather than signs out when the expiry event beats the timer", async () => {
+    // A tab asleep through its own renewal timer wakes to an already-expired token. The backstop
+    // tries the same POST once, and succeeding must not cost the user a page load.
+    getTokensSync.mockReturnValue(
+      unexpiredTokens({ refreshToken: { refreshToken: "r-1" } }),
+    );
+    renewTokens.mockResolvedValue(unexpiredTokens());
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    render(
+      <OktaAuthWrapper>
+        <p>{PROTECTED_TEXT}</p>
+      </OktaAuthWrapper>,
+    );
+    await waitFor(() => expect(screen.getByText(PROTECTED_TEXT)).toBeTruthy());
+
+    const expiredHandler = tokenManagerOn.mock.calls.find(
+      (call) => call[0] === "expired",
+    )?.[1] as (key: string) => void;
+    await act(async () => expiredHandler("idToken"));
+
+    expect(setTokens).toHaveBeenCalled();
+    expect(reauthenticate).not.toHaveBeenCalled();
+    expect(screen.getByText(PROTECTED_TEXT)).toBeTruthy();
+    consoleWarn.mockRestore();
   });
 
   it("re-authenticates when a token expires under a mounted app", async () => {

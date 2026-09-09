@@ -276,10 +276,15 @@ resource "aws_iam_role_policy" "agent" {
         Resource = [aws_bedrockagentcore_memory.this.arn, "${aws_bedrockagentcore_memory.this.arn}/*"]
       },
       {
-        # Auto-resolve: read the admin threshold set in the Config tab.
+        # Two Config-tab values this container reads per invocation: the auto-resolve threshold and
+        # the selected model id. Enumerated rather than path-scoped, deliberately — this role holds
+        # the agent's own credentials, and a wildcard over the platform prefix would hand the model's
+        # process read access to every parameter the platform has, including ones added later.
+        # compact(): an unwired model parameter drops out instead of contributing an empty ARN, which
+        # IAM rejects outright.
         Effect   = "Allow"
         Action   = ["ssm:GetParameter"]
-        Resource = var.auto_resolve_param_arn
+        Resource = compact([var.auto_resolve_param_arn, var.agent_model_id_param_arn])
       },
       {
         # Auto-resolve writes an AUTO_RESOLVED lesson to the ledger.
@@ -416,18 +421,86 @@ resource "aws_iam_role_policy" "memory" {
   })
 }
 
-# Lessons-learned semantic strategy. Captures how analysts decided to proceed
-# (approvals, and disapprovals with correction comments) as consolidated, retrievable memories so
-# future reconciliations of similar items are informed by prior corrections. The recon agent
-# writes these as memory events under the reconciliation/lessons/{domain} namespace and retrieves
-# them during classification/investigation.
+# Lessons-learned strategy. Captures how analysts decided to proceed (approvals, and disapprovals
+# with correction comments) as consolidated, retrievable memories so future reconciliations of
+# similar items are informed by prior corrections. The recon agent writes these as memory events
+# under the reconciliation/lessons/{domain} namespace and retrieves them during
+# classification/investigation.
+#
+# CUSTOM rather than the built-in SEMANTIC type because the built-in extraction prompt is written for
+# a general-purpose personal assistant — "extract meaningful information about the users". Fed a
+# reconciliation decision it produced records like "The user made an analyst decision for
+# reconciliation item manual-scenario1-1-jahqpu with a bulk status of CLOSED_NO_ACTION on
+# 2026-09-08": an audit-trail entry the DynamoDB ledger already holds, which generalizes to nothing
+# and displaces the records that would inform a future item.
+#
+# Only EXTRACTION is overridden. Consolidation's Add/Update/Skip behaviour is already what we want,
+# and AWS is explicit that editing that prompt (e.g. renaming AddMemory) breaks the pipeline. When
+# extraction returns an empty list, nothing reaches consolidation, so this is sufficient.
 resource "aws_bedrockagentcore_memory_strategy" "lessons" {
   memory_id                 = aws_bedrockagentcore_memory.this.id
   name                      = "lessons_learned"
-  type                      = "SEMANTIC"
+  type                      = "CUSTOM"
   namespaces                = ["reconciliation/lessons/{actorId}"]
   memory_execution_role_arn = aws_iam_role.memory.arn
-  description               = "Lessons captured from analyst approve/disapprove decisions and correction comments."
+  description               = "Generalizable lessons derived from analyst approve/disapprove decisions and correction comments."
+
+  configuration {
+    type = "SEMANTIC_OVERRIDE"
+
+    extraction {
+      model_id = var.memory_model_id
+      # NOTE: `append_to_prompt` REPLACES the default instructions despite its name (AWS: "The
+      # content of appendToPrompt replaces the default instructions in the system prompt"). This is
+      # therefore a complete instruction set, built on the documented built-in semantic extraction
+      # prompt. The service appends the output schema itself — do not restate or alter it, and keep
+      # the `language` field requirement the schema demands.
+      append_to_prompt = <<-EOT
+        You are a long-term memory extraction agent supporting a reconciliation analyst assist
+        system. Your task is to identify and extract GENERALIZABLE LESSONS from a list of messages
+        describing analyst decisions on reconciliation items.
+
+        # What counts as a lesson
+        A lesson is a reusable rule, criterion, or piece of domain judgement that would help decide a
+        FUTURE, DIFFERENT reconciliation item. It must still make sense without naming the specific
+        item it came from.
+
+        Extract a lesson only when the messages state, or clearly imply, WHY the decision was made —
+        an analyst comment, a stated rationale, a correction of the agent's recommendation, or a
+        criterion the analyst applied.
+
+        # What must NOT be extracted
+        - A bare record of what was decided for one item. "The analyst set item X to
+          CLOSED_NO_ACTION" is an audit-trail entry, not a lesson, and the reconciliation ledger
+          already holds it. Return an empty list for such messages.
+        - Item identifiers, case ids, session ids, or dates of the decision as facts in their own
+          right.
+        - A restatement of the decision that only substitutes the item id for a pronoun.
+        - Anything you would have to name a specific item to make true.
+
+        # How to write a lesson
+        - Write it as a standalone rule about the reconciliation domain. For example: "A paydown
+          notice whose facility is unmapped should be routed to manual review rather than
+          auto-closed, because the mapping must be corrected first."
+        - Preserve the concrete specifics that make a rule reusable: exception classes,
+          dispositions, thresholds, counterparty types, document types, field names.
+        - Drop the per-item specifics: item ids, one-off amounts, the date of the decision.
+        - Do NOT incorporate external knowledge. Do NOT invent a rationale the messages do not state.
+        - Avoid duplicate extractions.
+        - If the messages contain no generalizable lesson, return an empty list. An empty list is the
+          correct and expected answer for a routine decision recorded without a rationale.
+
+        <language_requirement>
+        - Identify the main language of the messages and declare it in the "language" field of the
+          JSON output.
+        - Write the lesson in that language. Keep identifiers, enum-like tokens (for example
+          CLOSED_NO_ACTION), field names, and proper nouns verbatim regardless of the main language;
+          they do not count toward language detection.
+        - If the messages are in English, respond in English.
+        </language_requirement>
+      EOT
+    }
+  }
 }
 
 # ---------------------------------------------------------------------------------
@@ -517,7 +590,10 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     ASSETS_BUCKET     = var.assets_bucket
     SKILLS_PREFIX     = "skills/"
     SYSTEM_PROMPT_KEY = "system-prompt.md"
+    # MODEL_ID is the deploy-time seed; AGENT_MODEL_PARAM (SSM) is the runtime-switchable source of
+    # truth the Config tab writes, read per invocation. Empty disables the live read entirely.
     MODEL_ID          = var.model_id
+    AGENT_MODEL_PARAM = var.agent_model_id_param
     # Straight-through processing: the computed evidence-completeness score (satisfied / prescribed
     # required steps for the classified skill) >= this SSM threshold -> auto-resolve. There is no
     # composite: every model-reported confidence number was deleted on 2026-09-04.

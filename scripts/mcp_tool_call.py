@@ -170,7 +170,7 @@ def main() -> int:
     parser.add_argument("--gateway-url", default=None, help="Gateway URL; default: read from Terraform.")
     parser.add_argument("--terraform-dir", default="infra/environments/recon")
     parser.add_argument("--region", default="us-east-1")
-    parser.add_argument("--profile", default="huthmac")
+    parser.add_argument("--profile", default=None, help="AWS profile; default: credential chain.")
     parser.add_argument("--tool", default=DEFAULT_TOOL)
     parser.add_argument("--query", required=True, help="Natural-language retrieval query.")
     parser.add_argument("--filter", default=None, help="Bedrock RetrievalFilter as a JSON string.")

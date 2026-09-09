@@ -120,6 +120,15 @@ output "agent_backend_param_arn" {
   value = aws_ssm_parameter.agent_backend.arn
 }
 
+output "agent_model_id_param" {
+  description = "SSM parameter name of the live Tier-2 model selection, read by both agent backends."
+  value       = aws_ssm_parameter.agent_model_id.name
+}
+
+output "agent_model_id_param_arn" {
+  value = aws_ssm_parameter.agent_model_id.arn
+}
+
 output "comment_requirement_param" {
   description = "SSM parameter holding the decision-comment requirement mode."
   value       = aws_ssm_parameter.comment_requirement.name

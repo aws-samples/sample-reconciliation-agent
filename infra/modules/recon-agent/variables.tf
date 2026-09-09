@@ -59,6 +59,17 @@ variable "model_id" {
   default     = "us.anthropic.claude-sonnet-5"
 }
 
+variable "memory_model_id" {
+  description = <<-EOT
+    Bedrock model (or inference-profile) id AgentCore Memory invokes for the lessons strategy's
+    extraction pass. Separate from `model_id` so the memory pipeline can be pinned independently of
+    the agent loop — extraction runs asynchronously against a fixed prompt, so it has no reason to
+    move every time the runtime's model is switched from the Config tab.
+  EOT
+  type        = string
+  default     = "us.anthropic.claude-sonnet-5"
+}
+
 variable "auto_resolve_param" {
   description = "SSM parameter name holding the auto-resolve confidence threshold."
   type        = string
@@ -66,6 +77,18 @@ variable "auto_resolve_param" {
 
 variable "auto_resolve_param_arn" {
   type = string
+}
+
+variable "agent_model_id_param" {
+  description = "SSM parameter name of the live Tier-2 model selection. Empty means unwired, and the container keeps using MODEL_ID without attempting a read."
+  type        = string
+  default     = ""
+}
+
+variable "agent_model_id_param_arn" {
+  description = "ARN of the above, granted to the runtime's execution role. Empty grants nothing — this role's SSM reads are enumerated per parameter, not path-scoped."
+  type        = string
+  default     = ""
 }
 
 variable "lessons_table" {

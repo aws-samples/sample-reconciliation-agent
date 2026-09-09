@@ -123,6 +123,13 @@ module "frontend" {
   # account or state changes.
   idp_appsync_endpoint = var.idp_appsync_endpoint
   idp_appsync_api_arn  = var.idp_appsync_api_arn
+  # The same tab's extracted fields. Recon's OWN table, so unlike the two above this needs no grant on
+  # anyone else's API and no variable in `terraform.tfvars` -- which also means CI cannot drift on it,
+  # the way a hand-copied `RECON_TFVARS` key can. The grant the module builds from this is read-only;
+  # the notices table is what the matcher and the interceptor read, and a display tab must not be able
+  # to change it.
+  notices_table     = module.notice_store.notices_table_name
+  notices_table_arn = module.notice_store.notices_table_arn
   # Documents tab -> Upload. The audit table is recon's own record of what it sent, and it is what the
   # tab reads back -- which is why nothing here grants a read on either destination bucket. The
   # PutObject into the pipeline's input bucket is identity-side too while both live in this account; a
@@ -155,8 +162,10 @@ module "frontend" {
 
   comment_requirement_param = module.foundation.comment_requirement_param
 
-  # Config tab backend selector + Evals tab (config-version pointer + eval/harness log groups).
+  # Config tab backend + model selectors, and the Evals tab (config-version pointer + eval/harness
+  # log groups).
   agent_backend_param           = module.foundation.agent_backend_param
+  agent_model_id_param          = module.foundation.agent_model_id_param
   harness_config_version_param  = module.foundation.harness_config_version_param
   eval_results_log_group_prefix = module.agent_evals.results_log_group_prefix
   harness_log_group             = "aws/spans"
@@ -283,6 +292,7 @@ module "tier1" {
   auto_resolve_param           = module.foundation.auto_resolve_param
   harness_config_version_param = module.foundation.harness_config_version_param
   agent_backend_param          = module.foundation.agent_backend_param
+  agent_model_id_param         = module.foundation.agent_model_id_param
 
   # Deterministic Tier-1 toggle read at runtime.
   tier1_enabled_param     = module.foundation.tier1_enabled_param
@@ -368,8 +378,12 @@ module "recon_agent" {
   # Auto-resolve (straight-through processing): threshold param + lesson ledger + email.
   auto_resolve_param     = module.foundation.auto_resolve_param
   auto_resolve_param_arn = module.foundation.auto_resolve_param_arn
-  lessons_table          = module.foundation.lessons_table
-  lessons_table_arn      = module.foundation.lessons_table_arn
+  # Config tab: the live model selection this container reads per invocation, with `model_id` below
+  # remaining the fallback.
+  agent_model_id_param     = module.foundation.agent_model_id_param
+  agent_model_id_param_arn = module.foundation.agent_model_id_param_arn
+  lessons_table            = module.foundation.lessons_table
+  lessons_table_arn        = module.foundation.lessons_table_arn
   # Shared mailbox the agent's Microsoft Graph email tools send from / read (GRAPH_MAILBOX).
   graph_mailbox = var.graph_mailbox
 
@@ -851,10 +865,13 @@ module "idp_hook" {
   lambda_source_hash = module.lambda_package.source_code_hash
   # The hook's only write target. It stores extracted documents as EVIDENCE and has no grant on
   # items, cases or audit — an extracted document must not create a case.
-  notices_table          = module.notice_store.notices_table_name
-  notices_table_arn      = module.notice_store.notices_table_arn
-  assets_bucket          = module.foundation.assets_bucket
-  assets_bucket_arn      = module.foundation.assets_bucket_arn
+  notices_table     = module.notice_store.notices_table_name
+  notices_table_arn = module.notice_store.notices_table_arn
+  assets_bucket     = module.foundation.assets_bucket
+  assets_bucket_arn = module.foundation.assets_bucket_arn
+  # The completion event recon listens for. Empty by default, which creates no rule and leaves the
+  # hook unreachable — so an environment with an IDP deployment MUST set this.
+  idp_state_machine_arn  = var.idp_state_machine_arn
   vpc_subnet_ids         = local.vpc_subnets
   vpc_security_group_ids = local.vpc_sgs
 }

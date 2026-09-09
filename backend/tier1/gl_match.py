@@ -174,10 +174,16 @@ class GlMatch:
 
     Exactly one of ``row`` and ``reason`` is ever set. Both being None would mean the lookup neither
     succeeded nor explained itself, which no code path produces.
+
+    ``match`` accompanies ``row`` and records the comparison that accepted it: the extracted amount,
+    the ledger amount, the margin between them, the tolerance, the entry type and the borrower. The
+    row alone cannot explain the match, because which of several extracted candidate amounts it
+    settled is not recoverable from the row afterwards.
     """
 
     row: dict | None = None
     reason: str | None = None
+    match: dict[str, str] | None = None
 
 
 def gl_lookup(item: ReconItem, *, invoker: Callable[[dict], dict]) -> GlMatch:
@@ -214,12 +220,31 @@ def gl_lookup(item: ReconItem, *, invoker: Callable[[dict], dict]) -> GlMatch:
                 amount = float(str(row.get("amount", "")).replace(",", ""))
             except (TypeError, ValueError):
                 continue
-            if any(abs(amount - c) <= TOLERANCE for c in candidates):
-                matches.append(row)
+            # Keep the closest accepting candidate alongside the row, not just the fact that one
+            # existed. Which extracted amount the ledger row settled is the substance of the match,
+            # and it cannot be recovered from the row later — the row does not know what it was
+            # compared against.
+            within = [c for c in candidates if abs(amount - c) <= TOLERANCE]
+            if within:
+                matched_candidate = min(within, key=lambda c: abs(amount - c))
+                matches.append((row, amount, matched_candidate))
         # Deterministic only when the answer is unambiguous: exactly one row survived all three
         # filters. Anything else is a judgement call, and judgement calls belong to the agent.
         if len(matches) == 1:
-            return GlMatch(row=matches[0])
+            row, ledger_amount, extracted_amount = matches[0]
+            return GlMatch(
+                row=row,
+                match={
+                    "borrower": borrower,
+                    "entry_type": entry_type,
+                    "tolerance": str(TOLERANCE),
+                    "extracted_amount": str(extracted_amount),
+                    "ledger_amount": str(ledger_amount),
+                    "difference": str(abs(ledger_amount - extracted_amount)),
+                    "candidates_considered": str(len(candidates)),
+                    "ledger_rows_returned": str(len(rows)),
+                },
+            )
         if len(matches) > 1:
             logger.info(
                 "GL match ambiguous for %s (%d candidate rows) — escalating to agent",

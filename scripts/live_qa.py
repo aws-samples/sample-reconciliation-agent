@@ -228,6 +228,11 @@ def check_case(page: Page, base: str, item_id: str, shots: Path) -> list[Result]
     phrased as "the panel states its outcome", not "the panel has rows". The only unconditional
     requirements are the ones this release changed.
 
+    Two shapes, asserted separately, because they share almost no content. An ESCALATED case has an
+    evidence table and a classified skill. A deterministically AUTO-CLEARED case has neither -- no
+    model ran, which is the point of it -- and carries the Tier-1 resolution panel instead. Asking
+    an auto-clear for the escalation panels would demand the very thing its existence disproves.
+
     :param page: the page to drive.
     :param base: deployment base URL.
     :param item_id: the case to open.
@@ -241,10 +246,51 @@ def check_case(page: Page, base: str, item_id: str, shots: Path) -> list[Result]
     low = body.lower()
     short = item_id[:26]
 
-    if "evidence" not in low:
+    # "evidence" alone is not a proof-of-load marker: it is absent from every auto-cleared case, so
+    # using it as the only one reported each one as a broken page. Each shape proves the load with
+    # the panel that shape must have.
+    tier1 = "tier-1 deterministic resolution" in low
+    if not tier1 and "evidence" not in low:
         return [
             Result(f"case[{short}]:loads", False, f"not a case screen: {page.url[:70]}", errors)
         ]
+
+    if tier1:
+        out = [Result(f"case[{short}]:loads", True, "rendered (auto-cleared)", errors)]
+        # The panel must show the arithmetic, not just the verdict. "AUTO CLEARED" on its own is the
+        # state this release existed to fix: a user could see that a case cleared and not why.
+        missing = [
+            label
+            for label in ("cleared as", "compared attribute", "difference", "tolerance")
+            if label not in low
+        ]
+        out.append(
+            Result(
+                f"case[{short}]:tier1-explains-rule",
+                not missing,
+                f"the resolution panel must show the rule basis; missing {missing}"
+                if missing
+                else "the resolution panel shows the rule basis",
+            )
+        )
+        # An auto-clear that renders agent panels means a model ran, or that empty ones are being
+        # drawn for a case that never had one -- both misreport how the case was resolved.
+        out.append(
+            Result(
+                f"case[{short}]:no-agent-panels",
+                "skill that drove the score" not in low and "evidence" not in low,
+                "an auto-cleared case must claim no skill and no evidence score",
+            )
+        )
+        out.append(
+            Result(
+                f"case[{short}]:no-also-loaded",
+                "also loaded" not in low,
+                "the 'also loaded (N)' list must be gone",
+            )
+        )
+        page.screenshot(path=str(shots / f"case-{item_id[:32]}.png"), full_page=False)
+        return out
 
     out = [Result(f"case[{short}]:loads", True, "rendered", errors)]
     # The label is unconditional: every case has a classified skill or renders an em dash for it.
