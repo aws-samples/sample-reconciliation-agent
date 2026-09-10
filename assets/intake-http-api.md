@@ -38,8 +38,7 @@ Both Lambdas are `python3.12`, both come out of the single shared deployment zip
 
 ## Authorization
 
-There is **no Cognito** anywhere in this stack. The HTTP API validates the same OIDC provider the
-console signs in against, and the private REST API (below) uses SigV4.
+The HTTP API validates the same OIDC provider the console signs in against, and the private REST API (below) uses SigV4.
 
 ```hcl
 resource "aws_apigatewayv2_authorizer" "jwt" {
@@ -55,7 +54,7 @@ resource "aws_apigatewayv2_authorizer" "jwt" {
 }
 ```
 
-A v2 JWT authorizer is not Cognito-specific — it validates any OIDC issuer. Issuer and audience are
+A v2 JWT authorizer validates any OIDC issuer. Issuer and audience are
 derived from `auth_provider` in **one** place, `infra/environments/recon/main.tf`'s `oidc_*` locals,
 using the same derivation `chatbot-app/frontend/src/lib/api-auth.ts` performs for the BFF, so the API
 and the BFF accept exactly the same tokens by construction:
@@ -87,19 +86,6 @@ What it checks, and what it does not:
   why this authorizer keeps working in a no-NAT private deployment, and it is exactly the reason the
   private REST API uses SigV4 instead of a Lambda authorizer doing the same job from inside the VPC.
 
-### Why there is no user pool
-
-This stack used to run a Cognito user pool whose _only_ purpose was to be this issuer, while the
-console signed in through Okta — one deployment, two identity providers, and the pool's own Hosted UI
-orphaned (`src/lib/auth.ts`, imported by nothing but its own test). Removing it deleted the pool, the
-domain, the SPA client, the out-of-band callback patch in `modules/deploy-actions`, its
-`cognito-idp:UpdateUserPoolClient` grant, and the globally-unique `hosted_ui_prefix` variable.
-
-Consequence worth knowing: **the IdP is now mandatory to deploy.** Previously the intake API
-authorized against Cognito, which always existed, so an environment with no IdP configured still
-planned. Now `auth_provider`'s issuer and audience must be set — deliberately loud rather than
-silently authorizing against something nobody logs in to.
-
 ### Getting a token
 
 The same token the console holds. `/api/recon/*` and `POST /items` accept the identical Okta (or
@@ -118,60 +104,137 @@ Entra) token, so anything that can call the BFF can call this API:
 Handler: `backend/intake/handler.py` → `backend.intake.handler.handle`, 30 s timeout,
 `ITEMS_TABLE=recon-dev-items`.
 
-Request body:
+### Request body
+
+The smallest payload that exercises the whole pipeline — a two-sided cash break that Tier-1
+evaluates, fails to match, and escalates to the agent:
 
 ```json
 {
-  "domain": "unapplied-cash",
+  "domain": "cash",
   "items": [
     {
-      "item_id": "demo-0001",
+      "item_id": "manual-scenario1-1",
       "sides": [
         {
           "name": "bank",
           "attributes": {
-            "account_name": "Fund A",
-            "amount": "1250.00",
-            "entry_type": "credit"
+            "amount": "12500.00",
+            "currency": "USD"
           }
         },
         {
           "name": "ledger",
           "attributes": {
-            "account_name": "Fund A",
-            "amount": "1250.00",
-            "entry_type": "debit"
+            "amount": "0.00",
+            "currency": "USD"
           }
         }
       ],
-      "source_refs": ["s3://recon-dev-assets/statements/aug.pdf"],
-      "attributes": {},
-      "tier": 1
+      "source_refs": ["manual-submission"]
     }
   ]
 }
 ```
 
-Each element of `items` is validated as a `ReconItem` (`backend/recon_core/schema.py`):
-`item_id` (required), `sides` (required, a list of `ReconSide{name, attributes}`), `source_refs` (`[]`),
-`attributes` (`{}`, the free-form passthrough bag the IDP hook uses for `idp_class`/`idp_attributes`),
-`tier` (`1`).
+Everything above except `currency` and `source_refs` is load-bearing. The two tables say what may be
+omitted; [What the values steer](#what-the-values-steer) says what happens when you change the rest.
 
-Four things about that shape bite in practice:
+#### Envelope
+
+Two keys, both read by subscript, so a missing one is a `400` rather than a default:
+
+| Key      | Required | Notes                                                                                             |
+| -------- | -------- | ------------------------------------------------------------------------------------------------- |
+| `domain` | yes      | Non-empty string, applied to **every** item in the batch. There is no per-item override.          |
+| `items`  | yes      | Non-empty list. An empty list is rejected explicitly: `400 {"error": "items must be non-empty"}`. |
+
+#### Item
+
+Each element of `items` is validated as a `ReconItem` (`backend/recon_core/schema.py`):
+
+| Field         | Required | Default | Notes                                                                                                                               |
+| ------------- | -------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `item_id`     | yes      | —       | Any string. It is the table's partition key **and** the idempotency key, so it decides whether a resubmission writes or is skipped. |
+| `sides`       | yes      | —       | List of `{name, attributes}`. The value may be `[]`, but the key itself cannot be omitted — that is a `missing` validation error.   |
+| `source_refs` | no       | `[]`    | List of strings, provenance only. Nothing branches on the values; `"manual-submission"` above is a human label, not a magic token.  |
+| `attributes`  | no       | `{}`    | Item-level passthrough bag. Reserved keys below.                                                                                    |
+| `tier`        | no       | `1`     | Recorded on the item. Tier-1 runs off the stream regardless of what is set here.                                                    |
+| `domain`      | never    | —       | Envelope-only. Putting it on the item is a `400` — see the pitfalls below.                                                          |
+
+#### Side
+
+| Field        | Required | Default | Notes                                                                                            |
+| ------------ | -------- | ------- | ------------------------------------------------------------------------------------------------ |
+| `name`       | yes      | —       | Free-form label. `bank` / `ledger` is convention, not a contract; no rule reads it.              |
+| `attributes` | no       | `{}`    | `dict[str, str]` — every value must be a JSON **string**. Which keys matter is the next section. |
+
+### What the values steer
+
+Three fields change what the platform does. The rest is passthrough or a label.
+
+**`domain` selects the Tier-1 rule, and `cash` is the only rule that exists.** The rule set is
+`_RULES` in `backend/tier1/handler.py:22`, a single entry: `cash` → match on `amount`, tolerance
+`0.05`, auto-clear category `amount-match`. `reconcile()` does `rules.get(item.domain)`, so any other
+value returns the `no_rule` escalation immediately — no comparison is attempted, the item opens
+`PENDING` and goes straight to the agent. This is why the domain is `cash` and not a business label
+like `unapplied-cash`: the latter is accepted, written, and silently skips the deterministic tier.
+Change it only alongside a new `_RULES` entry.
+
+**The number of `sides` picks the route, and three counts behave differently.**
+
+| `side_count` | Tier-1 does                                            | Break-type hint                         |
+| ------------ | ------------------------------------------------------ | --------------------------------------- |
+| exactly `2`  | compares the rule's `match_attr` across the two sides  | `record-match-review`                   |
+| `0`          | general-ledger lookup, when `GL_QUERY_FUNCTION` is set | `ledger-status-resolution`              |
+| `1`, or `3`+ | nothing — `side_count` escalation                      | none; the agent classifies from scratch |
+
+A sides-less item is deliberately valid — an item derived from a document has no ledger side yet —
+so "accepted" does not imply "reconcilable".
+
+**`attributes.amount` on both sides is the comparison, and it is the only attribute Tier-1 reads.**
+It must be present on both sides (otherwise `missing_match_attr`) and parse as a `Decimal`
+(otherwise `unparseable_amount`; an empty string or `"n/a"` lands here, not in a crash). Within
+`0.05` the item auto-clears as `amount-match` and never reaches the LLM; outside it, `tolerance_miss`.
+The sample's `12500.00` vs `0.00` differ by 12500, so it escalates — change the ledger side to
+`12500.04` and the identical payload auto-clears instead. The comparison is `abs(a - b)`, so side
+order is irrelevant; it only decides which side is labelled `side_a` in the stored match evidence.
+
+**Everything else in a side's `attributes` is invisible to Tier-1**, including `currency` — two sides
+in different currencies still auto-clear on a matching number. Extra attributes earn their keep at
+Tier-2: `record-match-review` compares account name, amount and entry direction, so adding
+`account_name` (a label the skill's fund-alias table can resolve) and `entry_type` (`CREDIT` /
+`DEBIT`) gives the agent something to investigate. `amount` and `currency` alone is a valid break and
+a thin case.
+
+### Pitfalls in this shape
+
+Verified against the live schema, and each one fails in a way that does not name its cause:
 
 - **`domain` belongs on the envelope, not the item.** The handler does
   `ReconItem(domain=domain, **raw)`, so an item that also carries `domain` is a duplicate keyword
   argument — a `TypeError`, caught and returned as `400 invalid item`, which reads like a schema
   problem rather than a misplaced key.
-- **`attributes` values are `dict[str, str]`.** Pydantic v2 does not coerce numbers to strings, so
-  `"amount": 1250.00` fails validation. Quote every value.
-- **`sides` may be empty.** The schema sets no minimum length, so a sides-less item is accepted and
-  becomes a real row. That is intentional — items derived from a document have no ledger sides yet —
-  but it means "accepted" does not imply "reconcilable".
+- **Side attribute values must be quoted.** `ReconSide.attributes` is `dict[str, str]` and pydantic v2
+  does not coerce numbers to strings, so `"amount": 12500.00` fails with `string_type`. Quote every
+  value.
+- **Item-level `attributes` follows the opposite rule.** It is a bare `dict`, so numbers and nested
+  objects are accepted there. The two bags are not interchangeable, and the difference is easy to
+  carry the wrong way.
+- **Unknown item keys are dropped silently.** The model does not forbid extras, so a misspelled field
+  — `"Tier": 2`, `"item-id"` — is discarded without an error, and `item_id` then fails as _missing_
+  rather than as _misspelled_.
+- **Attributes the two sides disagree about vanish from the break record.** `break_record` omits a
+  conflicting field entirely rather than letting side order decide, so in the sample above only
+  `currency` reaches the break-type rules; `amount` is dropped. Any rule you add keyed on a field
+  that legitimately differs between sides can therefore never fire.
+- **Some `attributes` keys are written by the platform and will be overwritten.**
+  `tier1_escalation_reason`, `tier1_break_type` and `gl_candidates` are set on the escalation path;
+  `idp_class`, `idp_attributes` and `idp_sections` are the IDP hook's. Do not supply them.
 - **Nothing records the submitter.** There is no actor field on `ReconItem`, which is why the BFF route
   in front of this one doesn't bother resolving the caller's identity.
 
-Responses:
+### Responses
 
 | Status | Body               | Means                                                                                     |
 | ------ | ------------------ | ----------------------------------------------------------------------------------------- |
@@ -331,52 +394,6 @@ Five things to know about it:
   `<api-id>-<vpce-id>…vpce.amazonaws.com` hostname, which needs no private DNS. The comment on
   `private_dns_enabled` in `modules/network/main.tf` says so; don't tidy it back to a constant.
 
-### A VPC link is not this, and this API does not need one
-
-Worth stating because the console offers it under **API Gateway → VPC links** and it looks like the
-answer: a VPC link is the **egress** side. It lets an API route a request _into_ your VPC — to an
-internal NLB or ALB, a Cloud Map service, or (with **VPC link V2**) a VPC Lattice resource. It says
-nothing about who may call the API, so a VPC link does not make an API private and would not have
-fixed the HTTP API's problem.
-
-Two consequences:
-
-- **Nothing here needs one.** The integration target is a Lambda, and API Gateway calls Lambda over the
-  service API rather than through your VPC. `AWS_PROXY` to `recon-dev-intake` needs no VPC link, no
-  NLB, and no Lattice resource — which is a large part of why option 1 was cheap to build.
-- **If the intake handler ever moves off Lambda** — say behind the internal ALB as a container — a VPC
-  link is exactly the piece to add, and it is the one place the version matters: the legacy VPC link
-  works with REST APIs only, while VPC link V2 works with both REST and HTTP APIs. The AgentCore
-  equivalent is the `privateEndpoint` / `managedVpcResource` block on a gateway target, discussed in
-  [private-vpc-deployment.md](private-vpc-deployment.md).
-
-The VPC association this API _does_ have is a different mechanism entirely:
-`endpoint_configuration.vpc_endpoint_ids` on the REST API, which associates it with the `execute-api`
-endpoint and is what publishes the `<api-id>-<vpce-id>` hostname.
-
-### Alternative, not deployed — SigV4 invoke over a `lambda` endpoint
-
-Add `lambda` to `_private_interface_endpoints` and call `recon-dev-intake` directly with the synthetic
-API Gateway envelope. This is not a new design: it is exactly what the console's BFF already does at
-`/api/recon/items`, so the code path is in production use today.
-
-```bash
-aws lambda invoke --function-name recon-dev-intake \
-  --payload '{"body":"{\"domain\":\"unapplied-cash\",\"items\":[…]}"}' out.json
-```
-
-The handler reads `event["body"]`, so the payload is the **envelope**, not the body — a bare
-`{"domain": …, "items": […]}` yields a `KeyError` 400. Read `statusCode` and `body` out of `out.json`;
-`FunctionError` means an unhandled exception, not a rejected payload.
-
-Pick this for an in-account caller that does not need HTTP — it is a smaller change than the private
-REST API, though the REST API is what is actually deployed. Authorization becomes IAM
-(`lambda:InvokeFunction` on that one
-function ARN) rather than a JWT, which for machine-to-machine is the stronger of the two — no token
-lifetime, no shared audience, no user to provision, and it is auditable per-principal in CloudTrail —
-the same argument that put SigV4 on the private REST API. What you give up is HTTP: there is no route
-and no path, so it is no use to an upstream system that can only POST.
-
 ### The `lambda` endpoint is a latent no-NAT gap regardless
 
 Worth flagging beyond intake, because it is the same failure class as the missing
@@ -395,17 +412,6 @@ NAT — the deliberate follow-up step in that page's "Enabling it" — takes man
 lookup and every Tier-2 escalation with it, and the symptom is a hang and a timeout rather than an
 error naming the cause. The private REST API does not help here — it is an ingress path, and these are
 outbound calls. Add the `lambda` endpoint in the same change that removes the NAT.
-
-### What not to do
-
-- **An ALB listener rule to a Lambda target group** looks like the cheap way to get a private
-  `POST /items` on the internal ALB that already exists. It is not: ALB's `authenticate-oidc` /
-  `authenticate-cognito` actions are browser redirect flows that set a session cookie, so they are
-  useless to a machine caller, and without them the route is unauthenticated at the ALB — a
-  `POST /items` reachable by anything that can route to the load balancer.
-- **Fronting the HTTP API with an `execute-api` VPCE.** The endpoint service only resolves private REST
-  APIs. The DNS will not answer for an HTTP API, and adding the endpoint does not make `recon-dev-api`
-  private.
 
 ## IAM
 

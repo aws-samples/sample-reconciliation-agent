@@ -263,7 +263,7 @@ export default function LessonsPage() {
         <h1 className="rc-display mt-2 text-[34px] font-black leading-none text-[var(--rc-ink)]">
           Lessons Learned
         </h1>
-        <p className="rc-mono mt-3 max-w-2xl text-[12px] leading-relaxed text-[var(--rc-ink-faint)]">
+        <p className="rc-mono mt-3 text-[12px] leading-relaxed text-[var(--rc-ink-faint)]">
           When an analyst approves or corrects a recommendation, the decision is
           captured here and fed back into the agent&rsquo;s memory to inform
           future reconciliations.
@@ -406,7 +406,7 @@ export default function LessonsPage() {
           <h2 className="rc-display mt-2 text-[24px] font-black leading-none text-[var(--rc-ink)]">
             Agent Long-Term Memory
           </h2>
-          <p className="rc-mono mt-2 max-w-2xl text-[12px] leading-relaxed text-[var(--rc-ink-faint)]">
+          <p className="rc-mono mt-2 text-[12px] leading-relaxed text-[var(--rc-ink-faint)]">
             Consolidated lessons the agent recalls before classifying —
             retrieved live from AgentCore Memory.
           </p>
