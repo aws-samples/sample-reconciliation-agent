@@ -117,20 +117,23 @@ export default function SkillsManagerPage() {
   return (
     <div className="space-y-6">
       <header className="flex flex-wrap items-end justify-between gap-4">
-        <div>
+        {/* min-w-0 + flex-1 lets this column consume the leftover header width so
+            the description wraps at the viewport edge instead of a fixed max-width.
+            basis-[320px] makes it drop to its own row before it gets too narrow. */}
+        <div className="min-w-0 flex-1 basis-[320px]">
           <Eyebrow>
             Investigation procedures · editable · applies live (~60s)
           </Eyebrow>
           <h1 className="rc-display mt-2 text-[34px] font-black leading-none text-[var(--rc-ink)]">
             Skills
           </h1>
-          <p className="rc-mono mt-3 max-w-2xl text-[12px] leading-relaxed text-[var(--rc-ink-faint)]">
+          <p className="rc-mono mt-3 text-[12px] leading-relaxed text-[var(--rc-ink-faint)]">
             Each skill is a procedure the agent follows to investigate a break.
             Editing a skill&rsquo;s markdown changes how the agent reasons — the
             changes apply to new reconciliations within ~60s.
           </p>
         </div>
-        <div className="flex gap-3">
+        <div className="flex shrink-0 gap-3">
           <Link
             href="/recon/skills/system-prompt"
             className="rc-mono rounded border border-[var(--rc-line)] px-4 py-2 text-[12px] uppercase tracking-[0.12em] text-[var(--rc-ink-dim)] hover:text-[var(--rc-ink)]"
