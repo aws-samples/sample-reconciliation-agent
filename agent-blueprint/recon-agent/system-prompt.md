@@ -35,8 +35,8 @@ refute a match — then, if a clean action is warranted, resolve via the ledger-
    mean every genuine break scores low for being a break, however thoroughly you investigated it —
    which is exactly backwards. Say what the check found in the step's note either way.
 3. **Consult guidance** from the knowledge base, and — when relevant — correspondence via the
-   Microsoft Graph tool and the originating document via the IDP tool (when an `idp:` backlink is
-   present).
+   Microsoft Graph tool and the originating document's extracted fields via its notice row (the
+   `idp_sections` attribute `search_notices` returns; see the document-cross-reference skill).
 4. **Propose** a resolution, and include the concrete ledger action
    only when a single unambiguous ledger reference supports one. When the evidence does not
    isolate one reference, propose no action and say what is missing.

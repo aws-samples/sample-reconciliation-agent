@@ -24,11 +24,12 @@ variable "runtime_dependencies" {
   # Changing this list alters local.stage_hash, so the shared zip is rebuilt and every backend
   # Lambda gets a new source_code_hash on the next apply — in-place updates, no deletes.
   #
-  # This list is duplicated in .gitlab-ci.yml's pre-plan staging call, which passes it as
-  # arguments to stage.sh. The two MUST agree: archive_file reads the staging directory at PLAN
-  # time, so whatever CI staged is what ships, and terraform_data.stage's hash will already match
-  # at apply time and not re-stage to correct it. They drifted once already — CI was missing
-  # PyYAML — and nothing caught it because the zip only rebuilds when the sources change.
+  # ⚠️ This list is duplicated in .gitlab-ci.yml's pre-plan staging call, which passes it as
+  # arguments to stage.sh. The two MUST agree, and drift between them is silent: archive_file reads
+  # the staging directory at PLAN time, so whatever CI staged is what ships, and terraform_data.stage's
+  # hash already matches at apply time and will not re-stage to correct it. A dependency missing from
+  # the CI copy therefore surfaces only as an ImportError at runtime.
+  #
   # red-black-tree-mod is listed although nothing imports it. extract-msg depends on it, and it
   # is published as a source distribution only -- which the platform-pinned pip install in
   # stage.sh cannot install, because --platform forces --only-binary=:all:. stage.sh builds a

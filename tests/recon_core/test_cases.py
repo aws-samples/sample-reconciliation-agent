@@ -101,8 +101,9 @@ def _proposal_kwargs(item_id: str) -> dict:
         "resolution": "monitor",
         "confidence": Decimal("0.8"),
         "steps": [{"skill": "timing"}],
-        # Required keyword, no default — see cases.attach_proposal. None is a legal value.
+        # Required keywords, no defaults — see cases.attach_proposal. None is legal for both.
         "notice_search": None,
+        "token_usage": None,
     }
 
 
@@ -135,8 +136,9 @@ def test_attach_proposal_writes_no_classification_confidence() -> None:
     """A stored number nobody computes and no screen renders is worse than absent.
 
     The next reader assumes it means something. The only confidence on a case is ``confidence`` —
-    the evidence-completeness score computed by ``recon_core.confidence.score_proposal``. Rows
-    written before 2026-09-04 still carry the old attribute; nothing backfills or removes it.
+    the evidence-completeness score computed by ``recon_core.confidence.score_proposal``. Nothing
+    backfills or strips the attribute on rows that already carry it, so the write path is the only
+    place this can be held.
 
     :returns: None.
     """

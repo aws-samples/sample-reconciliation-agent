@@ -3,14 +3,14 @@
  * and from the trace otherwise. Both sources are covered here.
  *
  * The distinctions the tests care about most are the three ways this panel can have no rows to show,
- * because they lead an analyst to opposite conclusions and the panel used to conflate two of them:
+ * because they lead an analyst to opposite conclusions and two of them are easy to conflate:
  *   - never searched          → render nothing (a harness-produced case gathered no notice evidence);
  *   - searched, matched none  → "matched no notices", which explains the evidence score;
  *   - searched, unreadable    → say the rows cannot be read. NOT "matched no notices".
  *
- * That last case is the regression: the trace's `tool_output` is capped at 600 characters, one notice
- * row is larger, and the panel parsed the fragment, swallowed the failure, and reported an empty match
- * on cases whose evidence table cited five notices by id.
+ * That last case is the subtle one: the trace's `tool_output` is capped at 600 characters and a single
+ * notice row is larger, so a panel that parses the fragment and swallows the failure reports an empty
+ * match on cases whose evidence table cites five notices by id.
  */
 
 import { describe, expect, it, vi } from "vitest";

@@ -278,10 +278,12 @@ def test_an_unverifiable_verdict_blocks_the_ledger_write(monkeypatch):
 
 @mock_aws
 def test_an_absent_verdict_refuses(monkeypatch):
-    """⚠️ The inversion. Absence used to be the one shape allowed through; now it refuses.
+    """⚠️ Absence is a REFUSAL, not a pass. Reading a missing key as "nothing to object to" is the
+    single easiest way to render this guard decorative.
 
-    Every case row written before this guard existed lacks the key. Those cases must be re-run, and the
-    denial says so — an operator seeing it needs to know the case is stale, not that the guard is broken.
+    A case row that predates the guard has no key at all, so those cases must be re-run — and the
+    denial says so, because an operator seeing it needs to know the case is stale rather than that the
+    guard is broken.
     """
     monkeypatch.setenv("INTERCEPTOR_MODE", "enforce")
     monkeypatch.setenv("CASES_TABLE", CASES_TABLE)

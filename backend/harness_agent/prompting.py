@@ -17,10 +17,11 @@ def _evidence_steps_block(catalog: list[dict]) -> str:
 
     The harness has no skill-loading tool (see ``harness_config.ALLOWED_TOOLS``), so unlike the
     runtime backend it never gets a skill body — yet its system prompt asks it to report one entry per
-    step "the skill lists in its ``evidence_steps`` front matter". It had no way to see those ids and
-    invented them (on 2026-09-02: ``ledger_lookup``, ``amount_tolerance_check``), every one of which
-    is unscoreable. All entries are rendered, not just Tier-1's hinted one, because the harness
-    classifies for itself and must be able to report against whichever class it picks.
+    step "the skill lists in its ``evidence_steps`` front matter". Without this block it cannot see
+    those ids and invents plausible ones instead (``ledger_lookup``, ``amount_tolerance_check``),
+    every one of which is unscoreable. All entries are rendered, not just Tier-1's hinted one,
+    because the harness classifies for itself and must be able to report against whichever class it
+    picks.
 
     :param catalog: the live SKILL.md catalog.
     :returns: the prompt block (newline-terminated), or '' when no entry declares any step.
@@ -87,7 +88,7 @@ def build_first_message(
         "Reconcile the following item. Follow the workflow contract in your system prompt: "
         "classify by the IDP document class, load the matching skill, investigate via the "
         "gateway tools BY THEIR FULL PREFIXED NAMES (general-ledger___search_ledger / "
-        "managed-kb___Retrieve / document-extraction___IDPTools___get_results — "
+        "notices___search_notices / managed-kb___Retrieve — "
         "short names fail with Unknown tool), then call "
         "submit_proposal EXACTLY ONCE. Calling submit_proposal is MANDATORY — never end with a "
         "text answer before it. submit_proposal REQUIRES class_name, classification_reasoning and "

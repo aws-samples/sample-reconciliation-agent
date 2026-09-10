@@ -45,8 +45,19 @@ def test_tool_name_mapping_covers_all_agent_tools():
     # The KB is reached through the Gateway's managed bedrock-knowledge-bases connector, so the
     # operation name is Bedrock's own `Retrieve` -- there is no Lambda target behind it.
     assert gateway_tool_name("search_guidance") == "managed-kb___Retrieve"
-    assert gateway_tool_name("get_results") == "document-extraction___IDPTools___get_results"
     assert gateway_tool_name("set_draw_status") == "set-draw-status___set_draw_status"
+    # An EXACT set, so a tool cannot be added to the routing map without a reviewer seeing it here.
+    # This is the guard that keeps the retired document-pipeline route from creeping back in: the map
+    # is what turns a short alias into a callable gateway name, so a re-grant has to land here first.
+    assert set(GATEWAY_TOOL_NAMES) == {
+        "search_ledger",
+        "search_notices",
+        "search_guidance",
+        "set_draw_status",
+        "search_correspondence",
+        "list_contacts",
+        "list_templates",
+    }
     # Mailbox read routes through the microsoft-graph OpenAPI target. There is no
     # `send_notification` short name -- email send is a microsoft-graph OpenAPI op too.
     assert (
@@ -89,9 +100,9 @@ def test_run_sync_drives_coroutine_without_running_loop():
 
 
 def test_run_sync_works_inside_running_event_loop():
-    """Regression: the async @app.entrypoint handler runs inside a live loop, so the tool
-    caller's asyncio.run() raised 'cannot be called from a running event loop' and left the
-    MCP coroutine un-awaited. _run_sync must complete the coroutine from within a running loop.
+    """The async @app.entrypoint handler runs inside a live loop, where asyncio.run() raises
+    'cannot be called from a running event loop' and leaves the MCP coroutine un-awaited.
+    _run_sync must complete the coroutine from within a running loop.
     """
 
     async def _inner():
@@ -105,8 +116,8 @@ def test_run_sync_works_inside_running_event_loop():
 
 
 def test_parse_tool_result_reads_text_content_json():
-    """THE bug fix: the live gateway returns the payload as a `content` TEXT part (no output
-    schema → empty structuredContent). The runtime must parse it, not return {}."""
+    """The gateway returns the payload as a `content` TEXT part (no output schema → empty
+    structuredContent). The runtime must parse it, not return {}."""
     res = _Res(content=[_Part('{"rows": [{"entry_id": "GL-2026-000103"}], "count": 1}')])
     out = parse_tool_result(res)
     assert out["count"] == 1
@@ -154,9 +165,9 @@ def test_caller_propagates_tool_denied():
 # --- anyio ExceptionGroup unwrapping -------------------------------------------------------
 # MCP tool calls run inside an anyio task group, and anyio 4 (strict_exception_groups=True by
 # default) rewraps even a SINGLE exception into an ExceptionGroup whose str() is only "unhandled
-# errors in a TaskGroup (1 sub-exception)". Live QA (2026-08-09) caught a real send denial being
-# recorded with exactly that text and the gateway's "email requires human confirmation" reason
-# discarded — so these tests pin the classifier to the flattened LEAVES, never str(group).
+# errors in a TaskGroup (1 sub-exception)". Left unflattened, a real send denial is recorded with
+# exactly that text and the gateway's "email requires human confirmation" reason is discarded — so
+# these tests pin the classifier to the flattened LEAVES, never str(group).
 
 
 def test_classify_unwraps_group_wrapped_tool_denied():

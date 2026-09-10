@@ -28,7 +28,7 @@ variable "vpc_security_group_ids" {
 variable "notify_email" {
   description = <<-EOT
     Seed address for the internal-notification contact, used ONCE at create time.
-    This is no longer the address anything sends to -- nothing reads this variable at
+    It is not itself the address anything sends to -- nothing reads this variable at
     runtime. It only fills in the first row of the contacts table so a fresh deploy has a
     working notification recipient; after that the row is the operator's to edit from the
     Config tab, and the seed carries ignore_changes so later applies leave those edits

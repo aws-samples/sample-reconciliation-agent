@@ -65,14 +65,15 @@ def test_the_prompt_forbids_treating_three_of_four_as_the_top_band() -> None:
 
 
 def test_the_prompt_states_that_the_top_band_is_unreachable() -> None:
-    """Owner decision (design D7): nothing here can produce HIGH, and the prompt must say why.
+    """Owner decision: nothing here can produce HIGH, and the prompt must say why.
 
     This is the statement that stops the reasoning chain "HIGH needs a finalised record → let us add a
     way to mark records finalised → now HIGH is reachable" from being re-derived from first principles.
     """
     text = _prompt()
     assert "HIGH does not exist on this platform" in text, (
-        "the prompt no longer states that HIGH is unreachable — see design D7 before removing this"
+        "the prompt does not state that HIGH is unreachable — it is unreachable by decision, so the "
+        "prompt has to say so"
     )
     assert "never report it" in text.lower()
 
@@ -139,7 +140,7 @@ def test_there_are_sources_to_scan() -> None:
 
 @pytest.mark.parametrize("source", _sources(), ids=lambda path: path.name)
 def test_no_source_awards_the_top_band(source: Path) -> None:
-    """Nothing computes or assigns HIGH (design D7), and this is the guard that keeps it that way.
+    """Nothing computes or assigns HIGH, and this is the guard that keeps it that way.
 
     The band is not a stored or computed value at all: it is a conclusion the agent states in prose,
     bounded by the prompt. A constant or comparison appearing here would mean something in code had
@@ -151,13 +152,13 @@ def test_no_source_awards_the_top_band(source: Path) -> None:
     text = source.read_text(encoding="utf-8", errors="replace")
     offenders = _HIGH_BAND.findall(text)
     assert not offenders, (
-        f"{source.name} contains a HIGH band literal {offenders!r}; nothing may award HIGH — see D7"
+        f"{source.name} contains a HIGH band literal {offenders!r}; nothing may award HIGH"
     )
 
 
 @pytest.mark.parametrize("source", _sources(), ids=lambda path: path.name)
 def test_no_source_reintroduces_a_human_validation_status(source: Path) -> None:
-    """The other half of D7: no validation status, so no route to a finalised record.
+    """The other half of the same decision: no validation status, so no route to a finalised record.
 
     Kept beside the band ban because the two are one decision. Re-adding either alone makes the other
     incoherent — a validation status with no band to unlock, or a band with no way to earn it.
@@ -167,7 +168,7 @@ def test_no_source_reintroduces_a_human_validation_status(source: Path) -> None:
     text = source.read_text(encoding="utf-8", errors="replace")
     offenders = _VALIDATION_STATUS.findall(text)
     assert not offenders, (
-        f"{source.name} declares {offenders!r}; design D7 rules out a notice validation status"
+        f"{source.name} declares {offenders!r}; a notice validation status is ruled out"
     )
 
 

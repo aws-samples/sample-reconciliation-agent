@@ -82,8 +82,8 @@ def test_coerce_passes_a_real_object_through_unchanged():
 
 
 def test_coerce_decodes_the_json_string_the_harness_model_emits():
-    """Live regression (2026-08-09): the harness does not enforce the argument schema, and the model
-    emitted this nested object as a string, so every harness draft was silently dropped."""
+    """Live regression: the harness does not enforce the argument schema, so the model can emit this
+    nested object as a string — and without the coercion every harness draft is silently dropped."""
     assert ep.coerce_email_draft('{"subject": "Wire ref", "body": "Please confirm."}') == {
         "subject": "Wire ref",
         "body": "Please confirm.",

@@ -1,10 +1,10 @@
 /**
  * Recovery from an expired session.
  *
- * The defect these cover: with silent renew blocked by the CSP, an expired session left the app on
- * a spinner that never resolved. The fix redirects instead — so what has to hold is that a redirect
- * really is started, that it comes back to the page the user was on, and (the part that is easy to
- * get wrong) that a 401 nothing can fix stops rather than looping between app and provider forever.
+ * Silent renew is blocked by the CSP, so an expired session has no way back except a redirect —
+ * without one the app sits on a spinner that never resolves. What has to hold is that a redirect
+ * really is started, that it comes back to the page the user was on, and (the part that is easy to get
+ * wrong) that a 401 nothing can fix stops rather than looping between app and provider forever.
  *
  * `NEXT_PUBLIC_AUTH_PROVIDER` is read at module load, so each case re-imports with the env set.
  */

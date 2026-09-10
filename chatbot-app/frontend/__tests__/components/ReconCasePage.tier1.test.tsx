@@ -49,9 +49,6 @@ vi.mock("@/lib/reconApi", () => ({
   decideEmailDraft: vi.fn(),
   saveEmailDraft: vi.fn(),
 }));
-vi.mock("@/lib/reconToken", () => ({
-  getStoredAccessToken: () => "tok",
-}));
 
 const CasePage = (await import("@/app/recon/case/[id]/page")).default;
 

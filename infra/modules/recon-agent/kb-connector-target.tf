@@ -5,11 +5,11 @@
 # ⚠️ WHY THERE IS CLOUDFORMATION IN A PURE-TERRAFORM REPO
 #
 # This is the ONE resource in the platform Terraform cannot express. A connector target needs
-# targetConfiguration.mcp.connector, and no AWS provider version models it: aws 6.56.0 (pinned)
-# and 6.62.0 both expose only api_gateway / lambda / mcp_server / open_api_schema / smithy_model
-# under target_configuration.mcp, and awscc 1.98.0 has no gateway-target resource at all. The
-# CloudFormation resource AWS::BedrockAgentCore::GatewayTarget does model it, with full CRUD
-# handlers and only GatewayIdentifier create-only -- so ParameterOverrides can be tuned in place.
+# targetConfiguration.mcp.connector. The aws provider's target_configuration.mcp accepts only
+# api_gateway / lambda / mcp_server / open_api_schema / smithy_model, and awscc has no
+# gateway-target resource at all. The CloudFormation resource AWS::BedrockAgentCore::GatewayTarget
+# does model it, with full CRUD handlers and only GatewayIdentifier create-only -- so
+# ParameterOverrides can be tuned in place.
 #
 # Do NOT "fix" this by porting it to aws_bedrockagentcore_gateway_target. Check the provider's
 # target_configuration.mcp schema first; if a `connector` block has appeared, the port is real
@@ -17,7 +17,7 @@
 #
 # One further upside: aws_cloudformation_stack diffs on template_body/parameters only, so the
 # service-injected MetadataConfiguration.allowed_request_headers cannot produce the perpetual
-# diff that forced `lifecycle { ignore_changes = [metadata_configuration] }` on the
+# diff that `lifecycle { ignore_changes = [metadata_configuration] }` suppresses on the
 # Terraform-native targets elsewhere in this module.
 ####################################################################################
 
@@ -37,8 +37,8 @@ locals {
   #
   # ⚠️ Nothing here is typed BOOLEAN, and nothing ever may be: a BOOLEAN attribute in a sidecar
   # makes the managed KB's S3 connector DISCARD the document, reporting only "Some documents could
-  # not be crawled" on an otherwise COMPLETE job (verified live 2026-08-26). has_attachments is
-  # therefore a STRING of "true"/"false", which is why the wording below is explicit about it.
+  # not be crawled" on an otherwise COMPLETE job. has_attachments is therefore a STRING of
+  # "true"/"false", which is why the wording below is explicit about it.
   # tests/kb_seed/test_metadata_sidecars.py::test_no_sidecar_declares_a_boolean_attribute enforces
   # this on the corpus side.
   kb_filter_description = <<-EOT
@@ -121,8 +121,8 @@ resource "aws_cloudformation_stack" "kb_connector_target" {
                       # free-form document, setting it would very plausibly be accepted at CREATE
                       # time and then fail on every RETRIEVE.
                       #
-                      # ⛔ DO NOT put `numberOfResults` back here. It was `numberOfResults = 5` and
-                      # that broke every unfiltered retrieval, live, on 2026-08-27:
+                      # ⛔ DO NOT add `numberOfResults` here. Any admin value breaks every
+                      # unfiltered retrieval:
                       #
                       #   ValidationException: Field '/retrievalConfiguration/
                       #   managedSearchConfiguration/numberOfResults' has invalid type:
@@ -134,20 +134,20 @@ resource "aws_cloudformation_stack" "kb_connector_target" {
                       # provisioning this target through CFN (see the header note on why we do) and
                       # cannot be fixed by quoting or unquoting it here.
                       #
-                      # It only surfaced on calls that omit `retrievalConfiguration` entirely --
-                      # i.e. the wrapper's own default, `search_guidance(query=...)` with no facets.
-                      # An agent-supplied `managedSearchConfiguration` REPLACES this whole object
-                      # rather than merging into it, which is why a filtered call sidestepped the
-                      # bad value and looked fine. Omitting it lets Bedrock apply its own default
-                      # of 5, which is exactly what the numberOfResults override below promises.
+                      # It breaks only the calls that omit `retrievalConfiguration` entirely -- i.e.
+                      # the wrapper's own default, `search_guidance(query=...)` with no facets. An
+                      # agent-supplied `managedSearchConfiguration` REPLACES this whole object
+                      # rather than merging into it, so a filtered call sidesteps the bad value and
+                      # looks fine. Omitting the key lets Bedrock apply its own default of 5, which
+                      # is exactly what the numberOfResults override below promises.
                       #
-                      # Note the asymmetry, both observed live 2026-08-27: an ADMIN "5" here is
-                      # fatal, but an AGENT that sends numberOfResults: "10" (a JSON string) on the
-                      # override path is fine -- a harness run did exactly that and got 10 results.
-                      # The overrides are typed by the generated inputSchema, so a string is coerced
-                      # to the integer it declares; ParameterValues is a free-form document with no
-                      # schema to coerce against, so whatever CFN stored is what Bedrock receives.
-                      # Do not conclude from a working agent call that this key would be safe here.
+                      # Note the asymmetry: an ADMIN "5" here is fatal, but an AGENT that sends
+                      # numberOfResults: "10" (a JSON string) on the override path is fine and gets
+                      # 10 results. The overrides are typed by the generated inputSchema, so a
+                      # string is coerced to the integer it declares; ParameterValues is a free-form
+                      # document with no schema to coerce against, so whatever CFN stored is what
+                      # Bedrock receives. Do not conclude from a working agent call that this key
+                      # would be safe here.
                       #
                       # Same replacement rule means `rerankingModelType` below is in force ONLY on
                       # calls that send no managedSearchConfiguration of their own. It is kept
@@ -162,9 +162,9 @@ resource "aws_cloudformation_stack" "kb_connector_target" {
                     # looks like a security boundary and is not one.
                   }
 
-                  # ✅ VERIFIED 2026-08-26: the JSONPath absolute form below is the correct one.
-                  # Three mutually incompatible forms are documented (JSONPath absolute, JSON
-                  # Pointer relative, JSON Pointer absolute) and an unrecognised Path is SILENTLY
+                  # ⚠️ The JSONPath absolute form below is the correct one. Three mutually
+                  # incompatible forms are documented (JSONPath absolute, JSON Pointer relative,
+                  # JSON Pointer absolute) and an unrecognised Path is SILENTLY
                   # IGNORED: the target still reaches READY, the agent just never sees the
                   # parameter and every retrieval runs unfiltered. Nothing errors. So if you change
                   # a Path, the gate is tools/list (scripts/mcp_tools_list.py), not target status.
@@ -225,19 +225,9 @@ resource "aws_cloudformation_stack" "kb_connector_target" {
 # That matters because AgentCore Policy validates every Cedar action name against the LIVE tool
 # surface. Naming an action whose tool is not yet visible fails with "unrecognized action" and
 # leaves the policy in UPDATE_FAILED -- and Cedar fails closed, so an UPDATE_FAILED recon_reads
-# costs the agent EVERY read tool, not just this one. That exact failure hit this repo on
-# 2026-08-08 for a different target.
+# costs the agent EVERY read tool, not just this one.
 #
 # aws_bedrockagentcore_policy.reads therefore depends_on THIS resource, not on the stack.
-# Forget the retired CLI poll (no destroy provisioner; see the note on the sibling gate).
-removed {
-  from = null_resource.kb_connector_target_ready
-
-  lifecycle {
-    destroy = false
-  }
-}
-
 resource "aws_lambda_invocation" "kb_connector_target_ready" {
   function_name = var.deploy_actions_function_name
 

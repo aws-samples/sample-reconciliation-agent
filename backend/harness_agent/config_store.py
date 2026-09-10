@@ -8,7 +8,7 @@ the same operation: PutParameter.
 
 The worker reads the pointer + config at invocation time and passes them as InvokeHarness
 overrides (``model``, ``maxIterations``). Absent pointer or unreadable config → fall back to the
-blueprint's defaults (zero-config backward compatible).
+blueprint's defaults, so an environment that has never deployed a version needs no configuration.
 
 ``system_prompt`` is stored in the document as the versioned RECORD of the prompt that version
 deployed, but it is not applied as an invoke-time override: the deploy step writes it into the
@@ -81,3 +81,29 @@ def apply_overrides(*, config: dict, base_model: str, base_system_prompt: str) -
     if config.get("max_iterations"):
         overrides["maxIterations"] = int(config["max_iterations"])
     return overrides
+
+
+def resolved_model_id(*, invoke_kwargs: dict) -> str:
+    """The model id the worker will ACTUALLY send to InvokeHarness, read back off its own kwargs.
+
+    Read off the assembled overrides rather than re-derived from the environment because there are
+    two places the model can come from — the operator's live selection (SSM, via
+    ``recon_core.model_select``) and a deployed config version's ``model_id``, which wins over it
+    (see :func:`apply_overrides`). The worker stores this id beside the run's token usage so the cost
+    can be priced later, and a second derivation could disagree with the value actually sent: the
+    usage would then be attributed to a model that never ran, with nothing downstream able to notice.
+
+    :param invoke_kwargs: the InvokeHarness kwargs the worker assembled (base or config-overridden).
+    :returns: the resolved model id.
+    :raises ValueError: when the kwargs carry no model id. A wiring bug, never a default — an
+        unlabelled or mislabelled usage record is a mispriced one.
+    """
+    model = invoke_kwargs.get("model") or {}
+    bedrock = model.get("bedrockModelConfig") or {}
+    model_id = str(bedrock.get("modelId") or "").strip()
+    if not model_id:
+        raise ValueError(
+            "InvokeHarness kwargs carry no model.bedrockModelConfig.modelId — cannot label the "
+            f"run's token usage (kwargs keys: {sorted(invoke_kwargs)})"
+        )
+    return model_id

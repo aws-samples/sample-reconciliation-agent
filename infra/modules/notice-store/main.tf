@@ -29,6 +29,14 @@ resource "aws_dynamodb_table" "notices" {
     name = "reference"
     type = "S"
   }
+  attribute {
+    name = "idp_record"
+    type = "S"
+  }
+  attribute {
+    name = "idp_started_at"
+    type = "S"
+  }
 
   # The two exact-match hints search_notices is most often given. Amount (tolerance) and fund
   # (alias resolution) are non-equality matches and stay filter expressions by necessity.
@@ -41,6 +49,37 @@ resource "aws_dynamodb_table" "notices" {
   global_secondary_index {
     name            = "reference-index"
     hash_key        = "reference"
+    projection_type = "ALL"
+  }
+
+  # The Documents tab's list query: every IDP-ingested document over a date window, newest first.
+  # Neither GSI above can answer that -- counterparty-index and reference-index are both keyed on a
+  # notice-specific field the tab's query has no reason to know, not on ingest time.
+  #
+  # `idp_record`/`idp_started_at` are promoted to top-level attributes by
+  # backend/recon_core/notices.py's `_idp_gsi_attrs` -- the ONE place that derivation happens, for
+  # both row kinds the hook writes (extracted notices and tracking-only rows for documents it could
+  # not map). Read that function's docstring before changing either name here.
+  #
+  # projection_type = ALL, not KEYS_ONLY: the list route needs whole rows, and a keys-only
+  # projection would turn one Query into a Query plus N GetItems.
+  #
+  # hash_key = idp_record is a CONSTANT ("document" on every row this index carries), so the whole
+  # index lives in a single partition. That is a known, accepted ceiling, not an oversight: at this
+  # deployment's volume -- one write per processed document, a few hundred rows -- it sits far below
+  # DynamoDB's per-partition ~3000 RCU / 1000 WCU limits. If this ever needs to scale past that, the
+  # fix is a bucketed hash key (e.g. `document#YYYY-MM`), which costs the list route one Query per
+  # month the requested window spans. Do NOT pre-build that bucketing now -- there is no volume that
+  # justifies it yet, and it would just be complexity with no reader.
+  #
+  # The index is SPARSE by design: a row missing either `idp_record` or `idp_started_at` does not
+  # appear here at all. That is correct, not a gap -- a seeded or structured-feed notice has no
+  # pipeline execution behind it and does not belong on a tab about what the pipeline processed. See
+  # `_idp_gsi_attrs` for the one place that absence is decided.
+  global_secondary_index {
+    name            = "idp-document-index"
+    hash_key        = "idp_record"
+    range_key       = "idp_started_at"
     projection_type = "ALL"
   }
 
@@ -141,15 +180,14 @@ resource "aws_lambda_function" "notice_query" {
 }
 
 # ---------------------------------------------------------------------------------
-# There is deliberately NO seeding of this table.
+# There is deliberately NO seeding of this table, and adding a fixture row would be a mistake.
 #
-# It once carried a create-only `aws_dynamodb_table_item` fixture, on the reasoning that tests and
-# demos should not have to push documents through extraction to have an actual side. That reasoning
-# did not survive: no test read the fixture (they write their own rows into a mock), and the document
-# path -- upload route, extraction, hook, NoticeStore.put -- is wired end to end, so the fixture was a
-# second ingestion path for data that has exactly one legitimate source.
+# A notice has exactly one legitimate source: the document path (upload route -> extraction -> IDP
+# hook -> NoticeStore.put), which is wired end to end. A seeded `aws_dynamodb_table_item` would be a
+# second ingestion path for the same data, and tests do not need one — they write their own rows into
+# a mock.
 #
 # The consequence is accepted rather than worked around: a freshly applied environment has an EMPTY
-# actual side, and the demo's first step is uploading a document. data/README.md says so, because
-# an empty table read as a bug is the failure mode this note exists to prevent.
+# actual side, and the demo's first step is uploading a document. data/README.md says so, because an
+# empty table read as a bug is the failure mode this note exists to prevent.
 # ---------------------------------------------------------------------------------

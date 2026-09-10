@@ -7,7 +7,7 @@ const PROVIDER = process.env.NEXT_PUBLIC_AUTH_PROVIDER ?? "entra";
 
 /**
  * Inbound auth gate. Selects the identity provider via NEXT_PUBLIC_AUTH_PROVIDER:
- *   - "okta"  → Okta OIDC (replaces Cognito/Entra when configured);
+ *   - "okta"  → Okta OIDC (replaces Entra when configured);
  *   - "entra" → Microsoft Entra ID (default).
  * Each wrapper handles its own client-hydration / local-dev / unconfigured pass-through.
  */

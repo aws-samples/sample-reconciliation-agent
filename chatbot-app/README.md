@@ -51,9 +51,11 @@ steps, and the panels beneath it exist so an analyst can see why it is what it i
 table, and the notices the investigation matched, each expandable to its extracted fields beside the
 source document.
 
-**Matched Notices reads the trace, not the notice table**, deliberately. `search_notices` records its
-full result set in the trace, so the rows are what the agent _saw_; re-reading the table would show
-the notice as it is now. An empty match is rendered rather than hidden, because "no notice matched"
+**Matched Notices never re-reads the notice table**, deliberately. Its rows come from the case's
+persisted `notice_search` — the full result set the agent _saw_ — with the trace as a best-effort
+fallback for a case that persisted none, since a trace's `tool_output` is only a 600-character
+display summary. Re-reading the table would show the notice as it is now. An empty match is
+rendered rather than hidden, because "no notice matched"
 is usually the reason three evidence steps returned nothing.
 
 ## Screens and screenshots

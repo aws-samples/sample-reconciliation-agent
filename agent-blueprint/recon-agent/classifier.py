@@ -4,15 +4,15 @@ The catalog (from skills_loader.catalog) IS the classification-type registry —
 lookup. The model picks from the catalog; a pick that is not IN the catalog falls back to 'unknown'
 while preserving the model's reasoning for the UI.
 
-There is deliberately NO confidence floor here. The model used to be asked how sure it was and a pick
-under 0.6 was rewritten to 'unknown' — but 'unknown' declares no evidence_steps, so the case scored
-0.0 and could not auto-resolve however complete its evidence was. That made a self-reported number an
-unappealable gate, and on 2026-09-02 it zeroed every harness case at once. Escalation is now decided
-downstream, by the computed evidence-completeness score against the skill's threshold.
+There is deliberately NO confidence floor here, and the model is never asked how sure it is. Rewriting
+a low-confidence pick to 'unknown' would make a self-reported number an unappealable gate: 'unknown'
+declares no evidence_steps, so the case scores 0.0 and cannot auto-resolve however complete its
+evidence is — one uncertain answer about the class discards the whole investigation. Escalation is
+decided downstream instead, by the computed evidence-completeness score against the skill's threshold.
 
-Classification still matters, and more than before: it names the ONE skill whose prescribed required
-steps form the scoring denominator (``recon_core.confidence.score_proposal``). It does not restrict
-which skills the agent may use — both backends load the whole library.
+Classification still matters: it names the ONE skill whose prescribed required steps form the scoring
+denominator (``recon_core.confidence.score_proposal``). It does not restrict which skills the agent
+may use — both backends load the whole library.
 
 Tier-1's ``tier1_break_type`` does NOT short-circuit this. It is a hint carried on the investigation
 prompt (``strands_investigator._class_hint_block``), never a decision: the classification recorded on

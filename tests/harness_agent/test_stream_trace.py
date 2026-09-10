@@ -137,7 +137,7 @@ def test_no_pending_tool_when_stream_ends_normally():
 def test_live_result_block_shape_pairs_and_captures_output():
     """LIVE shape: a gateway result is its OWN content block (start.toolResult + delta array).
 
-    Regression for the empty-tool-output bug: the live harness delivers the result as a
+    Regression against an empty tool output: the live harness delivers the result as a
     separate content block whose start carries only {toolUseId, status} and whose deltas carry
     an ARRAY of {json}/{text} content parts (no toolUseId/name/content). The parser must
     accumulate those parts, flush ONE record at stop, and pair it to the call by toolUseId —

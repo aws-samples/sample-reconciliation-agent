@@ -1,7 +1,7 @@
 """Strands Agent SDK investigator — a real agentic loop over the gateway tools.
 
 A Strands ``Agent`` autonomously decides which gateway tools to call — the four reads
-(search_ledger, search_guidance, get_results, search_correspondence) — iterating over them guided
+(search_ledger, search_notices, search_guidance, search_correspondence) — iterating over them guided
 by the skill library (reusable procedures, of which it invokes the relevant one(s)) plus prior
 analyst lessons, and emits a structured proposal via ``structured_output``. Every tool it holds is
 a read. The LEDGER write tool (set_draw_status) is NOT given to the investigation agent — the
@@ -38,6 +38,7 @@ from llm import (
     _matched_reference,
     _result_text,
     _summarize_tool_output,
+    accumulated_usage,
 )
 
 
@@ -82,12 +83,12 @@ class ProposalOut(BaseModel):
     )
 
 
-# Output cap for the investigation loop. Explicit because the DEFAULT is too small for this
-# agent's final message: the proposal JSON now carries one `evidence_steps` entry per prescribed
-# step, the resolution prose, and an optional email body, and on 2026-09-02 a 4-step break blew the
-# default mid-JSON. Strands raises `MaxTokensReachedException` there rather than returning the
-# partial text, so the whole invocation 500s and the case is left in IN_PROGRESS with nothing to
-# show — the truncation is not recoverable downstream, which is why the cap belongs here.
+# Output cap for the investigation loop. Explicit because the DEFAULT is too small for this agent's
+# final message: the proposal JSON carries one `evidence_steps` entry per prescribed step, the
+# resolution prose, and an optional email body, and a four-step break exceeds the default mid-JSON.
+# Strands raises `MaxTokensReachedException` there rather than returning the partial text, so the
+# whole invocation 500s and the case is left in IN_PROGRESS with nothing to show — the truncation is
+# not recoverable downstream, which is why the cap belongs here.
 INVESTIGATOR_MAX_TOKENS: int = 16384
 
 
@@ -496,16 +497,6 @@ def _build_tools(
         return _call("search_guidance", args)
 
     @tool
-    def get_results(document_id: str) -> dict:
-        """Fetch the full IDP-extracted results for a single processed source document.
-
-        The IDP MCP tool parameter is ``document_id`` (snake_case) — NOT ``documentId`` and NOT
-        ``batch_id``. ``batch_id`` routes to the multi-document batch path and fails for a single
-        document.
-        """
-        return _call("get_results", {"document_id": document_id})
-
-    @tool
     def search_correspondence(query: str, top: int = 10) -> dict:
         """Search the shared mailbox (Microsoft Graph) for messages relevant to the item."""
         # Maps to the microsoft-graph OpenAPI op listSharedMailboxMessages (GET
@@ -654,11 +645,6 @@ def _build_tools(
             top_k=top_k,
         )
 
-    @tool(name="document-extraction___IDPTools___get_results")
-    def get_results_gw(document_id: str) -> dict:
-        """Fetch IDP-extracted results (canonical gateway name; same as get_results)."""
-        return get_results(document_id=document_id)
-
     @tool(name="microsoft-graph___listSharedMailboxMessages")
     def search_correspondence_gw(query: str, top: int = 10) -> dict:
         """Search the shared mailbox (canonical gateway name; same as search_correspondence)."""
@@ -678,14 +664,12 @@ def _build_tools(
         search_ledger,
         search_notices,
         search_guidance,
-        get_results,
         search_correspondence,
         list_contacts,
         list_templates,
         search_ledger_gw,
         search_notices_gw,
         search_guidance_gw,
-        get_results_gw,
         search_correspondence_gw,
         list_contacts_gw,
         list_templates_gw,
@@ -837,6 +821,7 @@ def make_strands_investigator(
     lessons: list[str] | None = None,
     tool_caller: Callable | None = None,
     agent_factory: Callable | None = None,
+    usages: list[dict] | None = None,
 ) -> Callable:
     """Build the ``fake_investigate`` callable for ``proposal.build_proposal`` (Strands loop).
 
@@ -844,6 +829,15 @@ def make_strands_investigator(
         ``agent(prompt)`` runs the agentic loop and returns an AgentResult (or str). Production
         uses Strands. We parse the final message JSON rather than the forced-tool
         ``structured_output`` (which is fragile on some Bedrock models, e.g. Nova).
+    :param usages: an OPTIONAL caller-owned sink the loop's raw token-usage dict is appended to, for
+        ``recon_core.token_usage.summarize_token_usage`` to fold in alongside the classification
+        samples'. A SINK rather than a member of the returned ``InvestigationResult`` because the
+        return type is pinned by ``build_proposal``'s ``callable(item, skills) ->
+        InvestigationResult`` contract and ``build_proposal`` never hands that object back to the
+        entrypoint — so a field there could not reach the code that stores it. It also puts the
+        classification's k reports and this one in ONE list with no merge step to forget, which is the
+        same reason ``trace``/``ledger_rows``/``notice_rows`` are caller-owned lists above. ``None``
+        records nothing, for the tests and the ``reconcile_item`` path that do not measure cost.
     :returns: ``callable(item, skills) -> InvestigationResult``.
     """
 
@@ -870,7 +864,15 @@ def make_strands_investigator(
         agent = (agent_factory or _default_agent_factory)(model_id, system, tools)
         # Run the agentic loop (the agent autonomously calls the read tools), then parse the
         # final JSON proposal from its last message.
-        out: ProposalOut = _parse_proposal(_result_text(agent(_prompt(item, skills, lessons))))
+        result = agent(_prompt(item, skills, lessons))
+        if usages is not None:
+            # ONE entry for the whole loop, not one per tool-calling turn: a Strands `Agent`
+            # accumulates usage across the turns of its own run, so this single dict already covers
+            # every round trip the investigation made. Recorded before the parse so a malformed final
+            # message — which `_parse_proposal` degrades rather than raises on — still books what the
+            # loop burned getting there.
+            usages.append(accumulated_usage(result))
+        out: ProposalOut = _parse_proposal(_result_text(result))
 
         # The agent's per-step outcome reports become trace entries BEFORE the propose step, so the
         # case timeline reads in the order the work happened.

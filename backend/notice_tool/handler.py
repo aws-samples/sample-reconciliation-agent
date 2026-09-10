@@ -20,11 +20,18 @@ MAX_LIMIT = 100
 # notices. Filtering on one of these NEVER excludes a row; it annotates it instead.
 CLASS_DEPENDENT_FIELDS = ("fund", "facility", "reference", "amount", "currency", "activity_type")
 
-# Stored attributes withheld from the tool's rows. `idp_pages` is page-image S3 locations, read by the
-# case screen directly from the table — the model cannot act on them, and a notice now carries ~30
-# attributes, so returning them spends the agent's context on nothing. This tool returns the MATCHABLE
-# projection of a notice, not the stored row.
-WITHHELD_FIELDS = ("idp_pages",)
+# Stored attributes withheld from the tool's rows. `idp_pages` is page-image S3 locations, read by
+# the case screen directly from the table — the model cannot act on them, and a notice now carries
+# ~30 attributes, so returning them spends the agent's context on nothing. This tool returns the
+# MATCHABLE projection of a notice, not the stored row. `record_kind`, `idp_record` and
+# `idp_started_at` are the discriminator and the GSI key attributes derived from it (see
+# backend/recon_core/notices._idp_gsi_attrs) — they exist to let the Documents tab and its own GSI
+# tell a tracking row from a real notice, which is pipeline plumbing the model has no use for once
+# `_matches` has already excluded the tracking rows. `idp_tracking` is the IDP pipeline's own
+# progress/timing snapshot for the document, embedded for the Documents tab's benefit; same
+# reasoning as `idp_pages` above — the model cannot act on pipeline tracking state, and it is not
+# part of the notice's matchable, extracted content.
+WITHHELD_FIELDS = ("idp_pages", "record_kind", "idp_record", "idp_started_at", "idp_tracking")
 
 # The subset of CLASS_DEPENDENT_FIELDS compared for string equality. `amount` is deliberately NOT
 # here: it is matched by the tolerance band in _matches. Equality-matching it would reject every
@@ -163,6 +170,17 @@ def _matches(row: dict[str, object], *, plan: QueryPlan, hints: dict[str, str]) 
     :param hints: the caller's equality filter hints, field name -> value.
     :returns: True when the row should be returned.
     """
+    # A tracking-only row (record_kind == "document") is pipeline plumbing, not evidence about a
+    # reconciliation item — it has no notice_date, no counterparty, no extracted fields, and it
+    # carries a notice_failure_reason instead. It must never reach the agent as a "notice" result.
+    # The `"notice"` default is NOT a defensive fallback: every row written before record_kind
+    # existed has no such attribute at all, and every one of those rows IS a real notice. Tightening
+    # this to `row.get("record_kind") == "notice"` would silently hide all of them — most of the
+    # table — exactly the fail-quiet behaviour this module exists to avoid elsewhere. This is the
+    # single choke point: both the indexed-query path and the scan path below run every candidate
+    # row through this function, so the guard belongs here and nowhere else.
+    if row.get("record_kind", "notice") != "notice":
+        return False
     for name, value in hints.items():
         if name not in row:
             if name in CLASS_DEPENDENT_FIELDS:

@@ -50,7 +50,6 @@ by its full prefixed name. Translate ALWAYS:
 | search_ledger         | general-ledger___search_ledger                |
 | search_notices        | notices___search_notices                      |
 | search_guidance       | managed-kb___Retrieve                         |
-| get_results           | document-extraction___IDPTools___get_results  |
 | search_correspondence | correspondence-search___search_correspondence |
 | list_contacts         | contacts___list_contacts                      |
 | list_templates        | templates___list_templates                    |
@@ -144,11 +143,11 @@ draft — do not substitute the closest one you found.
 Only `submit_proposal` is called by its bare name. A short name (e.g. `search_ledger`) will
 fail with "Unknown tool" — never use it.
 
-`get_results` takes a single **`document_id`** argument (the id from the item's
-`idp:documentId=<id>` backlink), e.g.
-`document-extraction___IDPTools___get_results(document_id=<id>)`. **Never call it with
-`batch_id`** — that routes to the multi-document batch path and fails for a single document.
-The parameter is `document_id` (snake_case), not `documentId`.
+There is **no document-pipeline tool** on this gateway, and you do not need one. The fields
+extracted from a document — the per-section classification and the extracted values — are already on
+recon's own notice row as `idp_sections`, and `notices___search_notices` returns them. Query it with
+the most selective hint the item carries (`reference`, or `counterparty` narrowed by a date window) to
+pick the right notice row; that one call is the whole document read.
 
 ## Field constraints
 

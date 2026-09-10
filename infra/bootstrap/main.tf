@@ -2,24 +2,17 @@
 #
 # Chicken-and-egg config: it creates the S3 bucket that every environment stores its state IN, so
 # it cannot use that bucket as its own backend. It keeps LOCAL state (there is deliberately no
-# `backend` block) and is run at most once per account.
+# `backend` block) and is run at most once per account:
 #
-# IMPORTANT — the live bucket predates this config. `recon-dev-tfstate-<account_id>` was created
-# out-of-band before it was expressed as code, so a plain `terraform apply` here will fail with
-# BucketAlreadyOwnedByYou rather than adopt it. Import first:
+#   cd infra/bootstrap && terraform init && terraform apply
 #
-#   cd infra/bootstrap && terraform init
-#   BUCKET="recon-dev-tfstate-$(aws sts get-caller-identity --profile <your-profile> \
-#     --query Account --output text)"
-#   terraform import aws_s3_bucket.tfstate                                  "$BUCKET"
-#   terraform import aws_s3_bucket_versioning.tfstate                       "$BUCKET"
-#   terraform import aws_s3_bucket_server_side_encryption_configuration.tfstate "$BUCKET"
-#   terraform import aws_s3_bucket_public_access_block.tfstate              "$BUCKET"
-#   terraform plan   # expect "No changes" — the live bucket already has all four settings
+# Then copy the `backend_hcl` output into environments/recon/backend.hcl before running
+# `terraform init -backend-config=backend.hcl` in that environment.
 #
-# Until that import happens the bucket has no Terraform source, which is why drift in its
-# encryption / versioning / public-access settings would not appear in any `terraform plan` — a
-# caveat recorded under F1 in the security-audit report (kept outside this repository).
+# If the bucket already exists in the account, `apply` fails with BucketAlreadyOwnedByYou rather
+# than adopting it — import all four resources against the bucket name first, or the bucket has no
+# Terraform source and drift in its encryption / versioning / public-access settings will never
+# appear in a plan.
 terraform {
   required_version = ">= 1.11.0"
   required_providers {
@@ -55,8 +48,8 @@ variable "project_name" {
 data "aws_caller_identity" "current" {}
 
 locals {
-  # No region suffix — this matches the live bucket. S3 bucket names are globally unique, hence the
-  # account ID, which is read from the caller identity rather than committed anywhere.
+  # S3 bucket names are globally unique, hence the account ID — read from the caller identity so it
+  # is never committed. No region suffix: one state bucket per account serves every region.
   state_bucket = "${var.project_name}-tfstate-${data.aws_caller_identity.current.account_id}"
 }
 

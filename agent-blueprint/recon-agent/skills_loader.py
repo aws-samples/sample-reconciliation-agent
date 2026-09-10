@@ -3,8 +3,11 @@
 Each SKILL.md's frontmatter is real YAML declaring one classification type: ``name``,
 ``description``, the gateway ``tools`` the skill uses (a list), an optional ``model`` override, and
 an optional nested ``metadata`` block; its body is the investigation steps. The catalog of these
-files IS the classification-type registry — there is no DynamoDB registry. Classification gating
-uses a single global threshold (below) rather than a per-skill one.
+files IS the classification-type registry — there is no DynamoDB registry. Classification is NOT
+gated by a confidence threshold at all, global or per-skill: see ``classifier.py``, which never asks
+the model how sure it is, because rewriting a low-confidence pick to ``unknown`` would discard the
+whole investigation on a self-reported number. Escalation is decided downstream instead, from the
+computed evidence-completeness score.
 
 ``metadata.tier`` inside that block records what kind of skill it is (``break-type``, ``probe``,
 ``resolution``, ``fallback``). Nothing routes on it — Tier-1 classifies with a plain-Python rule

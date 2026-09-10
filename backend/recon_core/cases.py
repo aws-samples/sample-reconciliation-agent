@@ -9,10 +9,10 @@ Two invariants this module enforces:
 
 * **``open()`` is the only method that may create a case row.** Every other write is conditional
   on ``attribute_exists(item_id)``, because a bare DynamoDB ``update_item`` is an UPSERT: writing
-  a proposal or a status onto an item that has no case row produced a row with no ``status`` and
+  a proposal or a status onto an item that has no case row creates a row with no ``status`` and
   no ``created_at``, which is absent from the status-index GSI (so invisible to the UI queue)
-  and makes every later ``status()`` call raise ``KeyError``. Observed live on two
-  synthetic items. A missing case now fails loudly at the write instead.
+  and makes every later ``status()`` call raise ``KeyError``. The condition makes a missing case
+  fail loudly at the write instead.
 * **An audit row is never overwritten.** ``ts`` is the audit table's RANGE key, so two rows
   written in the same instant for one item would collide and the second would silently replace
   the first — data loss in an append-only compliance trail.
@@ -127,8 +127,8 @@ class CaseStore:
         :param category: the deterministic auto-clear category, or None for an escalation.
         :param tier1_match: the comparison Tier-1 performed to clear the item, or None. Written as a
             top-level attribute rather than folded into ``item``: that bag is the item as it arrived,
-            and this is an output Tier-1 produced about it. Absent entirely when None, so escalated
-            cases and every case written before this field existed stay byte-identical. Its values
+            and this is an output Tier-1 produced about it. Absent entirely when None, so an escalated
+            case carries no empty placeholder for it. Its values
             are strings, including the amounts, both because boto3 rejects Python floats and because
             a Decimal round-trip through the BFF's JSON hop is lossy.
         :returns: True when the case was newly created, False when one already existed.
@@ -285,6 +285,11 @@ class CaseStore:
         # while it had a default the runtime backend silently wrote NULL here for a day — the panel
         # reported "cannot be shown" on every case the runtime investigated. Omitting it now raises.
         notice_search: dict | None,
+        # REQUIRED for exactly the reason above, and pre-emptively rather than after the incident:
+        # the second caller lives OUTSIDE this tree (``agent-blueprint/recon-agent/agent.py``), so a
+        # change reviewed by grepping ``backend/`` reaches one backend and leaves the other writing
+        # NULL. A default is what makes that omission silent; there is none.
+        token_usage: dict | None,
     ) -> None:
         """Write the agent's proposal (classification + typed trace) onto the case.
 
@@ -310,6 +315,14 @@ class CaseStore:
         which is where BOTH backends derive it. Required rather than defaulted — see the note at the
         parameter itself.
 
+        ``token_usage`` is what the run cost in tokens plus the provenance needed to price it
+        (``{input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, model_id,
+        backend}``), as built by ``recon_core.token_usage.summarize_token_usage`` — the ONE mapper
+        both backends import. Its counts must already be ``Decimal`` and its cache keys are absent
+        when the provider reported none; this method stores the dict verbatim and coerces nothing, so
+        a float that bypassed the mapper fails the write loudly instead of being rounded into the
+        record. ``None`` is a legal value and means "nobody measured this run" — never zeros.
+
         :raises KeyError: when no case row exists for ``item_id``. ``open()`` runs first in every
             real flow; without this guard a proposal written for an unknown item created a
             statusless orphan row (see the module invariants).
@@ -318,16 +331,15 @@ class CaseStore:
             item_id=item_id,
             UpdateExpression=(
                 # The only confidence written here is `confidence` — the computed
-                # evidence-completeness score. There is deliberately no self-reported one: rows
-                # written before 2026-09-04 still carry a per-classification confidence attribute,
-                # and nothing backfills or removes it (the value is inert, and rewriting historical
-                # cases to erase a number an analyst may have seen at review time is the worse
-                # outcome). See tests/recon_core/test_single_confidence_signal.py, which bans the
-                # old attribute name from this tree — hence the description rather than the name.
+                # evidence-completeness score. There is deliberately no self-reported,
+                # per-classification one anywhere in the system: one confidence signal, computed from
+                # the trace, so a model cannot report its way past a gate. Enforced by
+                # tests/recon_core/test_single_confidence_signal.py, which bans that attribute name
+                # from this tree — hence describing it here rather than naming it.
                 "SET class_id = :c, "
                 "classification_reasoning = :cr, resolution = :r, confidence = :conf, "
                 "steps = :st, confidence_components = :comp, proposed_action = :pa, "
-                "proposed_email = :pe, notice_search = :ns"
+                "proposed_email = :pe, notice_search = :ns, token_usage = :tu"
             ),
             ExpressionAttributeValues={
                 ":c": class_id,
@@ -339,6 +351,7 @@ class CaseStore:
                 ":pa": proposed_action,
                 ":pe": proposed_email,
                 ":ns": notice_search,
+                ":tu": token_usage,
             },
         )
 

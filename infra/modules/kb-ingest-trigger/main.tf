@@ -21,8 +21,9 @@ locals {
   region     = data.aws_region.current.region
 
   # Only operator uploads. The seeded corpus under knowledge-base/playbooks/ and
-  # knowledge-base/retrieved_emails/ is ingested by the apply's own null_resource, and
-  # notifying on the whole prefix would make every apply trigger a second, redundant job.
+  # knowledge-base/retrieved_emails/ is ingested by the apply itself
+  # (aws_lambda_invocation.kb_ingestion in environments/recon), so notifying on the whole
+  # knowledge-base/ prefix would make every apply trigger a second, redundant job.
   upload_prefix = "knowledge-base/uploads/"
 }
 
@@ -73,11 +74,9 @@ resource "aws_sqs_queue_policy" "ingest" {
 }
 
 # ⚠️ aws_s3_bucket_notification is a WHOLE-BUCKET resource, not an additive one. A second instance
-# pointed at the same bucket silently replaces this configuration rather than adding to it. Verified
-# on 2026-09-02 that recon-dev-assets has no notification configuration at all
-# (get-bucket-notification-configuration returns empty) and that no other resource in infra/ declares
-# one -- so this is the bucket's single owner. If anything else ever needs a notification on this
-# bucket, it must be added to THIS resource.
+# pointed at the assets bucket silently REPLACES this configuration rather than adding to it, and the
+# ingestion trigger stops firing with no error. This resource is the assets bucket's single owner, so
+# anything else that needs a notification on it must be added to THIS resource.
 resource "aws_s3_bucket_notification" "uploads" {
   bucket = var.assets_bucket
 

@@ -4,8 +4,7 @@
  * draft-lifecycle + send actions on `POST /api/recon/cases/[id]`.
  *
  * The node environment is deliberate: these routes call `authorizeRequest`, which pulls in `jose`,
- * and jsdom's cross-realm `Uint8Array` makes it throw before any assertion runs (recorded in the
- * P0-2 notes).
+ * and jsdom's cross-realm `Uint8Array` makes it throw before any assertion runs.
  *
  * What is actually being pinned down here is that no request body can reach a counterparty's
  * inbox. The gateway interceptor is the boundary that guarantees it, so these tests check the
@@ -454,8 +453,8 @@ describe("POST /api/recon/cases/[id] — approve with a counterparty draft", () 
     // operator's own notification last. The irreversible outward act goes last among the things
     // that can fail *before* a status change, so a failure there leaves the case PROPOSED rather
     // than resolved-but-unsent. The notification sits after RESOLVED for the opposite reason: it
-    // is internal courtesy mail, and it used to sit between APPROVED and RESOLVED where a Graph
-    // outage stranded the case at APPROVED with no transition left to make.
+    // is internal courtesy mail, and placed between APPROVED and RESOLVED a Graph outage would strand
+    // the case at APPROVED with no transition left to make.
     const order = gatewayCalls().map(([tool, a]) => a.sendPurpose ?? tool);
     expect(order).toEqual([
       "set-draw-status___set_draw_status",

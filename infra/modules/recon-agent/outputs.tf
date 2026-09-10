@@ -33,9 +33,8 @@ output "memory_id" {
   value       = aws_bedrockagentcore_memory.this.id
 }
 
-# The `kb_id` / `kb_data_source_id` outputs are gone with the customer-managed KB they pointed at
-# (Phase 3). Nothing consumed them once local.kb_ingest_targets dropped its "vectors" entry. The
-# managed pair below is the only knowledge base now.
+# The managed pair below is the module's only knowledge base — there is no customer-managed one to
+# expose alongside it. See the environment root's kb_ingest_targets note for why.
 
 output "managed_kb_id" {
   description = "Bedrock MANAGED Knowledge Base id (the one the Gateway connector target wraps)."
@@ -56,9 +55,8 @@ output "managed_kb_data_source_id" {
   # travel through this output. Pointing it at aws_bedrockagent_data_source.managed.data_source_id
   # instead would silently drop the wait.
   #
-  # The gate is now an aws_lambda_invocation, so the id is read back out of its `input` (the
-  # invocation has no `triggers`). Same effect: nothing can read this output until the wait has
-  # returned successfully.
+  # The gate is an aws_lambda_invocation, which has no `triggers`, so the id is read back out of its
+  # `input`. Nothing can read this output until that wait has returned successfully.
   value = jsondecode(aws_lambda_invocation.managed_kb_data_source_available.input).data_source_id
 }
 

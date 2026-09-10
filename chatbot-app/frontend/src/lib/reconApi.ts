@@ -1,7 +1,10 @@
 // Typed client for the reconciliation BFF. Calls SAME-ORIGIN Next.js API routes
 // (/api/recon/*) which read DynamoDB + the S3 skills catalog via the ECS task role — no
-// cross-origin fetch, no CORS. The `token` params are retained for signature stability but
-// unused (the server routes reach AWS with the task role).
+// cross-origin fetch, no CORS.
+//
+// No function here takes a token. They used to accept an ignored `_token` from a session-storage
+// accessor fed by the Cognito Hosted-UI callback, which this deployment never used; the accessor and
+// the parameters are gone. Authorization is entirely `reconFetch`'s job.
 //
 // Every call goes through `reconFetch`, which attaches the caller's OIDC ID token. That is not
 // optional: src/proxy.ts rejects an unauthenticated request to /api/recon/* before the
@@ -10,6 +13,10 @@
 import { reconFetch } from "@/lib/recon-auth";
 // Re-exported below so callers get the strategy types from this module like every other API type.
 import type { MemoryStrategyResponse } from "@/lib/memoryStrategy";
+// The stored token-usage shape, typed where it is defined rather than restated here: every field on
+// it is `unknown` on purpose (it crosses a DynamoDB round trip), and a copy would drift into the
+// `number` fields it deliberately is not. Type-only, so this pulls in no runtime code.
+import type { StoredUsage } from "@/lib/modelPricing";
 
 export type {
   MemoryStrategyInfo,
@@ -28,10 +35,9 @@ export type TraceKind =
 
 export interface ReasoningStep {
   skill: string;
-  // OPTIONAL because nothing writes it any more: every model-reported confidence number was
-  // deleted on 2026-09-04, and `persist_proposal` drops the key when it is None. Steps stored
-  // before that date still carry it (Decimal serialized as string), which is the only reason the
-  // field is declared at all — no view renders a per-step confidence.
+  // OPTIONAL because nothing writes it: the platform records no model-reported confidence, and
+  // `persist_proposal` drops the key when it is None. Declared only so a stored step that carries
+  // one (Decimal serialized as a string) still types — no view renders a per-step confidence.
   confidence?: string;
   reasoning: string;
   evidence: string[];
@@ -76,8 +82,8 @@ export interface IdpDetail {
   idp_raw_ref?: string;
   // IDP Assessment classification confidence (0..1), when the IDP pipeline emits it. Deliberately
   // NOT rendered and deliberately NOT dead: it is how well IDP read the DOCUMENT, an input quality
-  // measure that survived the 2026-09-04 removal of every model-reported confidence precisely
-  // because it is not a self-report about the agent's own reasoning. It stays off the case view so
+  // measure and not a self-report about the agent's own reasoning, which is why it is exempt from
+  // the ban on model-reported confidence numbers. It stays off the case view so
   // it cannot be mistaken for a second opinion on the evidence score; what the platform does act on
   // is `idp_confidence_alert_count` above, which the gateway interceptor reads to refuse a write.
   idp_classification_confidence?: string | number | null;
@@ -105,8 +111,7 @@ export interface Tier1Detail {
  * The comparison Tier-1 performed to auto-clear a case, as `backend/tier1/handler.py` persists it
  * on the case's `tier1_match`.
  *
- * Every field is optional, for two independent reasons. Cases auto-cleared before this attribute
- * existed have none of them, and the two auto-clear paths report different subsets: `matched_on:
+ * Every field is optional because the two auto-clear paths report different subsets: `matched_on:
  * "rule"` compares two sides of the same item, while `"general_ledger"` compares one extracted
  * amount against one ledger row. Read `matched_on` first, not the field presence.
  *
@@ -115,7 +120,7 @@ export interface Tier1Detail {
  * precision fault in the reconciliation rather than in the display.
  */
 export interface Tier1Match {
-  /** Which deterministic path cleared the item. Absent on rows written before it was recorded. */
+  /** Which deterministic path cleared the item. Read this before any other field here. */
   matched_on?: "rule" | "general_ledger";
   /** The absolute margin between the two compared values, and the tolerance it had to fall inside. */
   difference?: string;
@@ -202,7 +207,7 @@ export interface ReconCase {
   tier?: number;
   /** The deterministic auto-clear reason, e.g. `amount-match` or `gl-match`. Null on escalations. */
   category?: string | null;
-  /** How Tier-1 cleared the item. Absent on escalations and on cases cleared before it was recorded. */
+  /** How Tier-1 cleared the item. Absent on an escalation, which Tier-1 did not clear at all. */
   tier1_match?: Tier1Match | null;
   class_id?: string;
   classification_reasoning?: string;
@@ -236,9 +241,17 @@ export interface ReconCase {
   proposed_email?: EmailDraft | null;
   // The notices the investigation matched, as `search_notices` returned them — persisted whole by
   // the agent because the trace's `tool_output` is a 600-char display summary that cuts a notice row
-  // mid-field. ABSENT on cases proposed before this attribute existed; those fall back to the trace,
-  // which is why MatchedNoticesPanel still carries a trace derivation. See the panel's header.
+  // mid-field. ABSENT on a case whose proposal recorded no notice search; such a case falls back to
+  // the trace, which is why MatchedNoticesPanel carries a trace derivation. See the panel's header.
   notice_search?: NoticeSearch | null;
+  // What the agent run consumed, plus the provenance needed to price it. Written by
+  // `recon_core.cases.attach_proposal` from `recon_core.token_usage.summarize_token_usage`.
+  //
+  // Three absences, all meaning "no cost or token figure can be shown" and NONE meaning zero: the
+  // attribute is missing entirely on every case investigated before it shipped, it is `null` when
+  // nobody measured the run, and its two cache keys are omitted when the provider reported no
+  // caching. `estimateAgentRunCost` in `@/lib/modelPricing` is what unpacks all three.
+  token_usage?: StoredUsage | null;
   // Full nested item as stored (carries attributes.idp_* from the hook).
   item?: ReconItem;
 }
@@ -318,10 +331,10 @@ async function json<T>(resp: Response): Promise<T> {
   return (await resp.json()) as T;
 }
 
-export async function listCases(
-  _token?: string,
-  opts?: { scope?: "all"; status?: string },
-): Promise<ReconCase[]> {
+export async function listCases(opts?: {
+  scope?: "all";
+  status?: string;
+}): Promise<ReconCase[]> {
   const q = new URLSearchParams();
   if (opts?.status) q.set("status", opts.status);
   else if (opts?.scope) q.set("scope", opts.scope);
@@ -376,7 +389,7 @@ function encodeItemId(id: string): string {
   }
 }
 
-export async function getCase(id: string, _token?: string): Promise<ReconCase> {
+export async function getCase(id: string): Promise<ReconCase> {
   return json(await reconFetch(`/api/recon/cases/${encodeItemId(id)}`));
 }
 
@@ -515,7 +528,7 @@ export async function rejectCase(
   );
 }
 
-export async function listSkills(_token?: string): Promise<SkillType[]> {
+export async function listSkills(): Promise<SkillType[]> {
   return json(await reconFetch(`/api/recon/skills`));
 }
 
@@ -1308,8 +1321,19 @@ export async function uploadFiles(
 // Read-only. Every field is nullable because the pipeline fills them in as it goes: a row that has only
 // just arrived carries a key, a start time, and little else.
 //
-// There is no production/test filter and no total count. The upstream API offers neither — see the
-// route's own comment — so a caller that wants "how many" gets the length of what came back.
+// These shapes are PascalCase because the routes below used to forward the extraction pipeline's
+// GraphQL API verbatim. They now come out of recon's OWN notice table — `src/lib/idpDocumentStore.ts`
+// is the reader — and the contract was frozen through that change on purpose, so the migration is
+// reviewable as a change of source and not a change of screen.
+//
+// There is still no production/test filter and no total count. Recon stores no production/test flag,
+// and the count here is the number of rows actually returned, which cannot disagree with what is on
+// screen.
+//
+// ⚠️ There is no human-review field on this contract, and that is deliberate rather than an omission.
+// The IDP completion event carries none — not null, absent — so recon has nothing to store and nothing
+// to say. A field typed `null` would still have invited the page to render "no review was triggered",
+// which reads as a positive answer to a question recon cannot answer at all.
 
 export interface IdpDocument {
   ObjectKey: string | null;
@@ -1320,14 +1344,28 @@ export interface IdpDocument {
   CompletionTime: string | null;
   /** The extraction configuration the pipeline actually used. The column the Documents tab exists for. */
   ConfigVersion: string | null;
+  /**
+   * The pipeline's evaluation status AS AT EXTRACTION.
+   *
+   * A snapshot and not a live value: the post-processing hook fires while the pipeline's own status is
+   * still `EVALUATING`, so a later change is not reflected here. Every renderer of this field says so.
+   */
   EvaluationStatus: string | null;
-  HITLStatus: string | null;
-  HITLTriggered: boolean | null;
-  HITLCompleted: boolean | null;
-  HITLReviewOwner: string | null;
-  HITLReviewedBy: string | null;
   PageCount: number | null;
   ConfidenceAlertCount: number | null;
+  /**
+   * Why the pipeline reached a terminal status without recon extracting a notice.
+   *
+   * Only on a tracking-only row (`record_kind == "document"`), which is exactly the row an operator
+   * needs an explanation for.
+   */
+  notice_failure_reason?: string | null;
+  /**
+   * True when the row's position in the listing was derived from `notice_date` rather than from a real
+   * ingest timestamp — the backfilled rows. A plain boolean, not nullable: absence of the stored
+   * attribute means the timestamp IS the pipeline's own.
+   */
+  idp_started_at_approximate?: boolean;
 }
 
 /** A per-attribute confidence alert — the detail behind `ConfidenceAlertCount`. */
@@ -1341,18 +1379,26 @@ export interface IdpConfidenceAlert {
 export interface IdpDocumentSection {
   Id: string | null;
   Class: string | null;
-  Excluded: boolean | null;
-  ExclusionReason: string | null;
+  /** Always null — section exclusion is absent from the completion event. */
+  Excluded: null;
+  /** Always null — section exclusion is absent from the completion event. */
+  ExclusionReason: null;
   PageIds: number[] | null;
   ConfidenceThresholdAlerts: IdpConfidenceAlert[] | null;
 }
 
 export interface IdpDocumentDetail extends IdpDocument {
   WorkflowExecutionArn: string | null;
-  /** A deep link into the pipeline's own review UI. Absent unless a review was triggered. */
-  HITLReviewURL: string | null;
   Sections: IdpDocumentSection[] | null;
-  Pages: { Id: number | null; Class: string | null }[] | null;
+  /**
+   * Where the pipeline wrote its own accuracy report for this document.
+   *
+   * New on this contract, and the reason recon can stop asking the pipeline anything: the tracking
+   * snapshot recon stores carries these pointers, so the panel can link the report without a lookup.
+   * `SummaryReportURI` is null unless the pipeline supplied one — not every configuration does.
+   */
+  EvaluationReportURI: string | null;
+  SummaryReportURI: string | null;
 }
 
 export interface IdpDocumentPage {

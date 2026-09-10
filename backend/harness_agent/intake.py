@@ -114,7 +114,7 @@ def _coerce_evidence(raw) -> list[str]:
     """Normalize the model's ``evidence`` field into a clean ``list[str]``.
 
     The harness does not enforce the inline-function argument schema, so ``evidence`` arrives in
-    whatever shape the model emitted. Observed live: a JSON-encoded STRING (e.g.
+    whatever shape the model emitted — including a JSON-encoded STRING (e.g.
     ``'["issuer: X", "facility: Y"]'``) instead of an array. A plain ``list(raw or [])`` explodes
     such a string into one element PER CHARACTER, which renders in the UI as one bordered box per
     letter. This coerces defensively:
@@ -220,17 +220,17 @@ def build_proposal(
     _ALIASES = {
         "classification": "class_name",
         "reasoning": "classification_reasoning",
-        # `resolution` is required but the harness does not enforce it; the model
-        # frequently supplies only `reason` (the ledger-overlay note) and drops the
-        # top-level narrative (observed live 2026-07-27: submit dropped `resolution`,
-        # nuking a clean single-match case to unknown/confidence-0). When `resolution`
-        # is absent but `reason` is present, reuse `reason` as the resolution narrative
-        # rather than hard-failing — `reason` still remains for the proposed_action.
+        # `resolution` is required but the harness does not enforce it, and the model
+        # frequently supplies only `reason` (the ledger-overlay note) while dropping the
+        # top-level narrative — which reduces a clean single-match case to
+        # unknown/confidence-0. When `resolution` is absent but `reason` is present,
+        # reuse `reason` as the resolution narrative rather than hard-failing; `reason`
+        # still remains for the proposed_action.
         "reason": "resolution",
     }
-    # When class_name is already present, a stray `classification` field is the reasoning text
-    # (observed live: the model sent both). The harness does not enforce the schema's required
-    # list on inline functions, so normalization here is the practical contract enforcement.
+    # When class_name is already present, a stray `classification` field is the reasoning text —
+    # the model does send both. The harness does not enforce the schema's required list on inline
+    # functions, so normalization here is the practical contract enforcement.
     if submitted.get("class_name") not in (None, "") and submitted.get("classification") not in (
         None,
         "",
@@ -295,9 +295,9 @@ def build_proposal(
             # unresolvable" are different decisions there, and an absent key collapses them.
             "notice_id": notice_id,
             # Whether the cited evidence is good enough to write from, decided HERE rather than at the
-            # gateway. The gateway used to look up the cited notice and read its extraction alert count,
-            # which only worked while extraction was the one way a document arrived; a proposal grounded
-            # on retrieved correspondence cited no notice and passed the guard ungated. Written
+            # gateway. Judging it at the gateway would mean reading the cited notice's extraction alert
+            # count, which only covers documents that arrived through extraction: a proposal grounded on
+            # retrieved correspondence cites no notice and would pass such a guard ungated. Written
             # unconditionally, like notice_id and for the same reason — at the gateway an ABSENT verdict
             # is a refusal, so the key must always be present for a present verdict to mean anything.
             #
@@ -402,8 +402,8 @@ def persist(*, cases: CaseStore, proposal: Proposal) -> None:
                 k: v
                 for k, v in {
                     "kind": s.kind,
-                    # Written by nobody; present only on traces persisted before 2026-09-04. It sits
-                    # in this block precisely because it is None now — `Decimal(str(None))` raises.
+                    # Nothing sets a per-step confidence, so this is always None. It sits in this
+                    # conditional block for exactly that reason: `Decimal(str(None))` raises.
                     "confidence": None if s.confidence is None else Decimal(str(s.confidence)),
                     "tool": s.tool,
                     "tool_input": s.tool_input,
@@ -440,6 +440,11 @@ def persist(*, cases: CaseStore, proposal: Proposal) -> None:
         # Decimal-safe like the steps: notice rows carry float amounts and extraction confidences
         # straight from the tool, and DynamoDB rejects a raw float.
         notice_search=to_decimal_safe(proposal.notice_search),
+        # NOT run through `to_decimal_safe`: `recon_core.token_usage.summarize_token_usage` is the
+        # only thing that builds this dict and it already yields Decimals, so a float arriving here
+        # means something bypassed that mapper. Coercing it would hide that; the boto3 TypeError
+        # names it.
+        token_usage=proposal.token_usage,
     )
     cases.transition("item_id", proposal.item_id, CaseStatus.PROPOSED)
 

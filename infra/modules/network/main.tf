@@ -147,22 +147,24 @@ locals {
     # OTel span export goes to xray.<region>.amazonaws.com. Without this endpoint a VPC-attached
     # Lambda in private mode drops every span while otherwise working normally — a silent gap.
     "xray",
-    # ⚠️ `bedrock-agent-runtime` is deliberately NOT here. It served the retired KB tool Lambda's
-    # boto3.client("bedrock-agent-runtime").Retrieve call; the knowledge-base read is now the
-    # `managed-kb` GATEWAY connector target, so the Retrieve is made by the AgentCore Gateway from
-    # AWS-managed infrastructure, not from inside this VPC. Nothing in the VPC calls
-    # bedrock-agent-runtime any more. Verified live 2026-08-27 on both agent backends (the runtime
-    # container and the harness) before the endpoint was removed. If you add any in-VPC caller of
-    # Retrieve / RetrieveAndGenerate / InvokeAgent, put it back or it will hang in a no-NAT
-    # deployment.
+    # ⚠️ `bedrock-agent-runtime` is deliberately NOT here. The knowledge-base read is the
+    # `managed-kb` GATEWAY connector target, so the Retrieve call is made by the AgentCore Gateway
+    # from AWS-managed infrastructure rather than from inside this VPC — no in-VPC caller needs it on
+    # either agent backend. If you add one (Retrieve / RetrieveAndGenerate / InvokeAgent from a
+    # Lambda or the runtime container), add the endpoint too or the call hangs in a no-NAT deployment.
+    #
     # AgentCore Gateway has its OWN PrivateLink service, separate from the bedrock-agentcore data
-    # plane. It is not redundant: the gateway's private DNS is the wildcard
+    # plane, and it is not redundant with it: the gateway's private DNS is the wildcard
     # *.gateway.bedrock-agentcore.<region>.amazonaws.com, which the bedrock-agentcore endpoint's
     # exact-name zone (bedrock-agentcore.<region>.amazonaws.com) does not resolve. Both recon
     # gateways use AWS_IAM/SigV4 inbound auth, so the default full-access endpoint policy is
     # sufficient — a gateway with OAuth/JWT ingress would additionally need Principal "*" in the
     # endpoint policy, because endpoint policies can only match IAM principals.
     "bedrock-agentcore.gateway",
+    # Reaches the PRIVATE intake REST API (modules/intake, private_api.tf) from inside the VPC. This
+    # endpoint service resolves private REST APIs ONLY — it does not and cannot front the public
+    # `recon-dev-api` HTTP API, which has no private endpoint type at all.
+    "execute-api",
   ]
   interface_endpoints = toset(
     var.enable_private_endpoints
@@ -174,12 +176,20 @@ locals {
 resource "aws_vpc_endpoint" "interfaces" {
   for_each = local.interface_endpoints
 
-  vpc_id              = var.vpc_id
-  service_name        = "com.amazonaws.${var.region}.${each.value}"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = aws_subnet.private[*].id
-  security_group_ids  = [aws_security_group.compute.id]
-  private_dns_enabled = true
+  vpc_id             = var.vpc_id
+  service_name       = "com.amazonaws.${var.region}.${each.value}"
+  vpc_endpoint_type  = "Interface"
+  subnet_ids         = aws_subnet.private[*].id
+  security_group_ids = [aws_security_group.compute.id]
+
+  # Private DNS everywhere EXCEPT execute-api, and that exception is load-bearing. Enabling it on the
+  # execute-api endpoint creates a private hosted zone for the WHOLE wildcard
+  # *.execute-api.<region>.amazonaws.com, so every in-VPC call to any public API Gateway API — the
+  # platform's own `recon-dev-api` HTTP API included — would resolve to this endpoint and fail there,
+  # because the endpoint service serves private REST APIs only. The private intake API is reached by
+  # its <api-id>-<vpce-id>.execute-api.<region>.vpce.amazonaws.com hostname instead, which needs no
+  # private DNS. Do not "tidy" this back to a constant true.
+  private_dns_enabled = each.value != "execute-api"
 
   tags = { Name = "${var.name_prefix}-${each.value}" }
 }

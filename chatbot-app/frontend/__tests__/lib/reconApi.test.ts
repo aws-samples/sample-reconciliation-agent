@@ -93,9 +93,9 @@ describe("reconApi", () => {
   // Two different `confidence` keys survive on this payload and they mean different things — the
   // point of the assertions below. The case-level one is the ONLY confidence the platform computes:
   // satisfied/prescribed required evidence steps for the classified skill (0.83 == 5 of 6 on
-  // record-match-review). The step-level one is optional and historical — rows written before
-  // 2026-09-04 carry a number the model reported about itself, nothing reads it, and no new row
-  // sets it. There is deliberately no `classification_confidence` alongside
+  // record-match-review). The step-level one is optional and inert — a stored row can carry a number
+  // the model reported about itself, nothing reads it, and no new row sets it. There is deliberately
+  // no `classification_confidence` alongside
   // `classification_reasoning`: the classifier returns a label and a why, never a score.
   it("getCase exposes classification and per-step reasoning/confidence", async () => {
     const caseJson = {
@@ -116,7 +116,7 @@ describe("reconApi", () => {
       "fetch",
       vi.fn().mockResolvedValue({ ok: true, json: async () => caseJson }),
     );
-    const c = await getCase("i-1", "token-abc");
+    const c = await getCase("i-1");
     expect(c.classification_reasoning).toBe("value date off by 1d");
     expect(c.confidence).toBe("0.83");
     expect(c.steps?.[0].reasoning).toBe("amounts match");
@@ -124,7 +124,7 @@ describe("reconApi", () => {
   });
 
   it("getCase leaves a step's absent confidence absent rather than defaulting it", async () => {
-    // Every step written after 2026-09-04 omits the key. Nothing may substitute a number for it:
+    // A step omits the key entirely. Nothing may substitute a number for it:
     // a 0 would render as a real self-assessment of zero, which is worse than showing nothing.
     vi.stubGlobal(
       "fetch",
@@ -136,7 +136,7 @@ describe("reconApi", () => {
         }),
       }),
     );
-    const c = await getCase("i-1", "token-abc");
+    const c = await getCase("i-1");
     expect(c.steps?.[0].confidence).toBeUndefined();
   });
 

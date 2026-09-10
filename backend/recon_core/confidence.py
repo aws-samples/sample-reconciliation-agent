@@ -62,11 +62,11 @@ def evidence_completeness(
 
     An id the skill never declared is IGNORED for scoring and reported in ``undeclared_step_ids``
     rather than raised on. It is a model reporting error, not a declaration error: the skill file is
-    fine, the model just named a step nobody asked for. Raising discarded the whole investigation —
-    on 2026-09-02 a live runtime invocation reported ``account_name_match`` (a name the skill's PROSE
-    invites while its front matter declares ``expected_entry_match``), and ~7 minutes and several
-    hundred tool calls were thrown away, leaving the case stuck in IN_PROGRESS with no proposal and
-    no analyst-visible reason. Ignoring cannot inflate the score, because an undeclared id is by
+    fine, the model just named a step nobody asked for. Raising would discard the whole investigation:
+    a runtime reporting ``account_name_match`` (a name the skill's PROSE invites while its front
+    matter declares ``expected_entry_match``) would throw away minutes of work and several hundred
+    tool calls, leaving the case stuck in IN_PROGRESS with no proposal and no analyst-visible reason.
+    Ignoring cannot inflate the score, because an undeclared id is by
     definition not one of ``required_ids`` — the worst it can do is leave a required step
     unattempted, which lowers the score and is listed for the human. Same call, for the same reason,
     as :func:`downgrade_unsupported_reports` makes for unsupported satisfied-claims.
@@ -75,9 +75,9 @@ def evidence_completeness(
         as the JSON dicts :func:`skill_meta.catalog_entry` projects them to. BOTH shapes must be
         accepted, which is why the fields are read through ``skill_meta.step_field``: the runtime
         backend loads real skills and gets models, while the harness backend has no skill-loading
-        tool and can only pass the catalog. Reading ``s.required`` directly, as this did until
-        2026-09-02, made every harness proposal die with ``AttributeError: 'dict' object has no
-        attribute 'required'`` the moment its classification started working.
+        tool and can only pass the catalog. Reading ``s.required`` directly would make every harness
+        proposal die with ``AttributeError: 'dict' object has no attribute 'required'`` — but only
+        once its classification works, since ``unknown`` declares no steps and returns first.
     :param steps: the agent's reasoning trace for this proposal.
     :returns: ``(score, components)``; components carries ``prescribed``, ``satisfied``,
         ``unsatisfied_step_ids``, ``unattempted_step_ids`` and ``undeclared_step_ids`` for the audit

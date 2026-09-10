@@ -4,12 +4,12 @@ This decides ONE thing: can the platform's write guard evaluate the evidence, an
 It is not a judgement about whether the match is right — that is what the confidence band and the
 evidence-completeness score are for. A proposal can be ``CLEAN`` here and still be wrong.
 
-**Why this exists at all.** The gateway interceptor used to answer the question directly, by looking up
-the notice a proposal cited and reading its extraction alert count. That worked while extraction was the
-only way a document reached the platform. It is now one of two routes, and the other produces no alert
-count — so the guard was silently VOIDED on that route: a proposal grounded on retrieved guidance cited
-no notice, an absent notice id read as "nothing to be doubtful about", and the write passed ungated.
-Moving the decision here, over whatever sources the proposal actually cited, is what closes that.
+**Why this exists at all, rather than at the gateway.** The obvious place to answer the question is the
+gateway interceptor, by looking up the notice a proposal cited and reading its extraction alert count.
+That only covers documents that arrive through extraction, which is one of two routes; the other
+produces no alert count, so such a guard is silently VOIDED on it. A proposal grounded on retrieved
+guidance cites no notice, an absent notice id reads as "nothing to be doubtful about", and the write
+passes ungated. Deciding it here, over whatever sources the proposal actually cited, is what closes that.
 
 **Three verdicts, and the distinction between the last two matters.**
 
@@ -28,11 +28,10 @@ mechanism, and only one of them can ever be cited to resolve a case:
   — no per-field confidence, and it may concern a comparable item rather than this one — but the same
   KIND of thing, and usable when an operator has enabled that route in Config.
 
-⚠️ **A playbook consulted is not a playbook cited, and this distinction cost a redesign.** An earlier
-version refused any proposal that had touched guidance without matching a notice. That is wrong, and a
-test caught it: *every* investigation consults method, so the rule refused nearly every legitimate
-ledger-only resolution. Retrieving a playbook is normal, encouraged behaviour and says nothing about what
-the conclusion rests on.
+⚠️ **A playbook consulted is not a playbook cited.** Do not be tempted to refuse any proposal that
+touched guidance without matching a notice: *every* investigation consults method, so that rule refuses
+nearly every legitimate ledger-only resolution. Retrieving a playbook is normal, encouraged behaviour
+and says nothing about what the conclusion rests on.
 
 So the rule reacts only to documents that purport to be **evidence about an item**:
 

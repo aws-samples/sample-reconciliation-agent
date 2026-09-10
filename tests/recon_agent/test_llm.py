@@ -2,8 +2,11 @@
 and classify_with_consistency (self-consistency majority vote).
 
 The Strands call is replaced by the ``caller`` seam — ``callable(*, model_id, system, prompt,
-max_tokens, temperature) -> (text, stop_reason)`` — so the prompt assembly, the retries and the
+max_tokens, temperature) -> (text, stop_reason, usage)`` — so the prompt assembly, the retries and the
 vote are exercised without a live Bedrock model.
+
+Token usage flowing through that seam has its own file (``test_runtime_token_usage.py``); the fake
+here returns an empty usage dict, which is what a reply carrying no metrics reports.
 """
 
 import json
@@ -31,7 +34,7 @@ class _FakeCaller:
         self._reject_temperature = reject_temperature
 
     def __call__(self, *, model_id, system, prompt, max_tokens, temperature):
-        """Record the attempt and return the next canned ``(text, stop_reason)``."""
+        """Record the attempt and return the next canned ``(text, stop_reason, usage)``."""
         self.caps.append(max_tokens)
         self.temps.append(temperature)
         if self._reject_temperature and temperature is not None:
@@ -40,9 +43,11 @@ class _FakeCaller:
             )
         self.prompts.append(prompt)
         nxt = self._replies.pop(0)
+        # A two-element canned reply is a raw/truncated (text, stop_reason) pair; this file asserts
+        # nothing about cost, so it reports no usage counts at all rather than inventing zeros.
         if isinstance(nxt, tuple):
-            return nxt
-        return json.dumps(nxt), "end_turn"
+            return (*nxt, {})
+        return json.dumps(nxt), "end_turn", {}
 
 
 ITEM = ReconItem(
@@ -166,11 +171,11 @@ def test_classify_with_consistency_majority_vote_and_prompt():
             {"name": "unknown", "reasoning": "unsure"},
         ]
     )
-    name, reasoning = classify_with_consistency(
+    vote = classify_with_consistency(
         model_id="m", system="s", item=ITEM, catalog=CATALOG, caller=fc
     )
-    assert name == "timing"
-    assert reasoning in ("value date off", "again")
+    assert vote.name == "timing"
+    assert vote.reasoning in ("value date off", "again")
     # The prompt carries the catalog AND the item's IDP-extracted data.
     assert "timing breaks" in fc.prompts[0]
     assert "26-Dec-2026" in fc.prompts[0]
@@ -179,12 +184,12 @@ def test_classify_with_consistency_majority_vote_and_prompt():
 
 
 def test_the_classifier_prompt_asks_for_no_confidence():
-    """The k-sample vote stays; the two numbers it produced are gone.
+    """The k-sample vote yields a class and its reasoning, and no number.
 
-    Neither was read: the agreement fraction was already computed and discarded at the call site, and
-    the verbalized mean fed a floor whose only production effect was a mass false-negative. A prompt
-    that still asks for a number nobody reads invites a future reader to start reading it — and the
-    parse would ``KeyError`` the moment a model omitted the key it was no longer relied on for.
+    Neither candidate number would be read: an agreement fraction is discarded at the call site, and a
+    self-reported mean feeding a floor only ever produces mass false negatives. A prompt that asks for
+    a number nobody reads invites a future reader to start reading it — and the parse would
+    ``KeyError`` the moment a model omitted a key nothing depends on.
     """
     fc = _FakeCaller([{"name": "timing", "reasoning": "r"}] * 3)
     classify_with_consistency(model_id="m", system="s", item=ITEM, catalog=CATALOG, caller=fc)

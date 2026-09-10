@@ -83,20 +83,10 @@ variable "task_memory" {
   default = 1024
 }
 
-# --- Build-time NEXT_PUBLIC_* wiring (Cognito OAuth + recon BFF) ---
+# --- Build-time NEXT_PUBLIC_* wiring (OIDC provider + recon BFF) ---
 
 variable "recon_api_base" {
   description = "Base URL of the recon BFF/API (CloudFront-agnostic; the HTTP API endpoint)."
-  type        = string
-}
-
-variable "cognito_hosted_ui" {
-  description = "Cognito Hosted UI domain (e.g. prefix.auth.us-east-1.amazoncognito.com)."
-  type        = string
-}
-
-variable "cognito_client_id" {
-  description = "Cognito SPA app client id."
   type        = string
 }
 
@@ -122,7 +112,7 @@ variable "okta_client_id" {
 # The group whose members may change platform configuration — the auto-resolve threshold, the agent
 # backend, the Tier-1 switch, and the list of addresses the platform may email.
 #
-# Terraform cannot create this group: there is no Cognito user pool in this deployment, so membership
+# Terraform cannot create this group: the identity provider is Okta/Entra, not an AWS resource, so membership
 # comes from the identity provider's group claim and an operator adds people to it in Okta or Entra. The
 # empty default therefore means "nobody yet", which is the safe reading — the routes refuse every caller
 # until the group is named here.
@@ -142,7 +132,7 @@ variable "auth_groups_claim" {
   default     = "groups"
 }
 
-# Pinning this is what stops the callback URL drifting (live-QA P0-1). Left empty, the frontend
+# Pinning this is what stops the callback URL drifting. Left empty, the frontend
 # derives the URI from whatever origin the browser is on — which is a generated *.cloudfront.net
 # domain that changes whenever the distribution is recreated, so the URI registered on the Okta
 # app stops matching and login fails. Set it to a URL you control (custom domain, or a
@@ -197,8 +187,6 @@ variable "lessons_table" {
 variable "lessons_table_arn" {
   type = string
 }
-
-# --- Approve email + reprocess re-invocation ---
 
 # --- Contacts + email templates (Config tab CRUD; recipient resolution on send) ---
 
@@ -263,7 +251,13 @@ variable "notices_table" {
 }
 
 variable "notices_table_arn" {
-  description = "ARN of the same table. No index ARN: the tab reads by notice id (GetItem/BatchGetItem) and never queries an index."
+  description = "ARN of the same table, for the by-notice-id reads (GetItem/BatchGetItem). It does NOT cover the GSI -- see notices_table_index_arn."
+  type        = string
+  default     = ""
+}
+
+variable "notices_table_index_arn" {
+  description = "ARN of the notices table's idp-document-index GSI (<table-arn>/index/idp-document-index), from modules/notice-store. Required separately because IAM treats a GSI as a resource distinct from its table: the Documents tab lists documents by ingest time over a date window, which is a Query naming IndexName, and dynamodb:Query on the table ARN alone does not authorise it. Empty leaves the statement covering the table only, so the list view fails closed with AccessDenied rather than the grant widening."
   type        = string
   default     = ""
 }
@@ -288,18 +282,6 @@ variable "email_preprocess_function_name" {
 
 variable "email_preprocess_function_arn" {
   description = "ARN of the same function, for the scoped lambda:InvokeFunction grant."
-  type        = string
-  default     = ""
-}
-
-variable "idp_appsync_endpoint" {
-  description = "HTTPS GraphQL endpoint of the document pipeline's AppSync API, from that stack's outputs. The Documents tab reads it server-side as the task role. Empty leaves the tab reporting that it is not configured, which is the honest outcome -- a defaulted endpoint would sign a request to nowhere and read like the pipeline being down."
-  type        = string
-  default     = ""
-}
-
-variable "idp_appsync_api_arn" {
-  description = "ARN of that same AppSync API (arn:aws:appsync:REGION:ACCOUNT:apis/API_ID), used to build the field-scoped read grant below. Empty grants nothing."
   type        = string
   default     = ""
 }
@@ -411,12 +393,18 @@ variable "harness_log_group" {
 }
 
 variable "harness_service_name" {
-  description = "OTel service.name of the harness backend (batch eval + recommendations data-source filter). The old in-code default 'bedrock-agentcore' matches nothing."
+  description = "OTel service.name of the harness backend (batch eval + recommendations data-source filter). Required, with no default: the filter matches on this string exactly, and a guessed value silently selects zero spans."
   type        = string
 }
 
 variable "analyst_agreement_evaluator_id" {
   description = "Real evaluator id of the custom analyst-agreement evaluator (name + service-generated suffix); the batch route maps the UI's 'analyst_agreement' alias to it."
+  type        = string
+  default     = ""
+}
+
+variable "analyst_agreement_lambda_arn" {
+  description = "ARN of the custom analyst-agreement evaluator Lambda. StartBatchEvaluation invokes it under a FAS derived from THIS task role, so the role needs lambda:InvokeFunction on it directly — the Lambda's resource policy grants the bedrock-agentcore service principal, which a FAS does not use."
   type        = string
   default     = ""
 }

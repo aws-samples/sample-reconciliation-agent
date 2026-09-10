@@ -10,30 +10,6 @@ variable "name_prefix" {
   default     = "recon-dev"
 }
 
-variable "hosted_ui_prefix" {
-  description = "Cognito Hosted UI domain prefix (must be globally unique)."
-  type        = string
-  default     = "recon-dev-login"
-}
-
-variable "idp_gateway_target_url" {
-  description = "Endpoint of the independently-deployed IDP (document-extraction) MCP/agent, registered as a Gateway target. Empty disables the target."
-  type        = string
-  default     = ""
-}
-
-variable "idp_appsync_endpoint" {
-  description = "HTTPS GraphQL endpoint of the document pipeline's AppSync API, from that stack's outputs (GraphQLAPIURL). Read server-side by the console's Documents tab. Empty leaves the tab reporting it is not configured."
-  type        = string
-  default     = ""
-}
-
-variable "idp_appsync_api_arn" {
-  description = "ARN of the same AppSync API -- arn:aws:appsync:REGION:ACCOUNT:apis/API_ID, built from that stack's GraphQLAPIId output. Only the console task role gets a grant, and only on two named query fields. Empty grants nothing."
-  type        = string
-  default     = ""
-}
-
 variable "idp_input_bucket" {
   description = "Name of the document pipeline's input bucket, from that stack's outputs. An extraction-routed upload is put here. Empty leaves the upload route reporting it has nowhere to put an extraction file, which is the correct behaviour: the alternative is a put that lands somewhere nothing reads."
   type        = string
@@ -41,28 +17,15 @@ variable "idp_input_bucket" {
 }
 
 variable "idp_input_bucket_arn" {
-  description = "ARN of the same bucket. Only the console task role gets a grant, and only s3:PutObject on the object path -- never ListBucket, and never on the pipeline's output prefixes."
+  description = "ARN of the same bucket. Only the console task role gets a grant, and only three verbs, never on the pipeline's output prefixes: s3:PutObject on the object path for an extraction-routed upload; s3:GetObject on the same path, because the Documents tab streams the source document from here rather than from a copy recon keeps, and the route reads only the key recorded on recon's own notice row; and s3:ListBucket at the bucket level -- not for enumeration (nothing lists this bucket) but because S3 answers a GetObject for an absent key with AccessDenied unless the caller also holds ListBucket, which would make the honest \"the object is no longer in the input bucket\" message unreachable and print a raw IAM denial in the tab instead."
   type        = string
   default     = ""
 }
 
 variable "idp_state_machine_arn" {
-  description = "ARN of the document pipeline's Step Functions state machine, from that stack's outputs. Recon owns an EventBridge rule on its SUCCEEDED events, which is what invokes the ingest hook. Empty creates no rule, so nothing reaches the hook and the notices table stays empty -- the state this variable was added after finding in recon-dev."
+  description = "ARN of the document pipeline's Step Functions state machine, from that stack's outputs. Recon owns an EventBridge rule on all FOUR of its terminal statuses -- SUCCEEDED, FAILED, TIMED_OUT and ABORTED (see infra/modules/idp-hook/main.tf's event_pattern) -- which is what invokes the ingest hook. The non-success three matter as much as SUCCEEDED: they are what make the hook write the tracking-only row that keeps a failed document VISIBLE in the Documents tab instead of vanishing. Empty creates no rule, so nothing reaches the hook: uploads complete and the notices table stays empty with no error anywhere."
   type        = string
   default     = ""
-}
-
-variable "recon_domain" {
-  description = "Recon domain the IDP hook stamps on ingested items."
-  type        = string
-  default     = "cash"
-}
-
-variable "idp_mcp_secret_json" {
-  description = "JSON {token_url, client_id, client_secret, scope, issuer} for IDP MCP client-credentials. `issuer` is Cognito's real issuer (https://cognito-idp.<region>.amazonaws.com/<poolId>), NOT the token_url host. Empty disables."
-  type        = string
-  default     = ""
-  sensitive   = true
 }
 
 variable "graph_enabled" {
@@ -83,25 +46,18 @@ variable "entra_client_secret" {
   sensitive = true
 }
 
-# --- Approval email + reprocess cap ---
+# --- Platform email: notification seed + sending mailbox ---
 
 variable "notify_email" {
   description = <<-EOT
     SEED address for the internal-notification contact, applied once when the contacts table is
-    first created. It is no longer the recipient of anything: every send resolves a contact ID
+    first created. It is not itself the recipient of anything: every send resolves a contact ID
     against that table at the moment it sends, so changing this value on a live deployment has no
     effect and the actual recipient is edited in the Config tab. Empty skips the seed, in which case
     notifications do not send until an operator adds a contact.
   EOT
   type        = string
   default     = ""
-}
-
-variable "graph_secret_json" {
-  description = "Deprecated: retained for compatibility. The agent now sends/reads mail through the existing microsoft-graph OpenAPI gateway target, which owns its own Entra credentials."
-  type        = string
-  default     = ""
-  sensitive   = true
 }
 
 # No default on purpose: a mailbox address identifies a real tenant, so it belongs in the
@@ -140,7 +96,7 @@ variable "okta_redirect_uri" {
 # Configuration changes — the auto-resolve threshold, the agent backend, the Tier-1 switch, and the list
 # of addresses the platform may email — are restricted to members of this OIDC group.
 #
-# Nothing here creates the group. This deployment has no Cognito user pool, so membership arrives as a
+# Nothing here creates the group. This deployment has no AWS identity provider, so membership arrives as a
 # claim from Okta or Entra and an operator maintains it there. The empty default is deliberate and it
 # fails closed: until a group is named, every configuration route answers 403, which is a visible and
 # one-variable-fixable state rather than a silently open one.
@@ -181,8 +137,8 @@ variable "private_vpc" {
     an internal ALB on private subnets + Fargate with no public IP, and adds the interface VPC
     endpoints (Bedrock/AgentCore/SSM/ECS/ELB/…) so everything reaches AWS with no NAT/IGW. Reach
     the UI via VPN / Direct Connect / SSM port-forward, and register the internal ALB DNS as an
-    OIDC redirect URI. DEFAULT false = the public CloudFront + internet-facing-ALB topology
-    (unchanged). This single flag is the whole switch.
+    OIDC redirect URI. DEFAULT false selects the public CloudFront + internet-facing-ALB topology
+    instead. This single flag is the whole switch.
   EOT
   type        = bool
   default     = false
@@ -221,14 +177,17 @@ variable "harness_model_id" {
 }
 
 # Defaults to "enforce", not "log". "log" never blocks: it records the decision it would have made
-# and forwards the call anyway. Since the model's self-reported classification floor was removed
-# (2026-09-04) there is no second threshold in app code behind the provenance, evidence-quality and
-# transition guards, so a deployment that inherited a "log" default had one gate where it previously
-# had several — security audit 2026-09-04, finding M1. A fail-open default for an enforcement
-# component is the wrong direction for the same reason an unset counterparty allowlist means
-# "nobody" rather than "anyone". Set it to "log" EXPLICITLY for a first rollout: deploy once, verify
-# the e2e matrix in the interceptor's CloudWatch logs, then remove the override. It is a Lambda
-# env-only change, so the flip is cheap and there is no reason to linger.
+# and forwards the call anyway.
+#
+# The default matters more than it looks, because the interceptor's provenance, evidence-quality and
+# transition guards are the ONLY threshold enforcement in front of an autonomous ledger write —
+# there is no second check in app code behind them. A "log" default therefore leaves the write path
+# with no gate at all, which is a fail-open default for an enforcement component, wrong for the same
+# reason an unset counterparty allowlist means "nobody" rather than "anyone".
+#
+# Set "log" EXPLICITLY for a first rollout: deploy once, verify the e2e matrix in the interceptor's
+# CloudWatch logs, then remove the override. It is a Lambda env-only change, so the flip is cheap
+# and there is no reason to leave it in place.
 variable "interceptor_mode" {
   description = "Gateway REQUEST interceptor mode: 'enforce' (default — block failing provenance/evidence/transition checks) or 'log' (observe only, never blocks). Set 'log' explicitly for a first rollout, then remove it."
   type        = string
@@ -282,4 +241,16 @@ variable "otel_layer_account" {
     condition     = can(regex("^[0-9]{12}$", var.otel_layer_account))
     error_message = "otel_layer_account must be a 12-digit AWS account ID."
   }
+}
+
+# Maintenance-only lever, deliberately defaulted to the steady state (ENABLED) so a plan run
+# without it — CI's `RECON_TFVARS` is a hand copy and will not carry it — never proposes disabling
+# scoring by accident. Flip it to false ONLY for the duration of an evaluator update: an ENABLED
+# online evaluation config locks the custom analyst-agreement evaluator against update AND delete
+# (see infra/modules/agent-evals/main.tf), and disabling the configs is the route AWS documents for
+# releasing that lock. While false, sessions get builtin scores but no analyst-agreement score.
+variable "online_evals_enabled" {
+  description = "Whether the online evaluation configs run. False releases the service-side lock on the custom evaluator so it can be updated; leave true otherwise."
+  type        = bool
+  default     = true
 }

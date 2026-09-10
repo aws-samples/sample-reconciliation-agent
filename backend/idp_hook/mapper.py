@@ -27,7 +27,7 @@ snake_case equivalent, which is what the unit fixtures are written in.
 
 import logging
 from decimal import Decimal, InvalidOperation
-from typing import Optional
+from typing import Any, Optional
 
 from backend.recon_core.notice_derive import (
     PARSE_METHOD_IDP,
@@ -39,17 +39,33 @@ from backend.recon_core.notices import Notice
 logger = logging.getLogger(__name__)
 
 
-def _decimalize(obj):
-    """Recursively convert floats → Decimal so nested IDP data is DynamoDB-safe (boto3 rejects
-    Python floats). Walks dicts/lists in place; leaves existing Decimals untouched (the IDP
-    output reader already decimalizes its result, so we must not choke on Decimals here).
+def decimalize(obj: Any) -> Any:
+    """Recursively convert floats to :class:`Decimal` so nested IDP data is DynamoDB-safe (boto3
+    rejects Python floats outright). Walks dicts/lists in place; leaves existing Decimals
+    untouched (the IDP output reader already decimalizes its result, so this must not choke on
+    Decimals here).
+
+    Public, like :func:`split_s3_uri` above, for the same reason: this is now the THIRD would-be
+    home for "convert a float to Decimal" in this package -- ``tracking.py`` had a byte-identical
+    private copy (now deleted; it imports this instead) and ``idp_output.py`` line ~113 reaches the
+    same result through ``json.loads(json.dumps(...), parse_float=Decimal)``. Consolidating here
+    stops a fourth copy from appearing and a future bug fix from having to land in three places.
+
+    NOT interchangeable with ``idp_output.py``'s ``parse_float=Decimal`` trick: that one operates on
+    a JSON string round-trip (it also happens to convert ints that arrived as JSON floats), while
+    this one walks a live Python structure in place. Do not "unify" them into one call site --
+    they take different inputs and are used where each module already has the matching one in hand.
+
+    :param obj: any JSON-shaped value (dict, list, float, or scalar).
+    :returns: the same structure with every float replaced by a ``Decimal`` built via ``str()``
+        (to avoid binary-float imprecision); non-float values are returned unchanged.
     """
     if isinstance(obj, float):
         return Decimal(str(obj))  # via str() to avoid binary-float imprecision
     if isinstance(obj, dict):
-        return {k: _decimalize(v) for k, v in obj.items()}
+        return {k: decimalize(v) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_decimalize(v) for v in obj]
+        return [decimalize(v) for v in obj]
     return obj
 
 
@@ -142,7 +158,7 @@ def _read_sections(
             # list of id strings rather than records — see `IdpOutputReader.resolve_document`. If one
             # reaches here the pointer was never followed, so say that: the alternative is
             # `AttributeError: 'str' object has no attribute 'get'` three frames deep, which reads
-            # like a mapper bug rather than an unresolved event (cost us a live debug on 2026-09-02).
+            # like a mapper bug rather than an unresolved event and misdirects the whole diagnosis.
             if not isinstance(s, dict):
                 raise ValueError(
                     f"IDP section {s!r} is not a record — this looks like an unresolved compressed "
@@ -205,6 +221,7 @@ def idp_event_to_notice(
     *,
     output_reader: Optional[object] = None,
     execution_arn: str | None = None,
+    idp_tracking: dict | None = None,
 ) -> Notice:
     """Map an IDP completion event to a Notice — the ACTUAL side of the reconciliation.
 
@@ -216,6 +233,11 @@ def idp_event_to_notice(
     :param output_reader: an IdpOutputReader (or compatible) used to read section results and page
         images from IDP output S3. When None, only the event's own high-level data is captured.
     :param execution_arn: the IDP Step-Function run id, stored for the audit trail.
+    :param idp_tracking: the IDP pipeline's own tracking snapshot for this document (see
+        ``backend/idp_hook/tracking.build_tracking_snapshot``), stored on the returned notice so
+        the Documents tab can render pipeline progress without a live AppSync call. Carried
+        through as-is except for ``page_count`` -- see the comment where it is folded in below.
+        ``None`` when the caller has none to attach (e.g. a caller that predates this parameter).
     :returns: the mapped notice.
     :raises ValueError: if the document has no identifiable ObjectKey, no extractable notice date,
         or an amount that will not parse.
@@ -224,9 +246,16 @@ def idp_event_to_notice(
     if not object_key:
         raise ValueError(f"IDP document missing ObjectKey/id: keys={list(document)}")
 
-    sections, pages, _page_count = _read_sections(
+    sections, pages, page_count = _read_sections(
         document, output_reader=output_reader, out_bucket=out_bucket, out_prefix=out_prefix
     )
+    # `page_count` used to be thrown away here as `_page_count`. `tracking.build_tracking_snapshot`
+    # computes its OWN page_count from the raw event/document alone, so it cannot see the actual
+    # page images `_read_sections` just read from IDP output S3 -- the one place this mapper knows
+    # more than that snapshot does. Fold it in (mapper's value wins when both are known -- it is the
+    # more complete source) rather than let it fall on the floor a second time.
+    if idp_tracking is not None and page_count is not None:
+        idp_tracking = {**idp_tracking, "page_count": page_count}
     first = sections[0] if sections else {}
     fields = first.get("fields", {}) or {}
 
@@ -258,7 +287,7 @@ def idp_event_to_notice(
     # `mean_confidence`/`alert_count` are carried PER SECTION and are not the notice-level
     # `extraction_confidence`/`confidence_alert_count` below: those are the first section's score and
     # the sum across sections respectively, which is what the interceptor and the prompt read.
-    idp_sections = _decimalize(
+    idp_sections = decimalize(
         [
             {
                 "section_id": s.get("section_id"),
@@ -331,6 +360,7 @@ def idp_event_to_notice(
         confidence_alert_count=alert_total,
         source_document=object_key,
         idp_execution_arn=execution_arn or document.get("workflow_execution_arn") or "",
-        idp_pages=_decimalize(pages),
+        idp_pages=decimalize(pages),
         idp_sections=idp_sections,
+        idp_tracking=idp_tracking,
     )

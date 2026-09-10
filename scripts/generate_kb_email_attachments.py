@@ -227,16 +227,16 @@ def _normalize_zip(raw: bytes) -> bytes:
     and the two emit the same XML tree as different bytes (namespace declarations, attribute order,
     self-closing tags). So every part — ``xl/styles.xml``, ``xl/workbook.xml``, ``docProps/core.xml``
     — differs by a handful of bytes depending only on whether lxml happens to be installed. That is
-    what failed ``--check`` in CI for MR !7: lxml 6.1.1 was present locally (transitively, it is not
-    in ``requirements-dev.txt``) and absent from ``python:3.12-slim``. Reproduced locally by blocking
-    the lxml import, which gave byte-for-byte the CI member sizes.
+    enough to fail a byte-level ``--check`` in CI: lxml arrives locally as a transitive dependency (it
+    is not in ``requirements-dev.txt``) and is absent from ``python:3.12-slim``. Blocking the lxml
+    import locally reproduces the CI member sizes byte for byte.
 
     The conclusion is that XLSX byte-identity is not a property worth asserting — openpyxl does not
     promise it. ``tests/kb_seed/test_email_attachments.py`` therefore compares workbooks by
-    *content*, and ``--check`` does the same via :func:`_xlsx_matches`. Do not "fix" a future
-    mismatch by pinning the compressor: an earlier attempt here switched to ``ZIP_STORED`` on the
-    theory that the linked zlib was the variable, which cost 15 KB per workbook and changed nothing,
-    because the differing bytes were in the XML, upstream of the compressor.
+    *content*, and ``--check`` does the same via :func:`_xlsx_matches`. Do not "fix" a future mismatch
+    by pinning the compressor: switching to ``ZIP_STORED`` on the theory that the linked zlib is the
+    variable costs 15 KB per workbook and changes nothing, because the differing bytes are in the XML,
+    upstream of the compressor.
 
     :param raw: the original archive bytes.
     :return: an equivalent archive with deterministic metadata.

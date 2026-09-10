@@ -5,6 +5,25 @@ tools: [general-ledger___search_ledger, notices___search_notices]
 metadata:
   tier: break-type
   autonomy: propose-only
+# ⚠️ PAIRED WITH `document-cross-reference`, and the pair is NOT redundant — do not consolidate them.
+# Both declare the same two tools and both compare the same two sides, so they look interchangeable.
+# What differs is which side is REQUIRED evidence, and that drives auto-resolution:
+#
+#   this skill                 | document-cross-reference
+#   the LEDGER entry is the    | the NOTICE is the subject
+#   subject                    |
+#   expected_entry_match       | expected_entry_match       OPTIONAL
+#     REQUIRED                 |
+#   notice_corroboration       | notice_corroboration       REQUIRED
+#     optional                 |
+#   tier break-type: ROUTED    | tier probe: the agent ELECTS it
+#     by classify.py when      |   when an item's attributes are
+#     side_count == 2          |   incomplete
+#
+# Merging them would force one contract on both directions. Requiring both sides makes a sided item
+# with no notice — or a document with no ledger row — permanently unresolvable. Making both optional
+# lets a case clear the threshold having corroborated NEITHER side. Neither reproduces the pair.
+# The step ceiling below is the third obstacle: a merged skill needs eight distinct required ids.
 result:
   # A payment can plausibly settle several expected entries, so this skill returns a ranked set and
   # the analyst picks. Narrowing to one candidate here would hide the ambiguity rather than resolve it.

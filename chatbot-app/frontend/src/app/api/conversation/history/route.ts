@@ -79,7 +79,7 @@ export async function GET(request: NextRequest) {
     // Get query parameters
     const searchParams = request.nextUrl.searchParams
     const sessionId = searchParams.get('session_id')
-    // Note: limit parameter is deprecated - we now paginate through all events
+    // No limit parameter is read: this route paginates through every event in the session
 
     if (!sessionId) {
       return NextResponse.json(
@@ -297,14 +297,15 @@ export async function GET(request: NextRequest) {
       sessionMetadata = session?.metadata
     }
 
-    // Merge DynamoDB metadata with messages (overrides SDK metadata for backward compat)
+    // Merge DynamoDB metadata into the messages. Where both sources carry a field, the stored
+    // DynamoDB value wins — it is what this app recorded, the SDK value is a re-derivation.
     if (sessionMetadata?.messages) {
       messages = messages.map(msg => {
         const messageMetadata = sessionMetadata.messages[msg.id]
         if (messageMetadata) {
           return {
             ...msg,
-            // DynamoDB tokenUsage overrides SDK-extracted value (old sessions)
+            // DynamoDB tokenUsage overrides the SDK-extracted value when the record carries one
             ...(messageMetadata.tokenUsage ? { tokenUsage: messageMetadata.tokenUsage } : {}),
             // DynamoDB latency merged with SDK server metrics
             ...(messageMetadata.latency && { latencyMetrics: { ...msg.latencyMetrics, ...messageMetadata.latency } }),

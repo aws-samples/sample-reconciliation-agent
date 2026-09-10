@@ -42,7 +42,6 @@ _SHORT = {
     # prompt or trace reader uses. Mapping it to `search_guidance` keeps one vocabulary across both
     # backends (the runtime's wrapper is named search_guidance too).
     "managed-kb___Retrieve": "search_guidance",
-    "document-extraction___get_results": "get_results",
     "set-draw-status___set_draw_status": "set_draw_status",
     "microsoft-graph___sendSharedMailboxMail": "send_mail",
     # Both mailbox-read forms collapse to one short name so the trace reads the same whichever

@@ -1,10 +1,9 @@
 """One confidence, and only one: the computed evidence-completeness score.
 
-Every model-reported confidence number was deleted on 2026-09-04 (design record
-``2026-09-04-single-confidence-signal-design.md``). Each had a plausible-sounding purpose and none was
-read by any gate; the one that WAS read — a 0.6 floor on the model's own classification confidence —
-had a single recorded production effect, and it was a mass false-negative. This file fails if any of
-them comes back.
+No model-reported confidence number exists anywhere in the trees scanned here. Each such number had a
+plausible-sounding purpose and none was read by any gate; the one that WAS read — a 0.6 floor on the
+model's own classification confidence — had a single recorded production effect, and it was a mass
+false-negative. This file fails if any of them comes back.
 
 The scan is deliberately crude: a substring over source text, with no exemption for comments. That
 means a comment explaining why one of these is gone must describe the field in prose rather than spell
@@ -20,9 +19,9 @@ import pytest
 # `classification_confidence` is ALSO an IDP per-section extraction confidence, a completely different
 # quantity that is still live and still consumed by the gateway's low-confidence alert gate.
 #
-# The frontend is in scope because it is where the removed field's LAST live declaration was — the BFF
-# route types and the case/dashboard views are a producer of these names just as much as the Python is,
-# and a reintroduction there would otherwise pass CI in silence.
+# The frontend is in scope because the BFF route types and the case/dashboard views are a producer of
+# these names just as much as the Python is, and a reintroduction there would otherwise pass CI in
+# silence.
 ROOTS = [
     "backend/harness_agent",
     "backend/recon_core",

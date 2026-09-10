@@ -1,8 +1,13 @@
 import { NextResponse } from "next/server";
-import { idpGraphQL } from "@/lib/idpAppSync";
+import { UnknownDocumentError } from "@/lib/noticeExtraction";
+import { readDocumentRow, toIdpDocumentDetail } from "@/lib/idpDocumentStore";
 
-// One processed document in full: its header fields, its sections with the per-attribute confidence
-// alerts behind the alert count, and its pages with their classifications.
+// One ingested document in full: its header fields plus its sections with the per-attribute confidence
+// alerts behind the alert count.
+//
+// Read from recon's own notice row rather than from the extraction pipeline's GraphQL API — see
+// `src/lib/idpDocumentStore.ts`, which owns both the read and the translation from the stored
+// snake_case attributes to the PascalCase contract this route has always answered with.
 //
 // Object keys contain `/`, so the caller encodes the whole key and it arrives in this ONE dynamic
 // segment. A catch-all (`[...objectKey]`) would arrive split into an array and rejoining it guesses at
@@ -14,53 +19,13 @@ import { idpGraphQL } from "@/lib/idpAppSync";
 // ones break.
 export const runtime = "nodejs";
 
-const DETAIL_QUERY = `
-  query ReconGetDocument($key: ID!) {
-    getDocument(ObjectKey: $key) {
-      ObjectKey
-      ObjectStatus
-      WorkflowStatus
-      WorkflowExecutionArn
-      InitialEventTime
-      QueuedTime
-      CompletionTime
-      ConfigVersion
-      EvaluationStatus
-      HITLStatus
-      HITLTriggered
-      HITLCompleted
-      HITLReviewOwner
-      HITLReviewedBy
-      HITLReviewURL
-      PageCount
-      ConfidenceAlertCount
-      Sections {
-        Id
-        Class
-        Excluded
-        ExclusionReason
-        PageIds
-        ConfidenceThresholdAlerts {
-          attributeName
-          confidence
-          confidenceThreshold
-        }
-      }
-      Pages {
-        Id
-        Class
-      }
-    }
-  }
-`;
-
 /**
  * Read one document by object key.
  *
- * @param req - the request; unused, present for the route signature.
+ * @param _req - the request; unused, present for the route signature.
  * @param ctx - route context carrying the already-decoded `objectKey` segment.
- * @returns 200 with `{document}`; 404 when no document answers to the key; 502 when the upstream API
- *   refuses or is unreachable.
+ * @returns 200 with `{document}`; 404 when recon has no row for the key; 500 when the notices table
+ *   cannot be read.
  */
 export async function GET(
   _req: Request,
@@ -69,23 +34,19 @@ export async function GET(
   const { objectKey } = await ctx.params;
 
   try {
-    const data = await idpGraphQL<{ getDocument: unknown | null }>({
-      query: DETAIL_QUERY,
-      variables: { key: objectKey },
-    });
-    // A null document with no GraphQL error means the key is unknown. That is a 404 and not an empty
-    // success, because a detail page rendering blank fields for a mistyped key looks like a document
-    // that was processed and produced nothing.
-    if (data.getDocument === null || data.getDocument === undefined)
+    const row = await readDocumentRow({ objectKey });
+    return NextResponse.json({ document: toIdpDocumentDetail(row) });
+  } catch (err) {
+    // A missing row is a 404 and not an empty success, because a detail panel rendering blank fields for
+    // a mistyped key looks like a document that was processed and produced nothing.
+    if (err instanceof UnknownDocumentError)
       return NextResponse.json(
         { error: `no document found for object key ${objectKey}` },
         { status: 404 },
       );
-    return NextResponse.json({ document: data.getDocument });
-  } catch (err) {
     return NextResponse.json(
       { error: `document read failed: ${(err as Error).message}` },
-      { status: 502 },
+      { status: 500 },
     );
   }
 }

@@ -17,10 +17,10 @@ module.exports = {
     },
     extend: {
       fontFamily: {
-        // Pretendard used to sit between Manrope and system-ui. It was only ever reachable for
-        // glyphs Manrope lacks (CJK/Hangul), this app renders none, and the family was loaded from
-        // a CDN the CSP blocks — so the names are gone too. Leaving a family name behind with no
-        // font to match invites the CDN <link> back.
+        // Manrope plus system fallbacks, and deliberately nothing else. A CJK/Hangul family in the
+        // stack (e.g. Pretendard) is only ever reachable for glyphs Manrope lacks, which this app
+        // renders none of, and would load from a CDN the CSP blocks. A family name here with no
+        // font to match it invites that CDN <link> back.
         sans: ['var(--font-manrope)', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'sans-serif'],
       },
       fontSize: {

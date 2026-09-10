@@ -14,9 +14,9 @@ That arrangement has two distinct failure modes, and this module covers both:
 2. **Invalid.** The generator writes both formats by hand — the PDF from raw objects and a
    byte-offset xref table, the XLSX through a normalized zip. Both are easy to break in ways that
    still produce *stable* bytes, and a determinism check alone will happily confirm two identically
-   broken runs. This actually happened: a bad regex backreference corrupted ``docProps/core.xml``
-   and ``--check`` passed, because both runs corrupted it the same way. So these tests parse the
-   files rather than merely comparing them.
+   broken runs — a bad regex backreference that corrupts ``docProps/core.xml`` sails through
+   ``--check``, because both runs corrupt it the same way. So these tests parse the files rather than
+   merely comparing them.
 
 Bedrock ingestion is the real consumer, and a file it cannot parse is skipped with no error
 surfaced anywhere — the document simply never appears in retrieval results.
@@ -110,13 +110,13 @@ def test_committed_attachments_match_the_generator() -> None:
     committed file that drifts re-uploads, which changes the S3 etag, which retriggers the
     ingestion job for the entire corpus.
 
-    PDFs are compared byte-for-byte; workbooks by content. Asserting byte-identity on the
-    workbooks is NOT possible and was tried: openpyxl serializes XML through ``lxml`` when it is
-    importable and the stdlib ``ElementTree`` otherwise, and the two emit different bytes for the
-    same tree, so the check passed locally (lxml present transitively) and failed on
-    ``python:3.12-slim`` (no lxml) in MR !7's pipeline. Adding lxml to ``requirements-dev.txt``
-    would only move the dependency from "is it installed" to "which version", so the generator
-    compares declared content instead — see ``_normalize_zip`` and ``_xlsx_matches`` there.
+    PDFs are compared byte-for-byte; workbooks by content. Byte-identity on the workbooks is NOT an
+    assertable property: openpyxl serializes XML through ``lxml`` when it is importable and the stdlib
+    ``ElementTree`` otherwise, and the two emit different bytes for the same tree — so such a check
+    passes locally, where lxml arrives transitively, and fails on ``python:3.12-slim``, where it does
+    not. Adding lxml to ``requirements-dev.txt`` would only move the dependency from "is it installed"
+    to "which version", so the generator compares declared content instead — see ``_normalize_zip``
+    and ``_xlsx_matches`` there.
     """
     result = subprocess.run(
         [sys.executable, str(GENERATOR), "--check"],

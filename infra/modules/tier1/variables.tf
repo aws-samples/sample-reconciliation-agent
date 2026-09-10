@@ -71,7 +71,7 @@ variable "ingress_gateway_arn" {
 }
 
 variable "use_ingress_gateway" {
-  description = "Route agent invocations through the ingress gateway (true) or via direct InvokeAgentRuntime (false). The worker falls back to direct on any ingress failure regardless."
+  description = "Route agent invocations through the ingress gateway (true) or via direct InvokeAgentRuntime (false). Takes effect only alongside ingress_gateway_url: true with an empty URL falls straight through to the direct path. A failure proving the request never ran — a signing or URL error, or an HTTP status from the gateway — falls back to a direct invoke, so a misconfigured gateway or policy cannot strand escalated items. A timeout does NOT fall back: the request was delivered and the investigation is still executing, so the worker re-raises rather than starting a second multi-minute investigation of the same item."
   type        = bool
   default     = false
 }

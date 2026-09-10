@@ -48,31 +48,6 @@ output "assets_bucket" {
   value       = aws_s3_bucket.assets.bucket
 }
 
-output "user_pool_id" {
-  description = "Cognito user pool id."
-  value       = aws_cognito_user_pool.this.id
-}
-
-output "user_pool_arn" {
-  description = "Cognito user pool ARN (JWT authorizer issuer)."
-  value       = aws_cognito_user_pool.this.arn
-}
-
-output "user_pool_endpoint" {
-  description = "Cognito user pool endpoint (JWT issuer base)."
-  value       = aws_cognito_user_pool.this.endpoint
-}
-
-output "spa_client_id" {
-  description = "Cognito SPA app client id (public, PKCE)."
-  value       = aws_cognito_user_pool_client.spa.id
-}
-
-output "hosted_ui_domain" {
-  description = "Cognito Hosted UI domain prefix."
-  value       = aws_cognito_user_pool_domain.this.domain
-}
-
 output "lessons_table" {
   description = "Name of the recon-lessons DynamoDB table."
   value       = aws_dynamodb_table.lessons.name

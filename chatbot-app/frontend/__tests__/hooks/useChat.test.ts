@@ -97,14 +97,14 @@ describe("useChat Hook", () => {
   });
 
   describe("Input Message", () => {
-    it("should no longer expose inputMessage (moved to ChatInputArea local state)", async () => {
+    it("does not expose inputMessage — that is ChatInputArea local state", async () => {
       const { result } = renderHook(() => useChat());
 
       await act(async () => {
         await vi.runAllTimersAsync();
       });
 
-      // inputMessage is now local to ChatInputArea, not in useChat
+      // inputMessage is local to ChatInputArea, not part of this hook's surface
       expect(result.current).not.toHaveProperty("inputMessage");
       expect(result.current).not.toHaveProperty("setInputMessage");
     });

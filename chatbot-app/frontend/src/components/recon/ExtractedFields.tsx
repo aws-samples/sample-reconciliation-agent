@@ -11,8 +11,8 @@ import {
 import type { ExtractedSection } from "@/lib/reconApi";
 
 // Every field the pipeline read out of a document, each with the confidence it was read at. The
-// Documents tab used to show only the tracking record, which carries a count of low-confidence
-// attributes and the names of the ones that tripped -- so an operator could see that three fields were
+// tracking record alone is not enough for the Documents tab: it carries a count of low-confidence
+// attributes and the names of the ones that tripped, so an operator sees that three fields were
 // doubtful and never what any of the other twenty said.
 //
 // Rendered as a flat list of paths rather than as a nested tree, and that is the whole point: a

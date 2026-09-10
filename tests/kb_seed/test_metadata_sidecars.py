@@ -505,7 +505,7 @@ def test_no_sidecar_declares_a_boolean_attribute(document: Path) -> None:
 
     ⚠️ This is not style. A single BOOLEAN attribute in a ``.metadata.json`` sidecar makes the
     MANAGED knowledge base's S3 connector discard the document entirely, and every signal you would
-    look at lies about it (verified live 2026-08-26 against KB 50K9JVEJTH):
+    look at lies about it:
 
     * the ingestion job reports ``COMPLETE``;
     * ``numberOfDocumentsFailed`` can read ``0`` while documents are missing;
@@ -513,10 +513,10 @@ def test_no_sidecar_declares_a_boolean_attribute(document: Path) -> None:
     * ``ListKnowledgeBaseDocuments`` does not list the document AT ALL -- not even as ``FAILED``,
       so there is no ``statusReason`` to read.
 
-    The cause was isolated by uploading the same email body twice, with sidecars differing only in
-    the presence of one BOOLEAN attribute: the one without it indexed, the one with it vanished.
-    BOOLEAN is nevertheless *documented* as a supported sidecar type, so nothing but this test will
-    stop it coming back. Model a two-valued attribute as a STRING of ``"true"`` / ``"false"``.
+    Isolating it takes two uploads of the same email body whose sidecars differ only in the presence
+    of one BOOLEAN attribute: the one without it indexes, the one with it vanishes. BOOLEAN is
+    nevertheless *documented* as a supported sidecar type, so nothing but this test will stop it
+    coming back. Model a two-valued attribute as a STRING of ``"true"`` / ``"false"``.
 
     :param document: path to the corpus document.
     """

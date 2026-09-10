@@ -127,8 +127,8 @@ def wait_gateway_target(*, gateway_identifier: str, target_id: str, **_: Any) ->
 
     That matters because AgentCore Policy validates every Cedar action name against the LIVE tool
     surface. Naming an action whose tool is not yet visible fails with "unrecognized action" and
-    leaves the policy in UPDATE_FAILED — and Cedar fails closed, so one broken read policy costs
-    the agent EVERY read tool, not just the new one. That exact failure hit this repo on 2026-08-08.
+    leaves the policy in UPDATE_FAILED — and Cedar fails closed, so one broken read policy costs the
+    agent EVERY read tool, not just the one being added.
 
     :param gateway_identifier: gateway id the target belongs to.
     :param target_id: the target id to wait on.
@@ -200,40 +200,6 @@ def start_kb_ingestion(*, knowledge_base_id: str, data_source_id: str, **_: Any)
     return counts
 
 
-def patch_cognito_callbacks(
-    *, user_pool_id: str, client_id: str, callback_urls: list[str], logout_urls: list[str], **_: Any
-) -> dict:
-    """Point the Cognito SPA client's OAuth callback/logout URLs at the frontend distribution.
-
-    ⚠️ This is a cycle-breaker, not a convenience. The foundation module owns the user pool client
-    and the frontend module owns the distribution whose domain the callback must contain, so
-    declaring the URLs on the client would make foundation depend on frontend and frontend depend on
-    foundation. Patching afterwards keeps the module graph acyclic.
-
-    The remaining arguments are re-sent verbatim because UpdateUserPoolClient REPLACES the client's
-    configuration rather than merging it: omitting the auth flows or supported providers would
-    silently strip them.
-
-    :param user_pool_id: Cognito user pool id.
-    :param client_id: SPA app client id.
-    :param callback_urls: full OAuth redirect URIs.
-    :param logout_urls: full logout redirect URIs.
-    :returns: {"client_id": ...}.
-    """
-    boto3.client("cognito-idp").update_user_pool_client(
-        UserPoolId=user_pool_id,
-        ClientId=client_id,
-        AllowedOAuthFlows=["code"],
-        AllowedOAuthScopes=["openid", "email", "profile"],
-        AllowedOAuthFlowsUserPoolClient=True,
-        SupportedIdentityProviders=["COGNITO"],
-        ExplicitAuthFlows=["ALLOW_REFRESH_TOKEN_AUTH", "ALLOW_USER_SRP_AUTH"],
-        CallbackURLs=callback_urls,
-        LogoutURLs=logout_urls,
-    )
-    return {"client_id": client_id}
-
-
 def push_editable_seeds(*, bucket: str, seeds: dict[str, dict], **_: Any) -> dict:
     """Reconcile the UI-editable S3 seed objects against the repo content.
 
@@ -260,7 +226,6 @@ ACTIONS: dict[str, Callable[..., dict]] = {
     "wait_kb_data_source": wait_kb_data_source,
     "wait_gateway_target": wait_gateway_target,
     "start_kb_ingestion": start_kb_ingestion,
-    "patch_cognito_callbacks": patch_cognito_callbacks,
     "push_editable_seeds": push_editable_seeds,
 }
 

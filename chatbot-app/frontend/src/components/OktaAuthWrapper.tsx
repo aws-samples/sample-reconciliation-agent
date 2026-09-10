@@ -127,8 +127,8 @@ export default function OktaAuthWrapper({
       return;
     }
     // Nothing here can cancel an in-flight SDK call, so this timer does not abort the handshake.
-    // What it does is guarantee the UI always reaches a state that explains itself: the reported
-    // failure was a spinner that never resolved, and any future hang in the SDK has the same shape.
+    // What it does is guarantee the UI always reaches a state that explains itself. Without it, any
+    // hang inside the SDK presents as a spinner that never resolves and says nothing.
     let decided = false;
     const stallTimer = window.setTimeout(() => {
       if (decided) return;
@@ -150,8 +150,8 @@ export default function OktaAuthWrapper({
         if (await oktaAuth.isAuthenticated()) {
           // Arms the token manager's expiry timers. Nothing else does: the SDK sets them up in
           // `start()` only (see core/mixin.ts), so without this call `tokenManager` never emits
-          // `expired`, the listener below never fires, and `autoRemove` never drops a dead token —
-          // the app's only notice of an expired session was a 401 from the BFF.
+          // `expired`, the listener below never fires, `autoRemove` never drops a dead token, and
+          // the app's only notice of an expired session is a 401 from the BFF.
           await oktaAuth.start();
           decided = true;
           setAuthed(true);
@@ -204,8 +204,8 @@ export default function OktaAuthWrapper({
       reauthenticate("expired")
         .then((started) => {
           if (started) return;
-          // The redirect was refused (see reauthenticate's loop guard). Say so; do not sit on a
-          // spinner, which is the failure mode this whole change exists to remove.
+          // The redirect was refused (see reauthenticate's loop guard). Say so rather than sitting
+          // on a spinner that never explains itself.
           setError(
             "Your session expired, and signing in again did not fix it. " +
               "The API may be rejecting valid tokens — check the browser console.",
@@ -240,17 +240,17 @@ export default function OktaAuthWrapper({
     };
   }, [isClient, authed]);
 
-  // Pre-hydration renders the waiting screen, NOT the children. Rendering children here mounted
-  // the whole protected app before auth was known: their effects fired immediately, so every page
-  // load made an API call with whatever stale token was in storage. Those were the two 401s that
-  // came with the stuck-spinner report, and they are also a flash of protected UI to a signed-out
-  // user. The server and the first client render agree because both render <SigningIn />.
+  // Pre-hydration renders the waiting screen, NOT the children. Rendering children here mounts the
+  // whole protected app before auth is known: their effects fire immediately, so every page load
+  // makes an API call with whatever stale token is in storage — a pair of 401s, plus a flash of
+  // protected UI to a signed-out user. The server and the first client render agree because both
+  // render <SigningIn />.
   if (!isClient) return <SigningIn />;
   if (error) {
-    // Live QA (P0-1) hit exactly this path and saw only a spinner: sign-in had failed because the
-    // CloudFront domain had changed and the resulting redirect URI was no longer registered on the
-    // Okta app. Naming the URI turns a 30-minute investigation into a copy-paste, so show it —
-    // it is a public callback URL, not a secret.
+    // The common cause of reaching here is a redirect URI that is not registered on the Okta app,
+    // which happens whenever the CloudFront domain changes. Without the URI on screen the symptom is
+    // a bare spinner; naming it turns a long investigation into a copy-paste, so show it — it is a
+    // public callback URL, not a secret.
     return (
       <div className="min-h-screen flex items-center justify-center gradient-subtle p-6">
         <div className="max-w-xl flex flex-col gap-3 text-center">

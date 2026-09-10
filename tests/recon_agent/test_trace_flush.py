@@ -6,11 +6,11 @@ timer, and AgentCore reclaims the container the moment the entrypoint returns �
 investigation returns with nearly every span still queued and loses them, while a LONG one looks
 perfectly healthy because the batch timer fired several times mid-run.
 
-Observed live on 2026-09-04: runtime sessions with 2516, 115 and 88 spans sitting alongside sessions
-with exactly **1**. Online evaluation groups spans by session and cannot score a single span, so
-those cases read "No evaluation recorded for this case" indefinitely — while the evaluation config,
-its execution role, its data source and its evaluators were all correct the entire time. Nothing
-anywhere reports the difference, which is precisely why deleting the flush would go unnoticed.
+What that looks like live: runtime sessions with thousands of spans sitting alongside sessions with
+exactly **1**. Online evaluation groups spans by session and cannot score a single span, so
+those cases read "No evaluation recorded for this case" indefinitely — with the evaluation config, its
+execution role, its data source and its evaluators all correct throughout. Nothing anywhere reports the
+difference, which is precisely why deleting the flush would go unnoticed.
 
 The tests below therefore pin three things: that the flush is actually requested, that a missing
 `force_flush` (no instrumentation, as in local runs and this suite) is treated as normal rather than
