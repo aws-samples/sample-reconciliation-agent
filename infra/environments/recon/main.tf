@@ -820,8 +820,12 @@ module "idp_hook" {
   # items, cases or audit — an extracted document must not create a case.
   notices_table     = module.notice_store.notices_table_name
   notices_table_arn = module.notice_store.notices_table_arn
-  assets_bucket     = module.foundation.assets_bucket
-  assets_bucket_arn = module.foundation.assets_bucket_arn
+  # The inverted index over every extracted field, written from the same extraction in the same
+  # invocation. See the notice_search table in modules/notice-store for why it is a separate table.
+  notice_search_table     = module.notice_store.notice_search_table_name
+  notice_search_table_arn = module.notice_store.notice_search_table_arn
+  assets_bucket           = module.foundation.assets_bucket
+  assets_bucket_arn       = module.foundation.assets_bucket_arn
   # The completion event recon listens for. Empty by default, which creates no rule and leaves the
   # hook unreachable — so an environment with an IDP deployment MUST set this.
   idp_state_machine_arn  = var.idp_state_machine_arn

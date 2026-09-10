@@ -190,8 +190,8 @@ export const RECON_SAMPLES: ReconSamplePayload[] = [
     label: "Scenario 5 — notice states the facility total only",
     expectation:
       "Bank cash arrived and the ledger has nothing against it, so the agent looks for the notice " +
-      "that explains it — and the only candidate carries amount_type=GLOBAL_ONLY: a facility-wide " +
-      "418,255.00 with no lender-level share, because the agent bank issues allocations separately. " +
+      "that explains it — and the only candidate states a facility-wide 418,255.00 with no " +
+      "lender-level share at all, because the agent bank issues allocations separately. " +
       "`record-match-review` forbids computing the share, so fund_level_amount_available is NOT " +
       "satisfied and confidence caps at MEDIUM. The missing figure exists nowhere internal, which " +
       "makes an `email_draft` asking the agent bank for the lender-level allocation the resolution — " +

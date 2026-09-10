@@ -299,12 +299,34 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="report the change and write nothing",
     )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="write nothing and EXIT NON-ZERO if the live config differs from the artifact",
+    )
     args = parser.parse_args(argv)
 
     classes = load_classes(path=args.classes)
     session = boto3.Session(profile_name=args.profile, region_name=args.region)
     table = session.resource("dynamodb").Table(args.table)
-    push(table=table, config_name=args.config_name, classes=classes, dry_run=args.dry_run)
+    # `--check` is `--dry-run` plus an exit code, so the drift report is the SAME diff a push would
+    # apply -- a second implementation could disagree with the thing it is guarding.
+    drifted = push(
+        table=table,
+        config_name=args.config_name,
+        classes=classes,
+        dry_run=args.dry_run or args.check,
+    )
+    if args.check and drifted:
+        print(
+            "\nDRIFT: the deployed configuration's classes are not the reviewed artifact.\n"
+            "Extraction is running against schemas nobody reviewed, and a field key that differs "
+            "produces PERFECT extraction that lands nowhere: the hook reads the three index keys by "
+            "literal name, so a rename makes the notice unretrievable, and every other field arrives "
+            "under a name no reader asks for. See data/idp-extraction-config/README.md.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

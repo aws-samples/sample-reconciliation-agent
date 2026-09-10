@@ -26,6 +26,7 @@ from backend.idp_hook.idp_output import IdpOutputReader
 from backend.idp_hook.mapper import idp_event_to_notice
 from backend.idp_hook.tracking import build_tracking_snapshot
 from backend.recon_core.notice_derive import PARSE_METHOD_IDP
+from backend.recon_core.notice_index import NoticeSearchIndex, flatten_sections
 from backend.recon_core.notices import NoticeStore
 
 logger = logging.getLogger()
@@ -220,5 +221,25 @@ def handle(event, _context) -> dict:
     # os.environ[...] not .get(..., "recon-notices"): a misconfigured hook must fail its invocation
     # and land in the DLQ, not silently write to a table name that is only right in dev.
     NoticeStore(table_name=os.environ["NOTICES_TABLE"]).put(notice=notice)
-    logger.info("idp-hook wrote notice_id=%s class=%s", notice.notice_id, notice.notice_class)
-    return {"written": 1, "notice_id": notice.notice_id}
+
+    # The search index, from the SAME extraction in the same invocation. Written after the notice on
+    # purpose: a posting pointing at a notice that does not exist yet would let a search return an id
+    # the caller cannot then read, whereas a notice with no postings yet is merely not findable by
+    # field for a moment.
+    #
+    # A failure here does NOT swallow: it raises, EventBridge retries, and `reindex` is idempotent
+    # (delete-then-write keyed on (field, value)), so the retry converges rather than duplicating.
+    # Degrading to "notice written, index skipped" would be worse than failing -- the notice would be
+    # invisible to every field search while looking perfectly healthy in the table and on the
+    # Documents tab.
+    indexed = NoticeSearchIndex(table_name=os.environ["NOTICE_SEARCH_TABLE"]).reindex(
+        notice_id=notice.notice_id,
+        fields=flatten_sections(notice.idp_sections),
+    )
+    logger.info(
+        "idp-hook wrote notice_id=%s class=%s postings=%d",
+        notice.notice_id,
+        notice.notice_class,
+        indexed,
+    )
+    return {"written": 1, "notice_id": notice.notice_id, "postings": indexed}

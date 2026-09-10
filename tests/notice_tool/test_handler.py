@@ -24,8 +24,31 @@ def _notices_table_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NOTICES_TABLE", "recon-notices")
 
 
+def _embedded(**fields: str) -> list[dict]:
+    """One embedded section carrying the given extracted fields and nothing promoted.
+
+    :param fields: the extracted field values, as the extractor emits them (strings).
+    :returns: an `idp_sections` list with a single section.
+    """
+    return [
+        {
+            "section_id": "1",
+            "classification": "wire_confirmation",
+            "page_ids": [1],
+            "fields": dict(fields),
+            "confidences": [],
+            "mean_confidence": None,
+            "alert_count": 0,
+        }
+    ]
+
+
 def _seed() -> None:
     """Write two notices of different classes: one with a facility, one whose class has none.
+
+    `facility` and `amount` go in the embedded extraction, which is where every extracted field lives --
+    only the index keys are attributes. That is also what makes these fixtures exercise the resolution
+    path the agent's filters actually take.
 
     :returns: None.
     """
@@ -37,8 +60,7 @@ def _seed() -> None:
             counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.",
             notice_date="2026-03-02",
             reference="WIRE-20260302-EVG",
-            facility="CINDERMOOR LOGISTICS TL-A $160MM",
-            amount=Decimal("9640.18"),
+            idp_sections=_embedded(facility="CINDERMOOR LOGISTICS TL-A $160MM", amount="9640.18"),
             extraction_confidence=Decimal("0.94"),
             confidence_alert_count=0,
         )
@@ -49,7 +71,7 @@ def _seed() -> None:
             notice_class="capital_call",  # this class extracts no facility at all
             counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.",
             notice_date="2026-03-05",
-            amount=Decimal("400000.00"),
+            idp_sections=_embedded(amount="400000.00"),
             extraction_confidence=Decimal("0.81"),
             confidence_alert_count=2,
         )
@@ -161,7 +183,7 @@ def test_a_row_without_an_activity_type_is_annotated_not_excluded() -> None:
         notice=Notice(
             notice_id="NTC-INT",
             notice_class="wire_confirmation",
-            activity_type="Interest",
+            idp_sections=_embedded(activity_type="Interest"),
             **common,
         )
     )
@@ -172,6 +194,265 @@ def test_a_row_without_an_activity_type_is_annotated_not_excluded() -> None:
     )
     assert {row["notice_id"] for row in out["rows"]} == {"NTC-AGG"}
     assert out["rows"][0]["fields_unavailable"] == ["activity_type"]
+
+
+@mock_aws
+def test_a_dateless_notice_is_annotated_not_silently_excluded() -> None:
+    """The regression that would otherwise turn a loud dead-letter into an invisible row.
+
+    `notice_date` is optional, so a dateless notice is stored. Comparing the bounds against a defaulted
+    `""` would sort it below every ISO date, so a `date_from` bound alone would drop every such row from
+    every bounded search with nothing reporting it — a disappearance, which is worse than a dead-letter
+    because there is no error either.
+
+    Two halves, and the second is what makes the row safe to return: it comes back, AND it comes back
+    carrying `notice_date` in `fields_unavailable`, so the agent knows the date window it asked about
+    was never actually checked against this row.
+    """
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    common = {
+        "counterparty": "CINDERMOOR LOGISTICS HOLDINGS INC.",
+        "extraction_confidence": Decimal("0.9"),
+        "confidence_alert_count": 0,
+    }
+    # Dateless: reachable only by the scan path while counterparty-index still keys on notice_date,
+    # because DynamoDB drops an item with no range key from that index. Asserted via the scan path.
+    store.put(notice=Notice(notice_id="NTC-NODATE", notice_class="incomplete_notice", **common))
+    store.put(
+        notice=Notice(
+            notice_id="NTC-DATED",
+            notice_class="wire_confirmation",
+            notice_date="2026-03-02",
+            **common,
+        )
+    )
+
+    out = handle({"date_from": "2026-03-01", "date_to": "2026-03-31"}, None)
+
+    by_id = {row["notice_id"]: row for row in out["rows"]}
+    assert "NTC-NODATE" in by_id, "a dateless notice was silently dropped from a bounded search"
+    assert by_id["NTC-NODATE"]["fields_unavailable"] == ["notice_date"]
+    # The dated row is inside the window, so nothing is unavailable about it.
+    assert by_id["NTC-DATED"]["fields_unavailable"] == []
+    assert "notice_date" in out["matched_on"]
+
+
+@mock_aws
+def test_a_dated_notice_outside_the_window_is_still_excluded() -> None:
+    """The other half of the pair: tolerating an ABSENT date must not tolerate a WRONG one.
+
+    Guards the obvious over-correction — replacing the unconditional comparison with one that skips
+    whenever the value is falsy, or dropping the bounds entirely. A notice that carries a date outside
+    the window is a real mismatch, not an absence, and must not come back.
+    """
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    store.put(
+        notice=Notice(
+            notice_id="NTC-OLD",
+            notice_class="wire_confirmation",
+            counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.",
+            notice_date="2025-01-15",
+            extraction_confidence=Decimal("0.9"),
+            confidence_alert_count=0,
+        )
+    )
+
+    out = handle({"date_from": "2026-03-01", "date_to": "2026-03-31"}, None)
+
+    assert out["rows"] == []
+
+
+@mock_aws
+def test_a_field_only_in_idp_sections_is_filterable() -> None:
+    """The point of dynamic resolution: no allowlist, and no code change per field.
+
+    `cusip` is not a Notice attribute and appears in no filter list — it lives only inside
+    `idp_sections[].fields`. Filtering on it must select correctly, which is what proves a field the
+    pipeline starts extracting tomorrow is searchable tomorrow with no edit here.
+    """
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    common = {
+        "notice_class": "wire_confirmation",
+        "counterparty": "CINDERMOOR LOGISTICS HOLDINGS INC.",
+        "notice_date": "2026-03-02",
+        "extraction_confidence": Decimal("0.9"),
+        "confidence_alert_count": 0,
+    }
+    store.put(notice=Notice(notice_id="NTC-A", idp_sections=_embedded(cusip="12345AB6"), **common))
+    store.put(notice=Notice(notice_id="NTC-B", idp_sections=_embedded(cusip="99999ZZ9"), **common))
+
+    out = handle({"counterparty": common["counterparty"], "cusip": "12345AB6"}, None)
+
+    assert {r["notice_id"] for r in out["rows"]} == {"NTC-A"}
+    # And it must NOT be reported unavailable: the row carries it, just not at the top level. Testing
+    # `name not in raw` would call it unavailable and the agent would stop looking for it.
+    assert out["rows"][0]["fields_unavailable"] == []
+    assert "cusip" in out["matched_on"]
+
+
+@mock_aws
+def test_the_amount_band_resolves_from_idp_sections() -> None:
+    """The tolerance band has to work on an amount that is only in the extraction.
+
+    The extraction stores what the document printed, as a STRING, so this also pins the numeric coercion
+    in `_as_decimal`.
+    """
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    common = {
+        "notice_class": "wire_confirmation",
+        "counterparty": "MISTFELL FOODS CORP.",
+        "notice_date": "2026-03-02",
+        "extraction_confidence": Decimal("0.9"),
+        "confidence_alert_count": 0,
+    }
+    store.put(notice=Notice(notice_id="NTC-IN", idp_sections=_embedded(amount="1000.25"), **common))
+    store.put(
+        notice=Notice(notice_id="NTC-OUT", idp_sections=_embedded(amount="8500.00"), **common)
+    )
+
+    out = handle(
+        {
+            "counterparty": common["counterparty"],
+            "amount": "1000.00",
+            "amount_tolerance": "0.50",
+        },
+        None,
+    )
+
+    assert {r["notice_id"] for r in out["rows"]} == {"NTC-IN"}
+
+
+@mock_aws
+def test_a_field_carried_nowhere_is_still_annotated_not_excluded() -> None:
+    """Dynamic resolution must not lose the class-dependent contract it replaced.
+
+    The row carries `cusip` neither top-level nor embedded, so it comes back annotated rather than
+    filtered out — the same guarantee the old `CLASS_DEPENDENT_FIELDS` allowlist gave, now applied to
+    every field name instead of six.
+    """
+    _make_notices_table()
+    NoticeStore(table_name="recon-notices").put(
+        notice=Notice(
+            notice_id="NTC-BARE",
+            notice_class="incomplete_notice",
+            counterparty="PARTIAL FAX COVER LLP",
+            notice_date="2026-03-02",
+            extraction_confidence=Decimal("0.9"),
+            confidence_alert_count=0,
+        )
+    )
+
+    out = handle({"counterparty": "PARTIAL FAX COVER LLP", "cusip": "12345AB6"}, None)
+
+    assert [r["notice_id"] for r in out["rows"]] == ["NTC-BARE"]
+    assert out["rows"][0]["fields_unavailable"] == ["cusip"]
+
+
+@mock_aws
+def test_a_promoted_attribute_wins_over_the_embedded_copy() -> None:
+    """An index key exists as both an attribute and an extracted field, and the attribute must win.
+
+    The attribute is the value the GSI was built from and the one the mapper normalised. A filter that
+    matched the embedded copy while the index disagreed would make retrieval depend on which access path
+    the query happened to take.
+    """
+    _make_notices_table()
+    NoticeStore(table_name="recon-notices").put(
+        notice=Notice(
+            notice_id="NTC-BOTH",
+            notice_class="wire_confirmation",
+            counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.",
+            notice_date="2026-03-02",
+            reference="WIRE-1",
+            idp_sections=_embedded(fund="Direct Lending Fund I"),
+            extraction_confidence=Decimal("0.9"),
+            confidence_alert_count=0,
+        )
+    )
+
+    hit = handle({"fund": "Direct Lending Fund I"}, None)
+    miss = handle({"fund": "A DIFFERENT FUND"}, None)
+
+    assert [r["notice_id"] for r in hit["rows"]] == ["NTC-BOTH"]
+    assert miss["rows"] == []
+
+
+@mock_aws
+def test_per_field_confidences_are_not_returned_to_the_model() -> None:
+    """The sections the tool returns carry the content and drop the pipeline bookkeeping.
+
+    `confidences` is 72% of `idp_sections` and 39% of a whole row on the live corpus, and the model cannot
+    act on a per-field score: what gates the agent is the notice-level extraction_confidence /
+    confidence_alert_count pair, which is the same number the gateway interceptor refuses ledger writes
+    on. Unlike `idp_pages` this cannot be withheld wholesale -- `fields` IS the notice's payload now that
+    extracted content is not a top-level attribute -- so it is projected instead.
+    """
+    _make_notices_table()
+    section = {
+        "section_id": "1",
+        "classification": "wire_confirmation",
+        "page_ids": [1, 2],
+        "fields": {"amount": "9640.18", "cusip": "12345AB6"},
+        "confidences": [
+            {"field": "amount", "confidence": Decimal("0.95"), "threshold": Decimal("0.8")}
+        ],
+        "mean_confidence": Decimal("0.95"),
+        "alert_count": 0,
+    }
+    NoticeStore(table_name="recon-notices").put(
+        notice=Notice(
+            notice_id="NTC-TRIM",
+            notice_class="wire_confirmation",
+            counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.",
+            notice_date="2026-03-02",
+            idp_sections=[section],
+            extraction_confidence=Decimal("0.94"),
+            confidence_alert_count=0,
+        )
+    )
+
+    out = handle({"counterparty": "CINDERMOOR LOGISTICS HOLDINGS INC."}, None)
+
+    returned = out["rows"][0]["idp_sections"][0]
+    assert set(returned) == {"classification", "fields"}
+    assert returned["fields"] == {"amount": "9640.18", "cusip": "12345AB6"}
+    # The notice-level pair the agent IS gated on survives.
+    assert out["rows"][0]["extraction_confidence"] == Decimal("0.94")
+    assert out["rows"][0]["confidence_alert_count"] == 0
+
+
+@mock_aws
+def test_trimming_sections_does_not_change_what_matches() -> None:
+    """The projection is applied to the OUTPUT row only, never to what the filters read.
+
+    Trimming `raw` before `_matches`/`_unavailable` ran would silently change which rows come back and
+    what is reported unavailable -- a filter on a field the projection dropped would find nothing and be
+    annotated as not carried, on a row that carries it.
+    """
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    common = {
+        "notice_class": "wire_confirmation",
+        "counterparty": "MISTFELL FOODS CORP.",
+        "notice_date": "2026-03-02",
+        "extraction_confidence": Decimal("0.9"),
+        "confidence_alert_count": 0,
+    }
+    store.put(
+        notice=Notice(notice_id="NTC-HIT", idp_sections=_embedded(cusip="12345AB6"), **common)
+    )
+    store.put(
+        notice=Notice(notice_id="NTC-MISS", idp_sections=_embedded(cusip="99999ZZ9"), **common)
+    )
+
+    out = handle({"counterparty": "MISTFELL FOODS CORP.", "cusip": "12345AB6"}, None)
+
+    assert [r["notice_id"] for r in out["rows"]] == ["NTC-HIT"]
+    assert out["rows"][0]["fields_unavailable"] == []
 
 
 @mock_aws

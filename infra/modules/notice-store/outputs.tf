@@ -22,3 +22,13 @@ output "notice_tool_lambda_name" {
   description = "Name of the search_notices query Lambda, for the gateway invoke permission."
   value       = aws_lambda_function.notice_query.function_name
 }
+
+output "notice_search_table_name" {
+  description = "Name of the recon-notice-search inverted-index table. The IDP hook writes it and the search_notices Lambda reads it; both take the name from here rather than composing it, so the module that creates the table owns its name."
+  value       = aws_dynamodb_table.notice_search.name
+}
+
+output "notice_search_table_arn" {
+  description = "ARN of the recon-notice-search table, for the IDP hook's write grant. No index ARN companion is needed -- the table has no GSI, because it IS the index and is only ever read by its own keys."
+  value       = aws_dynamodb_table.notice_search.arn
+}

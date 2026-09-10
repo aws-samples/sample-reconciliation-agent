@@ -7,7 +7,12 @@ NAME, so the two drifting apart fails in a way nothing reports:
 * a key the mapper reads but the contract omits — nobody is asked to extract it, and the field arrives
   as ``fields_unavailable``, which the agent reads as "this notice class does not carry that field"
   rather than as a gap;
-* a key the contract demands but the mapper ignores — extraction work that no consumer reads.
+* a key the mapper PROMOTES that nothing pins — an attribute recon must keep in step with a
+  configuration in another repository, bought for no reason.
+
+Note which direction is NOT guarded: a contract key the mapper does not read is fine, because
+``idp_sections`` carries every extracted field verbatim and it still reaches its consumer. What needs
+guarding is GROWTH of the promoted set, not gaps in it.
 
 ⚠️ The mapper's key set is derived with ``ast``, deliberately NOT with a regex over ``_opt(fields, …)``.
 Four keys are read outside that call shape, and they are the load-bearing ones::
@@ -27,6 +32,8 @@ import re
 from pathlib import Path
 
 import pytest
+
+from backend.recon_core.notices import PROMOTED_EXTRACTED_FIELDS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONTRACT = REPO_ROOT / "data" / "input" / "IDP-EXTRACTION-REQUIREMENTS.md"
@@ -156,22 +163,58 @@ def test_the_mapper_reads_the_load_bearing_keys() -> None:
     )
 
 
-def test_contract_and_mapper_agree_on_field_keys() -> None:
-    """Neither side may carry a field key the other does not know about."""
-    documented = _first_column(_section("2. Field keys"))
-    read = _mapper_field_keys()
-    roadmap = _roadmap_keys()
+def test_the_mapper_promotes_nothing_the_contract_does_not_ask_for() -> None:
+    """A promoted key the contract omits is the silent-false-absence bug, and still fails here.
 
-    undocumented = read - documented
+    This direction of the old two-way parity check survives unchanged: nobody is asked to extract the
+    key, so `_opt` returns None, the row stores the field as ABSENT, and the agent reads "this notice
+    class does not carry that field" rather than "extraction was never configured for it".
+    """
+    documented = _first_column(_section("2. Field keys"))
+    undocumented = _mapper_field_keys() - documented
     assert not undocumented, (
         f"the mapper reads {sorted(undocumented)}, which the contract does not ask anyone to "
         "extract — the field will arrive as fields_unavailable and read as 'not carried by this class'"
     )
 
-    unread = documented - read - roadmap
-    assert not unread, (
-        f"the contract requires {sorted(unread)}, which nothing reads — either the mapper is missing "
-        "it or it belongs under '## Roadmap'"
+
+def test_the_mapper_promotes_only_the_pinned_keys() -> None:
+    """The promoted list is CLOSED, and this is what closes it.
+
+    ⚠️ Do NOT add an assertion that every contract key is READ by the mapper. `idp_sections` carries
+    every extracted field verbatim, so an unpromoted contract key is delivered dynamically and needs no
+    code change; demanding a read would force a model attribute for every new contract field, which is
+    exactly the coupling this design avoids.
+
+    What needs guarding is that the promoted set does not GROW. Each promotion is a name recon must keep
+    in step with a configuration in another repository, and it is only worth that cost when something
+    cannot read a nested map — which today means a DynamoDB index key attribute and nothing else.
+    """
+    expected = set(PROMOTED_EXTRACTED_FIELDS)
+    read = _mapper_field_keys()
+
+    extra = read - expected
+    assert not extra, (
+        f"the mapper promoted {sorted(extra)} to a Notice attribute, but nothing pins those names: a "
+        "field that is neither an index key nor a search_notices filter field reaches its reader "
+        "through idp_sections[].fields with no code change. See the Notice model's closed-list comment."
+    )
+    missing = expected - read
+    assert not missing, (
+        f"the mapper no longer reads {sorted(missing)}, which IS pinned — an index key cannot live in "
+        "a nested map -- see PROMOTED_EXTRACTED_FIELDS in backend/recon_core/notices.py"
+    )
+
+
+def test_the_contract_documents_every_pinned_key() -> None:
+    """The pinned names are the ones whose drift is unrecoverable, so the contract must name them."""
+    documented = _first_column(_section("2. Field keys"))
+    roadmap = _roadmap_keys()
+    pinned = set(PROMOTED_EXTRACTED_FIELDS) - roadmap
+    undocumented = pinned - documented
+    assert not undocumented, (
+        f"the contract does not ask for {sorted(undocumented)}, which recon pins by literal name — a "
+        "configuration that omits one produces a notice the agent cannot retrieve or match on"
     )
 
 

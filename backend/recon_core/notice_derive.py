@@ -1,10 +1,8 @@
 """Pure derivations over a notice's own fields. No I/O, no AWS, no model imports.
 
-Three functions, each of which exists because the alternative is a judgement the model would otherwise
+Two functions, each of which exists because the alternative is a judgement the model would otherwise
 make in a prompt:
 
-* :func:`derive_amount_type` — which amount a notice actually supports, so "fund-level validation is
-  unavailable" is a recorded fact rather than something a reader has to infer from a missing field;
 * :func:`is_source_finalized` — whether the SOURCE considers the record final, which is one of the
   evidence-status conditions a candidate is judged on;
 * :func:`excel_serial_to_iso` — the Excel-serial date conversion, written once and tested, so no caller
@@ -12,17 +10,18 @@ make in a prompt:
 
 They live apart from ``notices.py`` on purpose: that module is the store, and a store that also decides
 things is a module with two reasons to change.
+
+⚠️ Do NOT add a derivation over the amount fields here. Classifying which amount a notice supports
+means reading names like ``global_amount`` and ``fee_amount`` off the extraction by literal key, and
+those names belong to the document pipeline's configuration — a rename there makes the classification
+silently wrong rather than loud. The figures are carried verbatim in ``Notice.idp_sections[].fields``,
+and a reader that needs the distinction takes it from there, where the names are the extractor's own.
+
+The provenance constants below are fine by that rule: they are decided by whichever component writes
+the row, never extracted from a document.
 """
 
 from datetime import date, timedelta
-from decimal import Decimal
-
-# What `amount_type` may be. FEE and FUND_SPECIFIC mean a fund-level amount exists; GLOBAL_ONLY means
-# one does not and the UI must say so (design AM2); UNKNOWN means the notice carries no amount at all.
-AMOUNT_TYPE_FEE = "FEE"
-AMOUNT_TYPE_FUND_SPECIFIC = "FUND_SPECIFIC"
-AMOUNT_TYPE_GLOBAL_ONLY = "GLOBAL_ONLY"
-AMOUNT_TYPE_UNKNOWN = "UNKNOWN"
 
 # The source system whose finalisation status means anything. Everything on the document path is
 # "OTHER", which has no notion of being finalised by the source.
@@ -54,34 +53,6 @@ _PHANTOM_SERIAL = 60
 # date this platform will see, and its point is to reject a value that is really an amount or an id.
 _MIN_SERIAL = 1
 _MAX_SERIAL = 100000
-
-
-def derive_amount_type(
-    *,
-    amount: Decimal | None,
-    global_amount: Decimal | None,
-    fee_amount: Decimal | None,
-) -> str:
-    """Classify which amount a notice supports, in priority order.
-
-    The ORDER is load-bearing and is the whole content of this function. A commitment-fee notice that
-    also happens to carry a share amount is still a fee notice — fee breaks validate against
-    ``fee_amount`` (AM4), so classifying it as ``FUND_SPECIFIC`` would point the comparison at the wrong
-    number. Likewise a notice carrying both a share and a global total is ``FUND_SPECIFIC``: the share
-    is the fund-attributable figure and the total is context (AM1).
-
-    :param amount: the fund-attributable amount, or None when the document supplies no share.
-    :param global_amount: the facility-wide total, or None.
-    :param fee_amount: the fee amount, or None.
-    :returns: one of ``FEE``, ``FUND_SPECIFIC``, ``GLOBAL_ONLY``, ``UNKNOWN``.
-    """
-    if fee_amount is not None:
-        return AMOUNT_TYPE_FEE
-    if amount is not None:
-        return AMOUNT_TYPE_FUND_SPECIFIC
-    if global_amount is not None:
-        return AMOUNT_TYPE_GLOBAL_ONLY
-    return AMOUNT_TYPE_UNKNOWN
 
 
 def is_source_finalized(*, source_system: str | None, source_status_raw: str | None) -> bool:

@@ -9,13 +9,19 @@ and is surfaced to the agent as ``fields_unavailable``, while ``""`` means "extr
 Collapsing the two is fail-quiet behaviour: a field the class never carries would become
 indistinguishable from one the document left blank.
 
-**The two amount fields are two different quantities and must never be merged.** ``amount`` is the
-**fund-attributable** amount — the recipient's share — and is ABSENT when the document supplies
-only a facility-wide total. ``global_amount`` carries that total. Agent-bank notices print them side by side
-(``Global Amount`` / ``Your Share``), and a notice-wide figure is never valid for fund-level validation.
-Absence is what makes that visible: an absent ``amount`` reaches the agent as ``fields_unavailable``, so
-the case reads "fund-level amount validation unavailable" rather than silently comparing the wrong two
-numbers.
+**Extracted content does not live in this model.** The attributes below are recon's own bookkeeping plus
+:data:`PROMOTED_EXTRACTED_FIELDS`, and nothing else. Everything the extractor read is carried verbatim
+in ``idp_sections[].fields``, under the extractor's own key names, which is why a field the pipeline
+adds or renames needs no change here. ``search_notices`` resolves a filter against that map, so an
+extracted field is queryable without being an attribute.
+
+**Amounts are a case where that matters.** Agent-bank notices print a facility-wide total beside the
+recipient's share (``Global Amount`` / ``Your Share``), and the facility-wide figure is never valid for
+fund-level validation. Neither is promoted, so neither can be silently substituted for the other by a
+reader that grabs whichever attribute exists — a consumer that wants the share has to name the field it
+means. Absence stays visible: a filter on a share the document did not print comes back in
+``fields_unavailable``, so the case reads "fund-level amount validation unavailable" rather than
+comparing the wrong two numbers.
 
 **No validation status lives here.** There is deliberately no ``internal_validation_status``, no
 reviewer field and no path by which a human marks a notice reviewed. That is an owner decision, and it
@@ -36,6 +42,28 @@ from pydantic import BaseModel, Field
 # ledger write it cannot evaluate rather than passing it.
 ALWAYS_STORED = ("extraction_confidence", "confidence_alert_count")
 
+# The ONLY extracted field names recon hardcodes. Every other extracted field reaches its reader
+# through `Notice.idp_sections[].fields`, under the name the extraction configuration gave it, and has
+# no entry anywhere in this repository.
+#
+# The bar for membership is that something must be UNABLE to read a nested map. A DynamoDB index key
+# attribute must be declared on the table, so the three below clear it; nothing else does. A name here
+# is one recon has to keep in step with a configuration in another repository, and when it drifts the
+# mapper stores the field as absent and the agent reads "this notice class does not carry that field" --
+# a confident false negative rather than an error. That is the whole cost, and it is why the list is
+# closed. `tests/input_corpus/test_extraction_requirements.py` asserts the mapper reads exactly these.
+INDEX_KEY_FIELDS = (
+    "counterparty",  # counterparty-index HASH
+    "notice_date",  # counterparty-index RANGE
+    "reference",  # reference-index HASH
+)
+
+# Read as fallbacks for two of the index keys and never stored under these names: a document that
+# prints only an effective date, or names the obligor as `borrower`, still has to land in the index.
+INDEX_KEY_ALIASES = ("value_date", "borrower")
+
+PROMOTED_EXTRACTED_FIELDS = INDEX_KEY_FIELDS + INDEX_KEY_ALIASES
+
 
 class Notice(BaseModel):
     """One counterparty notice as extracted by the document pipeline."""
@@ -43,67 +71,34 @@ class Notice(BaseModel):
     notice_id: str = Field(min_length=1)
     notice_class: str = Field(min_length=1)
     counterparty: str = Field(min_length=1)
-    # ISO-8601 date; Excel serials are converted at seed time.
-    notice_date: str = Field(min_length=1)
+    # ISO-8601 date the SOURCE printed. The `counterparty-index` RANGE key, which is the only reason it
+    # is an attribute at all.
+    #
+    # Optional, and never back-filled from an ingest timestamp. A document that prints no date of any
+    # kind is stored with this ABSENT rather than rejected: the corpus fax cover carries a counterparty
+    # and an agent bank and is worth keeping. Substituting `idp_started_at` would put a PROCESSING
+    # timestamp in an ISSUE date, and `_matches` compares a present date as a real one -- so a February
+    # notice processed in September would satisfy a September window with its date apparently aligning,
+    # turning "cannot check" into "checks out". The ingest time is stored under its own name for readers
+    # that want it.
+    #
+    # ⚠️ DynamoDB omits an item with no range key from `counterparty-index`, so a dateless notice is
+    # reachable only by `notice_id`, by the Documents tab, or by the scan path. `search_notices` reports
+    # the field in `fields_unavailable`, so the gap is visible rather than silent.
+    notice_date: str | None = None
 
-    # Class-dependent extracted fields. None => not extracted for this class.
-    fund: str | None = None
-    facility: str | None = None
+    # `reference-index` HASH key -- again, the only reason this is an attribute.
     reference: str | None = None
-    # The FUND-ATTRIBUTABLE amount only ("Your Share"). Absent when the document carries a
-    # facility-wide total and no share — see the module docstring; that absence is load-bearing.
-    amount: Decimal | None = None
-    currency: str | None = None
 
-    # The business activity the notice reports, in the source's own vocabulary: Interest, Rateset,
-    # Rollover, Commitment Fee, Paydown. Distinct from `notice_class`, which is the document pipeline's
-    # classification of the DOCUMENT. A rollover notice proves no cash should move, and that conclusion
-    # keys off this field rather than off a classifier label the operator does not control.
-    activity_type: str | None = None
-
-    # The facility-wide total across every portfolio the notice covers ("Global Amount"). NEVER valid
-    # for fund-level validation, and never a substitute for `amount`.
-    global_amount: Decimal | None = None
-    # Fee-notice economics. `fee_amount` is what a fee break validates against.
-    fee_amount: Decimal | None = None
-    fee_percentage: Decimal | None = None
-
-    # Which of the amount fields this notice actually supports, derived at write time by
-    # backend/recon_core/notice_derive.derive_amount_type. Stored rather than recomputed on read so the
-    # agent and the analyst see the same answer without either of them re-deriving it.
-    amount_type: str | None = None
-
-    # The source's own facility identifier, VERBATIM and in whatever namespace it uses (an `SL-`
-    # prefix is common). Deliberately NOT normalised against `loanx_id` and never assumed equal to it:
-    # absent a governed crosswalk, treating the two as one namespace invents a match.
-    facility_id_source_raw: str | None = None
-    # Market-standard asset identifiers, each under its own field. Mirrors the ledger's columns of the
-    # same names, which is what makes the asset-identity dimension checkable on both sides.
-    loanx_id: str | None = None
-    cusip: str | None = None
-    isin: str | None = None
-
-    # Who sent the notice, and who to chase when expected cash has not arrived. The contact travels on
-    # the notice because that is where it is authoritative — the agent bank for THIS facility, not a
-    # directory lookup that may be stale.
-    agent_bank: str | None = None
-    agent_contact_name: str | None = None
-    agent_email: str | None = None
-    agent_telephone: str | None = None
-
-    # Rate-set and rollover linkage. Surfaced as supporting evidence for the linked interest event,
-    # which is the only way a reader can tell an accrual reset from a payment.
-    contract_id: str | None = None
-    new_contract_id: str | None = None
-
-    # Free-text remarks from the source, e.g. "only interest notice" or a maturity-date warning.
-    # Carried verbatim into the evidence trail rather than parsed.
-    notice_comment: str | None = None
-
-    # The date EXACTLY as the source printed it, kept beside the ISO `notice_date` it was converted
-    # from. Manual extracts have been observed carrying Excel serials (46230), and a conversion with no
-    # record of its input cannot be audited or corrected.
-    notice_date_source_raw: str | None = None
+    # ⚠️ NO EXTRACTED FIELD BELONGS HERE. The three above are the complete set, and
+    # :data:`PROMOTED_EXTRACTED_FIELDS` states the rule they satisfy: a DynamoDB index key attribute has
+    # to be declared on the table, so it cannot live in a nested map. Nothing else clears that bar.
+    #
+    # An extracted field reaches every reader through `idp_sections[].fields` below, under the name the
+    # extractor gave it. `search_notices` resolves a filter against that map, so adding an attribute here
+    # buys a flatter shape and costs a name recon must keep in step with a configuration in another
+    # repository -- and when that drifts, the row stores the field as absent and the agent reads "this
+    # notice class does not carry that field", which is a confident false negative rather than an error.
 
     # Provenance derived by whichever component wrote the row, never extracted from the document and
     # never supplied by a caller. On the document path these are constant: OTHER + IDP.
