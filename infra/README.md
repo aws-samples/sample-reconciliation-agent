@@ -5,7 +5,7 @@ All infrastructure. There is no CDK in this repo.
 ```
 environments/recon/   the root module — the only place you run terraform
 modules/              one module per component, composed by the root
-registry/definitions/ workflow-type definitions seeded into DynamoDB
+registry/definitions/ inherited scaffolding (a2a/, mcp/, skills/ YAML); nothing here reads it
 bootstrap/            the state bucket, applied once before anything else
 scripts/              operational tooling (deploy driver, seed push, resets)
 ```

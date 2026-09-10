@@ -18,7 +18,6 @@ import {
   retryCase,
   cancelCase,
 } from "@/lib/reconApi";
-import { getStoredAccessToken } from "@/lib/reconToken";
 import {
   ConfidenceMeter,
   Eyebrow,
@@ -26,6 +25,7 @@ import {
   Placeholder,
   StatusPill,
 } from "@/components/recon/ui";
+import { estimateAgentRunCost, type StoredUsage } from "@/lib/modelPricing";
 import { IdpDocumentPanel } from "@/components/recon/IdpDocumentPanel";
 import { MatchedNoticesPanel } from "@/components/recon/MatchedNoticesPanel";
 import { Tier1RoutingPanel } from "@/components/recon/Tier1RoutingPanel";
@@ -147,10 +147,10 @@ function CaseEvalPanel({
 }) {
   const [evals, setEvals] = useState<CaseEvals | null>(null);
   const [loading, setLoading] = useState(true);
-  // The fetch error, kept rather than swallowed. It used to be discarded into `setEvals(null)`, which
-  // rendered the same "no evaluation recorded yet" line as a successful empty response — so a 403, a
-  // failed evaluator lookup and a case that genuinely has not been scored yet were three different
-  // problems wearing one message, and the panel looked permanently empty with no way to tell why.
+  // The fetch error, kept rather than swallowed. Collapsing it into `setEvals(null)` would render the
+  // same "no evaluation recorded yet" line as a successful empty response, so a 403, a failed
+  // evaluator lookup and a case that genuinely has not been scored yet would be three different
+  // problems wearing one message, and the panel would look permanently empty with no way to tell why.
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -212,8 +212,8 @@ function CaseEvalPanel({
           </p>
           {/* Which session was searched, when there was one. An empty result against a known session
               means the evaluator has not run yet; an empty result with no session at all means the
-              case's agent invocation was never matched to a session, which is a different fault and
-              was previously indistinguishable. */}
+              case's agent invocation was never matched to a session, which is a different fault.
+              Naming the session is what keeps the two distinguishable. */}
           <p className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">
             {evals?.session
               ? `Searched session ${evals.session} — no evaluator records found against it.`
@@ -228,6 +228,157 @@ function CaseEvalPanel({
         </ul>
       )}
     </Panel>
+  );
+}
+
+/** A token count with thousands separators. Six-figure counts are ordinary here. */
+function formatTokens(count: number): string {
+  return count.toLocaleString("en-US");
+}
+
+/**
+ * A dollar figure at the magnitudes one agent run actually reaches.
+ *
+ * PRECISION RULE: up to FOUR decimal places — a hundredth of a cent — with two as the minimum. A
+ * Tier-2 investigation on a few thousand tokens costs single-digit thousandths of a dollar, so the
+ * conventional two-places-only render turns most REAL runs into `$0.00`, and beside a trace that
+ * plainly consumed tokens that reads as "this run was free". Allowing four keeps a cheap run legible
+ * ($0.0043) while still trimming a dear one to something a person can read ($12.30 rather than
+ * $12.3000). Keeping two as the FLOOR is what makes an exactly-zero amount render `$0.00` — which is
+ * correct only because it means counts that were MEASURED as zero. A run nobody measured never
+ * reaches this function; see `AgentRunCost`, which renders nothing at all for it.
+ *
+ * Below $0.0001 even four places round to zero — the same misreading one order of magnitude down —
+ * so those fall back to a single significant digit ($0.00002): MORE digits as the number gets
+ * smaller, rather than losing it.
+ *
+ * @param amountUsd - the unrounded estimate from `estimateAgentRunCost`.
+ * @returns the figure with a leading `$` and thousands separators.
+ */
+function formatUsd(amountUsd: number): string {
+  if (amountUsd > 0 && amountUsd < 0.0001) {
+    return `$${amountUsd.toLocaleString("en-US", {
+      maximumSignificantDigits: 1,
+    })}`;
+  }
+  return `$${amountUsd.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  })}`;
+}
+
+/**
+ * Shown on the amount itself, because the caveat has to reach the person reading the number.
+ *
+ * Names the model rather than saying "this run's model": the id is operator-settable and the three
+ * selectable models differ 5x in price, so an operator judging whether a figure looks right needs to
+ * know which row of the table produced it.
+ */
+function estimateTip(modelId: string): string {
+  return `An estimate at today's published Bedrock on-demand rates for ${modelId}.`;
+}
+/**
+ * ⚠️ The cost is DERIVED AT RENDER from the stored token counts and is never persisted, which is why
+ * this sentence is in the tooltip and not only in a comment. The trade is deliberate: the token
+ * counts are the measurement, the rate table is an opinion about prices, so re-pricing an old case
+ * when `modelPricing.ts` is refreshed is the CORRECT behaviour — a stored amount would freeze a
+ * figure that was already approximate and leave no way to correct it. The cost of that choice is
+ * that one case's figure can differ between two viewings. Do not "fix" it by writing the amount onto
+ * the case record; that would trade a correctable estimate for an uncorrectable one.
+ */
+const REPRICES_TIP =
+  "Computed from the stored token counts each time this page renders, so it re-prices if the rate table is refreshed.";
+const FLOOR_TIP =
+  "At LEAST this much: Bedrock reports how many tokens were written to the prompt cache but not which TTL was written, so writes are priced at the cheaper 5-minute rate and the real cost may be higher.";
+
+/**
+ * Token totals and the estimated cost of one agent run — one compact line, not a panel.
+ *
+ * Sits beside the Agent Trace's step count because that is the question it answers: what this
+ * investigation consumed to produce the trace below it. Four states, and the differences between
+ * them are the whole point (see `CostEstimate` in `@/lib/modelPricing`):
+ *
+ *   - nothing measured → renders NOTHING. Not zeros, not em dashes. Every case investigated before
+ *     the usage attribute shipped is in this state, and "0 tokens, $0.00" on it would assert a free
+ *     run across the majority of the case history;
+ *   - priced → the counts and the amount;
+ *   - priced with a cache write → the same, marked `≥`, because the amount is a floor;
+ *   - model with no published rate → the counts and NO dollar figure, naming the id instead. There
+ *     is deliberately no amount to fall back to: `$0.00` would be a claim about money, and the tokens
+ *     were still consumed and still cost something.
+ *
+ * A count the provider did not report is dropped, never rendered as `0` — the two mean different
+ * things and Bedrock omits the cache counts entirely on an uncached call.
+ *
+ * @param usage - the case's stored `token_usage`; absent or null on a case nobody measured.
+ * @returns the line's spans, or null when there is nothing measured to report.
+ */
+function AgentRunCost({ usage }: { usage: StoredUsage | null | undefined }) {
+  const estimate = estimateAgentRunCost(usage);
+  if (estimate.kind === "noUsage") return null;
+
+  const { tokens } = estimate;
+  // Read and write are summed into ONE `CACHED` figure so this stays a single line. They are billed
+  // at different rates, so the split is named in the tooltip rather than thrown away.
+  const cacheParts: string[] = [];
+  if (tokens.cacheRead !== null)
+    cacheParts.push(`${formatTokens(tokens.cacheRead)} read`);
+  if (tokens.cacheWrite !== null)
+    cacheParts.push(`${formatTokens(tokens.cacheWrite)} written`);
+
+  const figures: string[] = [];
+  if (tokens.input !== null) figures.push(`IN ${formatTokens(tokens.input)}`);
+  if (tokens.output !== null)
+    figures.push(`OUT ${formatTokens(tokens.output)}`);
+  if (cacheParts.length > 0)
+    figures.push(
+      `CACHED ${formatTokens((tokens.cacheRead ?? 0) + (tokens.cacheWrite ?? 0))}`,
+    );
+
+  const tokensTip =
+    "Tokens this agent run consumed, as the provider reported them. A count the provider did not report is omitted rather than shown as zero." +
+    (cacheParts.length > 0
+      ? ` CACHED is ${cacheParts.join(" + ")}; the two are billed at different rates.`
+      : "");
+
+  return (
+    <>
+      <span
+        className="rc-mono text-[11px] text-[var(--rc-ink-faint)]"
+        title={tokensTip}
+      >
+        {figures.join(" · ")}
+      </span>
+      {estimate.kind === "unknownModel" ? (
+        // Names the id rather than hiding the gap: the model is operator-settable through SSM, so a
+        // missing rate is an actionable "add this row to the table", not a fault in this case.
+        <span
+          className="rc-mono text-[11px] text-[var(--rc-ink-faint)]"
+          title={
+            (estimate.modelId === null
+              ? "No model id was recorded for this run, so it cannot be priced."
+              : `recon has no published rate for ${estimate.modelId}, so this run cannot be priced.`) +
+            " The token counts are still exactly what the provider reported."
+          }
+        >
+          {estimate.modelId === null
+            ? "NO MODEL RECORDED"
+            : `NO RATE FOR ${estimate.modelId}`}
+        </span>
+      ) : (
+        <span
+          className="rc-mono text-[11px] text-[var(--rc-ink-dim)]"
+          title={
+            estimate.isFloor
+              ? `${FLOOR_TIP} ${estimateTip(estimate.modelId)} ${REPRICES_TIP}`
+              : `${estimateTip(estimate.modelId)} ${REPRICES_TIP}`
+          }
+        >
+          {estimate.isFloor ? "≥ " : ""}
+          {formatUsd(estimate.amountUsd)}
+        </span>
+      )}
+    </>
   );
 }
 
@@ -258,7 +409,7 @@ export default function CaseDetailPage({
   const [overrideUnknownSend, setOverrideUnknownSend] = useState(false);
 
   const reload = () =>
-    getCase(id, getStoredAccessToken())
+    getCase(id)
       .then(setRecon)
       .catch((e) => setError(String(e)));
 
@@ -726,18 +877,18 @@ export default function CaseDetailPage({
           evidence that produced the score → what Tier-1 had concluded before the agent ran → the
           trace → the evaluation.
 
-          This was a two-column grid with the Agent Trace pinned beside everything else until
-          2026-09-03. The trace is the widest thing on the page — raw tool inputs and outputs —
-          and squeezing it into 58% of the width meant every line wrapped, while the evidence
-          table on the left wrapped its "what was found" column into a ribbon three words wide.
-          Reading either one meant scrolling past the other. Neither is glanced at; both are read.
-          min-w-0 stays on the wide panels so a long unbroken tool-output line still wraps rather
-          than widening the page into a horizontal scrollbar. */}
+          Deliberately NOT a two-column grid with the Agent Trace pinned beside everything else. The
+          trace is the widest thing on the page — raw tool inputs and outputs — so squeezing it into
+          58% of the width wraps every line, while the evidence table beside it wraps its "what was
+          found" column into a ribbon three words wide. Neither panel is glanced at; both are read
+          end to end, and side by side that means scrolling past one to read the other. min-w-0 stays
+          on the wide panels so a long unbroken tool-output line still wraps rather than widening the
+          page into a horizontal scrollbar. */}
       <div className="space-y-6">
         {/* 0. How the deterministic tier cleared this case. Leads the page and REPLACES every agent
               panel below, rather than sitting above a column of empty ones. An empty panel reads as
               "something failed to produce this", which on a straight-through auto-clear is both
-              wrong and the opposite of the point — and the proposed-action panel used to say
+              wrong and the opposite of the point — and the proposed-action panel would state
               outright that the case escalated for a human decision. */}
         {isTier1Resolved && (
           <Tier1ResolutionPanel
@@ -748,9 +899,9 @@ export default function CaseDetailPage({
 
         {/* 1. The score, and what the agent wants to do about it. The number decides whether this
               case can clear without a human, so it leads; the proposed step and the agent's own
-              account sit under it because they are the answer to "and therefore what?" — they
-              were a separate panel below the evidence table until 2026-09-03, which put the
-              table between the score and its consequence. */}
+              account sit under it because they are the answer to "and therefore what?". Putting them
+              in a separate panel below the evidence table would place that table between the score
+              and its consequence. */}
         {!isTier1Resolved && (
           <>
             <Panel className="rc-rise min-w-0 p-6" scan>
@@ -820,11 +971,11 @@ export default function CaseDetailPage({
               {/* Context for the score: which skill's step list the fraction above is measured
                 against, and what else the agent had in front of it when it chose.
 
-                The IDP document class used to sit here as well. It is the document pipeline's
-                classification, it is already surfaced on the IDP panel above (with that
-                pipeline's own extraction-confidence alert count — a different quantity from
-                this score, produced by a different system), and printing it directly beside
-                the recon skill invited reading the two as one field. */}
+                The IDP document class deliberately does NOT appear here. It is the document
+                pipeline's classification, it is already surfaced on the IDP panel above (with that
+                pipeline's own extraction-confidence alert count — a different quantity from this
+                score, produced by a different system), and printing it directly beside the recon
+                skill invites reading the two as one field. */}
               <div className="mt-5 border-t border-[var(--rc-line-soft)] pt-4">
                 {/* The label carries the whole sentence, so the value beside it needs no trailing
                   qualifier. The agent classifies each case into exactly ONE break type and
@@ -838,12 +989,11 @@ export default function CaseDetailPage({
                   Skill that drove the score
                 </div>
                 <div className="rc-mono text-[13px] text-[var(--rc-ink)]">
-                  {/* The classification rationale is a tooltip rather than a paragraph. It used to be
-                    rendered here in full, directly above the agent's final narrative, and two
-                    paragraphs of agent prose stacked on one panel read as one continuous account
-                    when they are answers to different questions ("why this skill?" versus "what
-                    should happen?"). It is one line of context about a single field, so it belongs
-                    on that field. */}
+                  {/* The classification rationale is a tooltip rather than a paragraph. Rendered in
+                    full it would sit directly above the agent's final narrative, and two paragraphs
+                    of agent prose stacked on one panel read as one continuous account when they are
+                    answers to different questions ("why this skill?" versus "what should happen?").
+                    It is one line of context about a single field, so it belongs on that field. */}
                   <span
                     title={
                       recon.classification_reasoning
@@ -936,10 +1086,10 @@ export default function CaseDetailPage({
                   <div className="overflow-hidden rounded border border-[var(--rc-line-soft)]">
                     <table className="w-full table-fixed border-collapse text-left">
                       <thead>
-                        {/* Re-weighted for the full-width layout. The step id is a short mono token and
-                        the result is one word; at the old 38/22 split they held mostly whitespace
-                        while the finding — the only column with a sentence in it — wrapped into a
-                        narrow ribbon. */}
+                        {/* Weighted for the full-width layout. The step id is a short mono token and
+                        the result is one word, so giving those two columns any more room leaves them
+                        mostly whitespace while the finding — the only column with a sentence in it —
+                        wraps into a narrow ribbon. */}
                         <tr className="bg-[var(--rc-line-soft)]/40">
                           <th className="rc-eyebrow w-[20%] px-3 py-2">Step</th>
                           <th className="rc-eyebrow w-[12%] px-3 py-2">
@@ -989,8 +1139,8 @@ export default function CaseDetailPage({
             />
 
             {/* 3. What Tier-1 concluded deterministically, before the agent was dispatched — read
-              after the agent's own findings, as the cheaper answer they either confirm or overturn.
-              It sat above everything until 2026-09-03.
+              after the agent's own findings, as the cheaper answer they either confirm or overturn —
+              which is why it sits here rather than at the top of the page.
 
               The `!== undefined` check (rather than truthiness) is deliberate:
               tier1_escalation_reason is the one key stamped on EVERY escalation, and it can
@@ -1003,13 +1153,20 @@ export default function CaseDetailPage({
             {/* 4. Agent trace: the actual steps the agent took. min-w-0 so a long tool-output line
               wraps rather than widening the page. */}
             <Panel className="rc-rise min-w-0 p-6">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-3">
                 <Eyebrow title="The steps the agent actually took: recall → classify → run skill(s) → tool calls → evidence-step reports → propose → (execute when auto-actioned). No per-step confidence — see Evidence Score, which counts the satisfied evidence steps.">
                   Agent Trace
                 </Eyebrow>
-                <span className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">
-                  {steps.length} step{steps.length === 1 ? "" : "s"}
-                </span>
+                {/* What the run cost sits beside the step count rather than in a panel of its own:
+                  it is a property OF this trace — how much work the steps below represent — and a
+                  three-figure line does not earn a heading. `AgentRunCost` renders nothing at all on
+                  a case with no measured usage, which leaves this row exactly as it was. */}
+                <div className="flex items-center gap-3">
+                  <span className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">
+                    {steps.length} step{steps.length === 1 ? "" : "s"}
+                  </span>
+                  <AgentRunCost usage={recon.token_usage} />
+                </div>
               </div>
 
               {steps.length === 0 ? (

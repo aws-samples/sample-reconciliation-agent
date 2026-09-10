@@ -75,12 +75,12 @@ def test_persist_proposal_writes_proposed_case_with_reasoning():
     assert stored["resolution"] == "apply to fund X"
     assert str(stored["confidence"]) == "0.83"  # Decimal
     assert stored["classification_reasoning"] == "value date off by 1d"
-    # Nothing computes a classification confidence any more, so the attribute must be ABSENT rather
-    # than written as a 0 or a None — a number on the row invites the next reader to gate on it.
+    # Nothing computes a classification confidence, so the attribute must be ABSENT rather than
+    # written as a 0 or a None — a number on the row invites the next reader to gate on it.
     assert "classification_confidence" not in stored
     assert stored["steps"][0]["skill"] == "record-match-review"
     assert stored["steps"][0]["reasoning"] == "amounts match"
-    # Nobody sets per-step confidence any more, so the key must be absent rather than persisted as a
+    # Nobody sets a per-step confidence, so the key must be absent rather than persisted as a
     # meaningless 0.0 — a 0.0 on the trace reads as "the agent was unsure", not "nobody measured".
     assert "confidence" not in stored["steps"][0]
 

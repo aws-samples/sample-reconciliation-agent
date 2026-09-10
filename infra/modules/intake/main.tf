@@ -1,5 +1,5 @@
 ####################################################################################
-# Intake module: HTTP API Gateway (Cognito JWT) -> intake Lambda -> recon-items table.
+# Intake module: HTTP API Gateway (OIDC JWT) -> intake Lambda -> recon-items table.
 # The single entry point for structured/semi-structured datasets. No normalization stage.
 ####################################################################################
 
@@ -42,9 +42,10 @@ resource "aws_iam_role_policy" "intake" {
         # the subnet and the security group it attaches, so IAM evaluates it against those ARNs
         # too. Narrowing this to `network-interface/*` makes Lambda's CreateFunction pre-flight
         # check fail with "The provided execution role does not have permissions to call
-        # CreateNetworkInterface on EC2" — a from-scratch-only failure, since an existing
-        # function is never re-validated (observed live on the 2026-08-08 rebuild). Matches the
-        # scoping used by the sibling gl-mock/idp-hook/recon-agent modules.
+        # CreateNetworkInterface on EC2". That failure only appears when the function is created
+        # from scratch — an existing function is never re-validated — so it is easy to introduce
+        # and not notice. Matches the scoping used by the sibling gl-mock/idp-hook/recon-agent
+        # modules.
         Effect   = "Allow"
         Action   = ["ec2:CreateNetworkInterface", "ec2:DeleteNetworkInterface"]
         Resource = "arn:aws:ec2:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:*"
@@ -99,7 +100,7 @@ resource "aws_lambda_function" "intake" {
 }
 
 # ---------------------------------------------------------------------------------
-# HTTP API Gateway with Cognito JWT authorizer
+# HTTP API Gateway with an OIDC JWT authorizer
 # ---------------------------------------------------------------------------------
 
 resource "aws_apigatewayv2_api" "http" {
@@ -107,15 +108,23 @@ resource "aws_apigatewayv2_api" "http" {
   protocol_type = "HTTP"
 }
 
+# A v2 JWT authorizer is not Cognito-specific: it validates any OIDC issuer, which is why this stack
+# no longer runs a user pool. Issuer and audience are derived from `auth_provider` in the root module,
+# the same way chatbot-app/frontend/src/lib/api-auth.ts derives them for the BFF — so the two verifiers
+# agree by construction rather than by someone remembering to change both.
+#
+# API Gateway fetches the provider's JWKS from AWS-managed infrastructure, NOT from this VPC. That is
+# what keeps this authorizer working in a no-NAT private deployment, and it is the reason the private
+# REST API in private_api.tf uses SigV4 instead of a Lambda authorizer doing the same job in-VPC.
 resource "aws_apigatewayv2_authorizer" "jwt" {
   api_id           = aws_apigatewayv2_api.http.id
   authorizer_type  = "JWT"
   identity_sources = ["$request.header.Authorization"]
-  name             = "${var.name_prefix}-cognito-jwt"
+  name             = "${var.name_prefix}-oidc-jwt"
 
   jwt_configuration {
-    audience = [var.spa_client_id]
-    issuer   = "https://${var.user_pool_endpoint}"
+    audience = [var.jwt_audience]
+    issuer   = var.jwt_issuer
   }
 }
 

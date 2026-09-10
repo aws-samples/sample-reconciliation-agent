@@ -29,9 +29,10 @@ def test_an_absent_or_unusable_hint_reads_as_none() -> None:
 
 def test_a_disagreement_is_logged_with_both_class_names(caplog) -> None:
     """Classification picks the scoring denominator, so a mis-pick swaps which evidence an unattended
-    write requires — it does not lower the bar. Until 2026-09-04 a model unsure of its class
-    self-reported low and the case escalated; nothing notices now, so the disagreement has to be
-    observable for design D8's deferred cross-check to be decided on data instead of on argument.
+    write requires — it does not lower the bar. Nothing else notices a mis-pick: a model unsure of its
+    class has no way to say so, and no gate compares its choice against the Tier-1 hint. Logging the
+    disagreement is what makes it observable, so a cross-check can be decided on data rather than on
+    argument.
     """
     with caplog.at_level(logging.WARNING):
         warn_on_disagreement(class_id="ledger-status-resolution", tier1_hint="record-match-review")

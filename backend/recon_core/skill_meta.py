@@ -59,11 +59,10 @@ def step_field(step: EvidenceStep | dict, name: str):
     the two from drifting.
 
     Used by :func:`evidence_step_block` here AND by ``confidence.evidence_completeness``, which is the
-    reason it is public. That scorer read ``s.id``/``s.required`` off whatever it was handed, so the
-    harness path — which hands it catalog dicts — raised ``AttributeError: 'dict' object has no
-    attribute 'required'``. That went unseen until 2026-09-02 only because every harness proposal was
-    classified ``unknown``, which declares no steps and returns before the loop; fixing the
-    classification uncovered it immediately.
+    reason it is public. Reading ``s.id``/``s.required`` off the step directly works only on the
+    runtime path; the harness path hands that scorer catalog dicts and raises ``AttributeError:
+    'dict' object has no attribute 'required'``. Note that an ``unknown`` classification declares no
+    steps and returns before the loop, so that failure hides until classification works.
 
     :param step: an ``EvidenceStep`` or its ``model_dump(mode="json")`` dict.
     :param name: the field name (``id``/``description``/``required``).
@@ -78,17 +77,17 @@ def evidence_step_block(skill: dict) -> str:
     """Render one skill's DECLARED evidence-step ids for a prompt ('' when it declares none).
 
     Shared by BOTH Tier-2 backends on purpose. The ids live in frontmatter, which ``parse_skill``
-    strips out of ``body``, so neither backend's prompt showed them while both prompts asked the model
-    to report ``step_id`` values "from your skill's evidence steps". The model duly invented plausible
-    ids from the skill's PROSE — on 2026-09-02 the runtime produced ``account_name_match`` (the prose
-    says "Account name") for a skill declaring ``expected_entry_match``, and the harness produced
-    ``ledger_lookup`` and ``amount_tolerance_check``. Every invented id is unscoreable, so the
-    prescribed step it stood for counts as never attempted and the score collapses.
+    strips out of ``body``, so without this block neither backend's prompt shows them while both
+    prompts ask the model to report ``step_id`` values "from your skill's evidence steps". The model
+    then invents plausible ids from the skill's PROSE instead — ``account_name_match`` (the prose says
+    "Account name") for a skill declaring ``expected_entry_match``, or ``ledger_lookup`` and
+    ``amount_tolerance_check``. Every invented id is unscoreable, so the prescribed step it stood for
+    counts as never attempted and the score collapses.
 
     It lives here, next to the parser that owns the declaration, rather than in either backend:
     ``evidence_completeness`` scores both backends with one function, so the two must be ASKED for
     their evidence with one function too, or the scores diverge for a reason that has nothing to do
-    with the evidence (which is exactly what Task 41 Step 4 checks).
+    with the evidence.
 
     Required/optional is stated because only required steps are the score's denominator: an agent that
     spends its tool budget on an optional step instead of a required one scores lower for no gain.

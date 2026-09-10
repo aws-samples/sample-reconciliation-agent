@@ -40,11 +40,10 @@ SKILLS = [
 
 # The SAME skills as the HARNESS actually receives them. This must NOT be `SKILLS`: the harness has
 # no skill-loading tool, so it only ever sees `skills-catalog.json`, where every EvidenceStep has been
-# projected to a plain dict by `catalog_entry`. Handing both backends the model form (as this file did
-# until 2026-09-02) is precisely why `evidence_completeness` could read `s.required` and still pass
-# every test, while the live harness died with `AttributeError: 'dict' object has no attribute
-# 'required'` the moment its classification started working. The whole point of a both-backends test
-# is that each backend gets its own real input.
+# projected to a plain dict by `catalog_entry`. Handing both backends the model form lets
+# `evidence_completeness` read `s.required` and still pass every test here, while the live harness dies
+# with `AttributeError: 'dict' object has no attribute 'required'` the moment its classification starts
+# working. The whole point of a both-backends test is that each backend gets its own real input.
 HARNESS_CATALOG = [
     {**s, "evidence_steps": [e.model_dump(mode="json") for e in s.get("evidence_steps", [])]}
     for s in SKILLS
@@ -151,8 +150,8 @@ def test_neither_backend_stores_anything_the_model_said_about_itself() -> None:
 
 
 def test_the_shared_score_is_not_a_weighted_blend_on_either_backend() -> None:
-    """Pins the removal: 3-of-4 prescribed steps is 0.75 on both backends, and there is no longer any
-    second number that could move it.
+    """3-of-4 prescribed steps is 0.75 on both backends, with no second number anywhere that could
+    move it.
 
     The arithmetic is the point. `test_single_confidence_signal.py` proves no such number exists as a
     field or a name; this proves the score is the bare fraction, so a blend reintroduced through some
@@ -167,8 +166,8 @@ def test_the_score_is_shape_blind_so_a_catalog_dict_scores_as_a_model_step():
     """The two backends hand the scorer two DIFFERENT shapes of the same declaration.
 
     The runtime loads skills and gets `EvidenceStep` models; the harness only has the JSON catalog.
-    Both must reach the same number, or Task 41 Step 4's "identical, not close" is unachievable for a
-    reason that has nothing to do with the evidence.
+    Both must reach the same number — identical, not close — or the two backends disagree for a reason
+    that has nothing to do with the evidence.
     """
     from backend.recon_core.confidence import coerce_step_reports, evidence_completeness
 
@@ -184,10 +183,10 @@ def test_the_score_is_shape_blind_so_a_catalog_dict_scores_as_a_model_step():
 
 
 def test_neither_backend_credits_a_satisfied_claim_no_tool_supports() -> None:
-    """`satisfied` is the model's own claim, and after 2026-09-04 it is the ONLY input to the score
-    that authorizes an unattended ledger write. A claim for a step whose tool returned nothing must
-    not count on EITHER backend — the harness downgraded it and the runtime did not, so an identical
-    trace scored 1.0 on one backend and 0.75 on the other.
+    """`satisfied` is the model's own claim, and it is the ONLY input to the score that authorizes an
+    unattended ledger write. A claim for a step whose tool returned nothing must not count on EITHER
+    backend: if one downgrades it and the other does not, an identical trace scores 1.0 on one backend
+    and 0.75 on the other.
     """
     runtime_score, _ = _runtime_score(observed_tools=set())
     harness_score, _ = _harness_score(observed_tools=set())

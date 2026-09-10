@@ -24,8 +24,9 @@ import json
 from typing import Callable
 
 # ToolDenied lives in backend.recon_core.errors so Lambda-packaged code (auto_resolve, the
-# harness worker) can import it without depending on this container-only module. Re-exported
-# here so `from gateway_mcp import ToolDenied` keeps working for the container + existing tests.
+# harness worker) can import it without depending on this container-only module. Re-exported here
+# because this module both raises it and offers it as `from gateway_mcp import ToolDenied`, so both
+# import paths must resolve to the one class or an `except` clause misses the other side's raise.
 from backend.recon_core.errors import ToolDenied  # noqa: F401
 
 # Short tool name (what the model/agent uses) -> gateway MCP tool name ({target}___{tool}).
@@ -41,10 +42,9 @@ GATEWAY_TOOL_NAMES = {
     #     keywords. strands_investigator.search_guidance builds that shape; do not hand this tool
     #     a bare {"query": ...}, which the gateway rejects on schema validation.
     "search_guidance": "managed-kb___Retrieve",
-    # IDP's MCP server nests its tools under the `IDPTools` group, so the gateway tool name is
-    # document-extraction___IDPTools___get_results (NOT ___get_results — that name doesn't exist
-    # and the MCP call fails with an opaque "unhandled errors in a TaskGroup").
-    "get_results": "document-extraction___IDPTools___get_results",
+    # NOTE: no document-pipeline entry. The extracted fields for a document live on recon's own
+    # notice row (`idp_sections`), which `search_notices` above already returns — so there is no
+    # second route to the same data, and the agent holds no tool that leaves recon's own storage.
     "set_draw_status": "set-draw-status___set_draw_status",
     # Mailbox read routes through the existing microsoft-graph OpenAPI target.
     "search_correspondence": "microsoft-graph___listSharedMailboxMessages",
@@ -71,7 +71,7 @@ def parse_tool_result(res) -> dict:
     sometimes chunked across several parts) and only populates ``structuredContent`` when the
     tool declares an ``outputSchema`` — which the recon Lambda targets do NOT. So
     ``res.structuredContent or {}`` is the trap: it silently discards the real data in ``content`` and
-    hands the agent ``{}`` for every read (search_ledger/search_guidance/get_results). The managed
+    hands the agent ``{}`` for every read (search_ledger/search_notices/search_guidance). The managed
     harness client reads ``content``, so a runtime that did not would leave the two backends
     disagreeing about the SAME gateway call.
 

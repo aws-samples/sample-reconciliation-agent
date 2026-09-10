@@ -199,8 +199,8 @@ def handle(event, _context):
 
     All the real work happens in ``_dispatch``; this wrapper exists to make a dead run visible.
     Only the agent writes the PROPOSED row, so any non-timeout exception escaping dispatch means no
-    result is ever coming. Before this wrapper existed, such an item sat in IN_PROGRESS forever and
-    an analyst had no way to tell "still thinking" from "died forty minutes ago".
+    result is ever coming. Without this wrapper such an item sits in IN_PROGRESS forever and an
+    analyst cannot tell "still thinking" from "died forty minutes ago".
 
     Timeouts are exempt, and that exemption matters more than the guard itself. A timeout means the
     investigation is still executing server-side and will persist its own outcome, so FAILED would
@@ -304,12 +304,12 @@ def _dispatch(event, _context):
             if _is_timeout(exc):
                 # A timeout is not a delivery failure. The gateway forwarded the request and the
                 # agent is still investigating, so falling back here starts a second full
-                # investigation of the same item. That is not hypothetical: it happened on
-                # 2026-09-02, when every run timed out against a too-short deadline, fell back, and
-                # the duplicates plus Lambda's own async retries stacked up to seven concurrent
-                # investigations of one item. Re-raising instead leaves the outcome to the run
-                # already in flight, which writes its own case row, and keeps the timeout visible
-                # rather than papered over by a duplicate that looks like a recovery.
+                # investigation of the same item. That is not hypothetical: with a deadline short
+                # enough that every run times out, the fallbacks plus Lambda's own async retries
+                # stack up to seven concurrent investigations of one item. Re-raising instead leaves
+                # the outcome to the run already in flight, which writes its own case row, and keeps
+                # the timeout visible rather than papered over by a duplicate that looks like a
+                # recovery.
                 logger.error(
                     "ingress-gateway invoke timed out after %.0fs (%s); the runtime invocation is "
                     "still in flight and will persist its own result — NOT falling back, a fallback "

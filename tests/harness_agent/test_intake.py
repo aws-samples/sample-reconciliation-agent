@@ -1,8 +1,8 @@
 """submit_proposal intake: classification by catalog membership, reference derivation (0/1/>1),
 the evidence-completeness score, Decimal-safe persist, and the execute/escalate decision.
 
-There is no classification threshold and no composite any more — both were deleted on 2026-09-04
-along with every model-reported confidence number."""
+There is no classification threshold and no composite: the one confidence signal is computed
+evidence completeness, and no model-reported number enters it anywhere."""
 
 import logging
 from decimal import Decimal
@@ -140,7 +140,7 @@ def test_build_proposal_single_ref_produces_executable_action():
     assert prop.proposed_action["status"] == "Cancelled"
     assert prop.class_id == "document-cross-reference"
     # 1 of the skill's 2 required evidence steps obtained data — the whole of the score. The model is
-    # no longer asked for any number about itself, so there is nothing else that could enter it.
+    # never asked for a number about itself, so there is nothing else that could enter it.
     assert prop.confidence == pytest.approx(0.5)
 
 
@@ -201,9 +201,9 @@ def test_the_same_claim_stands_once_a_tool_actually_returned():
 def test_an_unclassifiable_item_is_unscoreable_rather_than_a_crash():
     """`unknown` declares no evidence steps, so there is nothing to evidence: 0.0 and escalate.
 
-    Reached here by naming a break type the catalog does not have — which is now the ONLY way to get
-    ``unknown``. It used to also be reachable with a self-reported confidence under the floor, and
-    that path is what made a well-evidenced case unscoreable on the model's own say-so.
+    Reached here by naming a break type the catalog does not have, which is the ONLY way to get
+    ``unknown``. A self-reported confidence cannot produce it: a floor on such a number would make a
+    well-evidenced case unscoreable on the model's own say-so.
     """
     prop = intake.build_proposal(
         item=ITEM,
@@ -230,7 +230,7 @@ def test_build_proposal_missing_resolution_and_reason_raises():
 def test_build_proposal_aliases_resolution_from_reason():
     """When `resolution` is missing but `reason` is present, reuse `reason` as the resolution
     narrative instead of hard-failing — the model frequently drops `resolution` while supplying
-    `reason` (observed live 2026-07-27). `reason` still remains for the proposed_action."""
+    `reason`. `reason` still remains for the proposed_action."""
     prop = intake.build_proposal(
         item=ITEM,
         submitted=_submitted(resolution="", reason="Excess-cash-flow prepayment applied."),
@@ -243,12 +243,12 @@ def test_build_proposal_aliases_resolution_from_reason():
 
 
 def test_a_known_class_survives_a_low_model_confidence():
-    """Backend parity with ``classifier.pick_class`` (which lost its floor in the same change).
+    """Backend parity with ``classifier.pick_class``, which has no confidence floor either.
 
-    Until 2026-09-04 a self-reported 0.5 rewrote the class to ``unknown``, which declares no
-    evidence_steps — so a fully-evidenced case scored 0.0 and could not auto-resolve. On 2026-09-02
-    that hit every harness case at once, because the tool schema had the field as optional and an
-    absent value read as 0.0.
+    A floor would rewrite the class to ``unknown`` on a self-reported 0.5, and ``unknown`` declares no
+    evidence_steps — so a fully-evidenced case would score 0.0 and could not auto-resolve. It would
+    hit every harness case at once, too: the tool schema cannot make the field mandatory and an absent
+    value reads as 0.0.
     """
     class_id, reasoning = intake.classify_submitted(
         submitted={
@@ -279,12 +279,12 @@ def test_a_proposal_without_a_verbalized_confidence_is_valid():
 
 
 def test_a_stale_prompt_still_reporting_a_confidence_cannot_set_the_score():
-    """The deploy window, on the backend that is easiest to get wrong.
+    """A prompt that still asks for a confidence cannot set the score, on the backend that is easiest
+    to get wrong.
 
-    Both system prompts are create-only S3 objects, so this code ships BEFORE the rewritten prompt
-    does (the seed push is a separate manual step). Until it lands the live model is still told to
-    report a confidence, and the harness does not enforce the inline function's argument schema — so
-    whatever it sends arrives in ``submitted`` regardless of the schema no longer declaring it.
+    The harness does not enforce the inline function's argument schema, so whatever the model sends
+    arrives in ``submitted`` whether or not the schema declares it — and the system prompt lives in a
+    create-only S3 object, editable out of band from this code.
 
     ``build_proposal`` assembles ``Proposal`` field by field and never splats ``submitted``, which is
     what makes that window harmless. Asserted here because the failure mode of losing that property
@@ -312,7 +312,7 @@ def test_a_stale_prompt_still_reporting_a_confidence_cannot_set_the_score():
 
 def test_coerce_evidence_handles_json_string_without_char_explosion():
     """Regression: a JSON-STRING evidence must decode to a list, NOT explode into characters."""
-    # The observed live corruption: model emitted evidence as a JSON-encoded string.
+    # The corruption this guards: the model emits evidence as a JSON-encoded string.
     raw = '["issuer: Cindermoor Logistics Holdings, Inc.", "facility: 2023 Delayed Draw"]'
     out = intake._coerce_evidence(raw)
     assert out == ["issuer: Cindermoor Logistics Holdings, Inc.", "facility: 2023 Delayed Draw"]
@@ -405,8 +405,8 @@ def test_persist_writes_decimal_safe_and_transitions(monkeypatch):
 def test_persist_writes_the_full_notice_rows_untruncated(monkeypatch):
     """The rows the panel renders reach DynamoDB whole, floats and all.
 
-    Regression: the only stored copy used to be the trace's 600-character `tool_output`, which cut a
-    notice row mid-string. The UI parsed that fragment, failed, and reported "matched no notices".
+    Regression: with the trace's 600-character `tool_output` as the only stored copy, a notice row is
+    cut mid-string, the UI fails to parse the fragment, and the panel reports "matched no notices".
     """
     ddb = boto3.resource("dynamodb", region_name="us-east-1")
     ddb.create_table(

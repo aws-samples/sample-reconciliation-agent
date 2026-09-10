@@ -1,5 +1,5 @@
 /**
- * BFF authorization (live-QA P0-2). The security property under test is deny-by-default:
+ * BFF authorization. The security property under test is deny-by-default:
  * no configuration and no token must never resolve to "allowed".
  *
  * Runs on the node environment, not the suite's default jsdom: this is server-side middleware

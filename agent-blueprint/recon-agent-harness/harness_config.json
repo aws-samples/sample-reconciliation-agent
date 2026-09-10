@@ -3,7 +3,6 @@
     "@egress-tools/general-ledger___search_ledger",
     "@egress-tools/notices___search_notices",
     "@egress-tools/managed-kb___Retrieve",
-    "@egress-tools/document-extraction___IDPTools___get_results",
     "@egress-tools/correspondence-search___search_correspondence",
     "@egress-tools/contacts___list_contacts",
     "@egress-tools/templates___list_templates",

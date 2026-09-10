@@ -112,8 +112,8 @@ describe("OktaAuthWrapper", () => {
   });
 
   it("does not render children until the session is confirmed", async () => {
-    // The 401s in the report came from here: children used to render on the first pass, so their
-    // effects fetched with whatever stale token was in storage before auth had been checked.
+    // This is where spurious 401s come from: children that render on the first pass run their
+    // effects with whatever stale token is in storage, before auth has been checked.
     let resolveAuth: (value: boolean) => void = () => {};
     isAuthenticated.mockReturnValue(
       new Promise<boolean>((resolve) => {

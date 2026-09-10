@@ -6,8 +6,8 @@ import { reconFetch } from "@/lib/recon-auth";
 /**
  * An `<img>` whose source is fetched with the recon BFF's Authorization header.
  *
- * A plain `<img src="/api/recon/page-image?...">` cannot carry a header, so once `src/proxy.ts`
- * started gating `/api/recon/*` (live-QA P0-2) every document preview would 401. The alternative —
+ * A plain `<img src="/api/recon/page-image?...">` cannot carry a header, and `src/proxy.ts` gates
+ * every `/api/recon/*` request, so such an element 401s on every preview. The alternative —
  * exempting page-image from the gate — would leave the most sensitive endpoint in the BFF (raw
  * pages of customer financial documents) as the one open door, so instead fetch the bytes with the
  * token and hand the element an object URL.

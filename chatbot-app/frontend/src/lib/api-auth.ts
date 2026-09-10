@@ -1,11 +1,11 @@
 /**
  * Server-side authorization for the reconciliation BFF (`/api/recon/*`).
  *
- * Live QA 2026-08-09 (P0-2) found the BFF completely open: the Okta wrapper gates the UI, but
- * the API routes underneath it read and WRITE with the ECS task role, so an anonymous caller
- * could PUT the agent system prompt or approve a case (ledger write + outbound email) just by
- * hitting the URL. This module is the verifier; `src/proxy.ts` is the choke point that
- * applies it to every route under `/api/recon/` before the handler runs.
+ * The Okta wrapper gates the UI and nothing else: the API routes underneath it read and WRITE with
+ * the ECS task role, so without this an anonymous caller can PUT the agent system prompt or approve
+ * a case (ledger write + outbound email) just by hitting the URL. This module is the verifier;
+ * `src/proxy.ts` is the choke point that applies it to every route under `/api/recon/` before the
+ * handler runs.
  *
  * Kept separate from the middleware so it is unit-testable without booting a Next.js server.
  *

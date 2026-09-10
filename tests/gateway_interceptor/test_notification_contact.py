@@ -320,9 +320,9 @@ def test_a_draft_holding_a_literal_address_instead_of_a_contact_id_cannot_send()
     """A draft carrying a literal address and no contact id, refused rather than honoured.
 
     Falling back to the payload's address for a draft with no ``recipient_contact_id`` would authorize
-    whatever the caller asked for — which is precisely the check this branch exists to be. There is no
-    backwards compatibility to preserve here: such a draft is re-editable, and being told to pick a
-    recipient is a better outcome than an unverifiable send.
+    whatever the caller asked for — which is precisely the check this branch exists to be. Refusing
+    costs nothing: such a draft is re-editable, and being told to pick a recipient is a better outcome
+    than an unverifiable send.
     """
     cases = _cases_table()
     _contacts_table()

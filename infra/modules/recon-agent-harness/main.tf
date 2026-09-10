@@ -2,7 +2,7 @@
 # recon-agent-harness module: the managed AgentCore Harness sibling of the container runtime.
 # Coexists with the runtime — the agent-worker's AGENT_BACKEND selects which one serves an item.
 #
-# ⚠️ WHY THERE IS CLOUDFORMATION IN A PURE-TERRAFORM REPO (second instance; the first is
+# ⚠️ WHY THERE IS CLOUDFORMATION IN A PURE-TERRAFORM REPO (the other instance is
 # modules/recon-agent/kb-connector-target.tf, and the reasoning is the same shape)
 #
 # `aws_bedrockagentcore_harness` EXISTS as of aws 6.62.0 and is still unusable here. Four fields
@@ -20,19 +20,19 @@
 # resource, check whether those four have stopped being computed and whether `skill` gained an `s3`
 # block. Until then the port silently deploys a harness with service defaults and an open toolset.
 #
-# This replaced a boto3 script (manage_harness.py) driven by a terraform_data provisioner, plus a
-# `data "external"` that read the ARN back. Both needed python3 + boto3 on whatever machine ran
-# Terraform, which is not a thing you can rely on. Three things improved on the way past:
+# A CloudFormation stack is also the better shape than a provisioner shelling out to boto3, which is
+# the other way to reach these fields:
 #
-#   1. The ARN and the underlying runtime id are readOnly properties, so they come back as stack
-#      Outputs — no read-back shim, and no ListAgentRuntimes pagination to find the log group.
-#   2. A system-prompt edit is now an IN-PLACE UpdateHarness. It used to feed a `triggers_replace`
-#      hash, so editing system-prompt.md recreated the harness: new ARN, and a delete/create race
-#      against a VPC-mode teardown that has been observed to sit in DELETING for ~14 minutes.
-#   3. That teardown budget is now the stack's `timeout_in_minutes` rather than a 360-iteration
-#      Python sleep loop.
+#   * The harness ARN and the id of the runtime it materializes are readOnly properties, so they come
+#     back as stack Outputs — no read-back shim, and no ListAgentRuntimes pagination to find the
+#     harness's log group.
+#   * A system-prompt or tool-schema edit is an IN-PLACE UpdateHarness with a stable ARN. Anything
+#     that recreated the harness instead would race its own teardown, which in VPC mode can sit in
+#     DELETING for ~14 minutes.
+#   * The teardown budget is the stack's `timeout_in_minutes` rather than a hand-rolled poll loop.
 #
-# The apply path is deliberately toolchain-free: no docker, npm or pip runs during `terraform apply`.
+# The apply path is deliberately toolchain-free: no docker, npm, pip or python3 runs during
+# `terraform apply`, so a plain runner with only Terraform and AWS credentials can deploy this.
 ####################################################################################
 
 data "aws_caller_identity" "current" {}
@@ -61,7 +61,7 @@ locals {
     var.gateway_arn,
   ))
 
-  # VPC mode when subnets are supplied, else PUBLIC — the same decision manage_harness._network made.
+  # VPC mode when subnets are supplied, else PUBLIC.
   # Built with merge() rather than a conditional because the two branches are different object
   # TYPES (PUBLIC carries no NetworkModeConfig), and a `? :` requires both results to unify.
   harness_vpc_mode = length(var.vpc_subnet_ids) > 0
@@ -228,8 +228,8 @@ locals {
       }
     }
 
-    # Both are readOnlyProperties on the resource type, so GetAtt resolves them — which is what
-    # retires the boto3 read-back. AgentRuntimeId is nested, hence the dotted attribute path.
+    # Both are readOnlyProperties on the resource type, so GetAtt resolves them and no read-back API
+    # call is needed. AgentRuntimeId is nested, hence the dotted attribute path.
     #
     # ⚠️ The runtime id is NOT cosmetic. A harness named <name> runs as an AgentCore runtime whose
     # id suffix is service-generated and changes whenever the harness is recreated, so its log group
@@ -261,6 +261,18 @@ resource "aws_s3_object" "harness_template" {
   content_type = "application/json"
 }
 
+# ⚠️ HarnessName is the resource type's only create-only property, and a harness cannot be imported
+# into a CloudFormation stack. So if a harness named `<prefix>_harness` already exists in the account
+# outside this stack, CreateHarness collides on the name and the stack rolls back. Delete it first
+# and wait for it to disappear from list-harnesses — a VPC-mode harness can sit in DELETING for ~14
+# minutes, and creating alongside a DELETING harness collides just the same:
+#
+#   aws bedrock-agentcore-control list-harnesses --region <region> \
+#     --query "harnesses[?harnessName=='<prefix>_harness'].harnessId" --output text
+#   aws bedrock-agentcore-control delete-harness --harness-id <id> --region <region>
+#
+# The failure mode is loud (stack rollback on a name collision), not silent, and the new ARN reaches
+# the Tier-1 worker through this module's outputs, so nothing else needs touching.
 resource "aws_cloudformation_stack" "harness" {
   name = "${var.name_prefix}-harness"
 
@@ -279,11 +291,11 @@ resource "aws_cloudformation_stack" "harness" {
   #
   # CloudFormation's GetTemplate returns non-ASCII mangled: every em dash in the tool descriptions and
   # the system prompt comes back as "?". The stored template and the live harness are both CORRECT
-  # (verified against get-harness: the em dashes are intact), but Terraform compares the config's
-  # template_body against that mangled read, so it never matches. The result was a permanent diff that
-  # re-ran UpdateHarness on every apply and, because four resources depend on the stack's outputs,
-  # dragged the Tier-1 worker, the online-eval config and the frontend task definition into an apply
-  # loop that never reached "No changes".
+  # (get-harness shows the em dashes intact), but Terraform compares the config's template_body against
+  # that mangled read, so it can never match. With template_body that is a PERMANENT diff: UpdateHarness
+  # re-runs on every apply and, because four resources depend on the stack's outputs, drags the Tier-1
+  # worker, the online-eval config and the frontend task definition into an apply loop that never
+  # reaches "No changes".
   #
   # Hosting the template in S3 removes the body from the comparison: Terraform diffs template_url,
   # which carries a content hash, so a REAL template change still updates the stack while a mangled
@@ -297,36 +309,4 @@ resource "aws_cloudformation_stack" "harness" {
   timeout_in_minutes = 60
 
   depends_on = [aws_iam_role_policy.harness]
-}
-
-# Drop the retired boto3 provisioner from state without running it.
-#
-# ⚠️ `destroy = false` is not cosmetic here, and neither is the manual step it implies.
-#
-# A plain deletion would run terraform_data.harness's `when = destroy` provisioner, which invoked
-# `manage_harness.py --delete` — a script this commit removes. The provisioner carried
-# `on_failure = continue`, so the missing script would NOT fail the apply: it would log, continue,
-# and leave the live harness in place. CreateHarness then collides on HarnessName (the resource
-# type's only create-only property) and the stack rolls back. The same happens, for the original
-# reason, on any runner without boto3 — which is the whole point of this change.
-#
-# ⭐️ ONE-TIME MANUAL STEP, before the first apply of this commit in any environment that already
-# has a harness:
-#
-#   aws bedrock-agentcore-control list-harnesses --region <region> \
-#     --query "harnesses[?harnessName=='<prefix>_harness'].harnessId" --output text
-#   aws bedrock-agentcore-control delete-harness --harness-id <id> --region <region>
-#
-# Then WAIT for it to disappear from list-harnesses. A VPC-mode harness has been observed in
-# DELETING for ~14 minutes; creating alongside a DELETING harness collides on the name just the
-# same. The harness cannot be imported into a CloudFormation stack, so this recreate is
-# unavoidable — the new ARN flows to the Tier-1 worker through module outputs, so nothing else
-# needs touching. If you skip this, the failure is loud (stack rollback on a name collision), not
-# silent.
-removed {
-  from = terraform_data.harness
-
-  lifecycle {
-    destroy = false
-  }
 }

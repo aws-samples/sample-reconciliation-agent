@@ -1,10 +1,10 @@
 """Tests for :func:`notice_search_summary` — the full matched-notice set persisted for the UI.
 
-The bug these guard against: the trace's ``tool_output`` is capped at 600 characters, one notice row
-is larger than that, and the UI used to re-parse the resulting JSON fragment and report "matched no
-notices" on cases that had matched five. This function is the untruncated record that replaces it, so
-what matters here is that no row is dropped or altered on the way through — and that a genuinely
-empty search still reads as empty rather than as a failure.
+The failure these guard against: the trace's ``tool_output`` is capped at 600 characters and one notice
+row is larger than that, so a UI re-parsing that JSON fragment reports "matched no notices" on a case
+that matched five. This function is the untruncated record the UI reads instead, so what matters here is
+that no row is dropped or altered on the way through — and that a genuinely empty search still reads as
+empty rather than as a failure.
 """
 
 import json

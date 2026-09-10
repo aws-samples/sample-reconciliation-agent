@@ -475,10 +475,10 @@ export async function POST(
           { status: 409 },
         );
       // Reach the terminal state BEFORE the notification, and never let the notification fail the
-      // request. Previously the (unwrapped) send sat between APPROVED and RESOLVED, so a Graph
-      // outage threw, the outer catch returned 502, and the case was left at APPROVED — which the
-      // status tool will not transition again, so every retry answered "case is no longer awaiting
-      // approval" and the case was unreachable from the UI forever.
+      // request. An unwrapped send between APPROVED and RESOLVED strands the case permanently: a
+      // Graph outage throws, the outer catch returns 502, and the case is left at APPROVED — which
+      // the status tool will not transition again, so every retry answers "case is no longer awaiting
+      // approval" and the case is unreachable from the UI.
       //
       // Ordering the two this way is safe precisely because this mail is NOT the deliverable: the
       // interceptor pins its sole recipient to an active internal_notification contact, so it is

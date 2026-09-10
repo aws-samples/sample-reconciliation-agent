@@ -8,13 +8,12 @@ import {
 // GET ?days=7 → per-evaluator daily average + sample count from the Bedrock-AgentCore/Evaluations
 // namespace. The frontend renders a line chart + stat tiles from this data.
 //
-// Metric layout (verified live 2026-07-28): the evaluation service publishes ONE METRIC PER
-// EVALUATOR — the metric NAME is the evaluator name (e.g. "Builtin.Helpfulness",
-// "recon_dev_analyst_agreement") — dimensioned by service.name (per agent backend), plus
-// finer-grained sets that add onlineEvaluationConfigId and/or label. There is NO
-// "EvaluationScore" metric with an "EvaluatorId" dimension (the original query matched
-// nothing, leaving the panel permanently on its empty state). SEARCH expressions target the
-// {service.name}-only dimension set and return one series per backend, which we merge with a
+// Metric layout: the evaluation service publishes ONE METRIC PER EVALUATOR — the metric NAME is the
+// evaluator name (e.g. "Builtin.Helpfulness", "recon_dev_analyst_agreement") — dimensioned by
+// service.name (per agent backend), plus finer-grained sets that add onlineEvaluationConfigId and/or
+// label. There is NO "EvaluationScore" metric with an "EvaluatorId" dimension; querying for one
+// matches nothing and leaves this panel permanently on its empty state. SEARCH expressions target
+// the {service.name}-only dimension set and return one series per backend, which we merge with a
 // count-weighted average.
 export const runtime = "nodejs";
 

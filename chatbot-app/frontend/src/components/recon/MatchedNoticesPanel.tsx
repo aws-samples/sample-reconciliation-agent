@@ -18,15 +18,15 @@ import SourceDocumentPreview from "@/components/recon/SourceDocumentPreview";
 // notice, so when they report "returned nothing" the next question is always whether a notice was found
 // at all. An empty match is therefore rendered, not hidden: it is the reason for the score.
 //
-// TWO SOURCES, in priority order, and the reason is a bug this panel used to have:
+// TWO SOURCES, in priority order:
 //   1. `case.notice_search` — the full rows, persisted by the agent. Authoritative.
-//   2. the trace, for cases proposed before (1) existed.
+//   2. the trace, for a case that persisted no notice_search.
 // (2) can only ever be best-effort. The trace's `tool_output` is a 600-character DISPLAY SUMMARY
 // (`harness_agent.stream._summarize`) and one notice row is larger than that, so what is stored is a
-// JSON *fragment*. This panel used to parse that fragment, swallow the failure, and render "matched no
-// notices" on cases that had matched five — while the evidence table beside it cited those notices by
-// id. A parse failure is therefore now reported AS a parse failure; it is never rendered as an empty
-// result, because those two things lead an analyst to opposite conclusions about the same case.
+// JSON *fragment*. Parsing that fragment and swallowing the failure renders "matched no notices" on a
+// case that matched five — while the evidence table beside it cites those notices by id. So a parse
+// failure is reported AS a parse failure and never as an empty result: the two lead an analyst to
+// opposite conclusions about the same case.
 
 /** One row as `search_notices` returns it. Every field is optional — the tool omits what a notice class does not carry. */
 interface NoticeRow {
@@ -219,12 +219,15 @@ function NoticeRowView({ row, index }: { row: NoticeRow; index: number }) {
   const amount = amountLabel(row);
   const alerts = row.confidence_alert_count ?? 0;
   // `source_document` IS the pipeline's object key for an IDP-ingested notice -- the hook writes
-  // `source_document=object_key` (backend/idp_hook/mapper.py). A SEEDED notice carries a friendly
-  // filename instead, which the pipeline has no record of; that case is not special-cased here on
-  // purpose. The source route resolves every key through the pipeline's own `getDocument` before
-  // reading a byte, so an unresolvable one comes back as a 404 that names it, and the preview shows
-  // that sentence. Guessing here ("does this look like a key?") would either hide a real document or
-  // invent a reason it is missing.
+  // `source_document=object_key` (backend/idp_hook/mapper.py). Whether a given notice HAS a source file
+  // is not guessed here: the source route resolves the key against recon's own notice row and serves
+  // bytes only for a row whose `parse_method` is `IDP`, so a notice with no document behind it comes
+  // back as a 404 that says so and the preview shows that sentence. Guessing here ("does this look like
+  // an object key?") would either hide a real document or invent a reason one is missing.
+  //
+  // That gate matters for the structured-feed adapter to come, whose notices will have no source file at
+  // all. It is not a fix for anything on screen today -- the notices table is never seeded (see
+  // `infra/modules/notice-store/main.tf`), so every row in it came from a real document.
   const sourceKey = (row.source_document ?? "").trim() || null;
 
   // Listed keys first in their declared order, then anything else the tool returned, so an upstream
@@ -360,7 +363,7 @@ export function MatchedNoticesPanel({
           </p>
         ) : notices.length === 0 && unreadable ? (
           // NOT the empty state. The search returned something this page cannot read, and saying
-          // "matched no notices" here is what previously contradicted the evidence table above.
+          // "matched no notices" here would contradict the evidence table above.
           <p
             className="rc-mono text-[12px]"
             style={{ color: "var(--rc-amber)" }}

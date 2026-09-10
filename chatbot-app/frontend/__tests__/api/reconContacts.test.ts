@@ -148,8 +148,8 @@ describe("POST /api/recon/config/contacts", () => {
   it("stores any well-formed counterparty address and says nothing about the send gate", async () => {
     // The allowlist governs SENDING, and this route is not the gate. An admin maintains addresses for
     // counterparties the deployment has not been configured to email yet, so the row is written with
-    // no commentary. It previously came back with an amber advisory attached to the 201, which read as
-    // a BLOCKED SAVE on a save that had in fact succeeded -- the reason the advisory is gone.
+    // no commentary. An amber advisory attached to the 201 reads as a BLOCKED SAVE on a save that in
+    // fact succeeded, which is worse than silence.
     const { puts } = seed({});
     const res = await contactsRoute.POST(
       post("http://x/api/recon/config/contacts", {

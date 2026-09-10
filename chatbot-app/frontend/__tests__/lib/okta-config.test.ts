@@ -1,10 +1,10 @@
 /**
- * Okta callback-URL resolution (live-QA P0-1).
+ * Okta callback-URL resolution.
  *
- * The defect was that the redirect URI came only from `window.location.origin`, so it silently
- * became whatever host served the app — a generated *.cloudfront.net domain that changes when the
- * distribution is recreated, at which point Okta rejects the login because that URI was never
- * registered. These tests pin the precedence: an explicitly configured URI always wins.
+ * Deriving the redirect URI from `window.location.origin` alone makes it silently become whatever
+ * host serves the app — a generated *.cloudfront.net domain that changes when the distribution is
+ * recreated, at which point Okta rejects the login because that URI was never registered. These
+ * tests pin the precedence: an explicitly configured URI always wins.
  *
  * `NEXT_PUBLIC_*` values are read at module load, so each case re-imports the module with
  * `vi.resetModules()` after setting the environment.
@@ -91,7 +91,7 @@ describe("silent-renewal configuration", () => {
   it("requests offline_access", async () => {
     // Ticking "Refresh Token" on the Okta app only PERMITS the grant. Without this scope in the
     // /authorize request no refresh token is ever minted, and the session cannot renew itself —
-    // which is the whole reason expiry used to mean a full sign-in redirect.
+    // so expiry means a full sign-in redirect instead.
     const { oktaConfig } = await loadConfig(PINNED_URI);
     expect(oktaConfig.scopes).toContain("offline_access");
   });

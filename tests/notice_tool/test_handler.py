@@ -8,7 +8,7 @@ from moto import mock_aws
 
 from backend.notice_tool.handler import handle
 from backend.recon_core.notices import Notice, NoticeStore
-from tests.recon_core.test_notices import _make_notices_table
+from tests.recon_core.test_notices import _document_record, _make_notices_table, _tracking_snapshot
 
 
 @pytest.fixture(autouse=True)
@@ -201,3 +201,106 @@ def test_page_images_are_never_returned_to_the_model() -> None:
     assert "idp_pages" not in out["rows"][0]
     # And it IS on the stored item — otherwise this test would pass on a notice that never had one.
     assert "idp_pages" in store.raw(notice_id="NTC-PAGES")
+
+
+@mock_aws
+def test_tracking_row_is_excluded_from_the_scan_path() -> None:
+    """No selective hint forces a table scan; the record_kind guard must still apply there.
+
+    _matches is the single choke point for both the scan and the indexed-query path, so this test
+    and test_tracking_row_is_excluded_from_the_indexed_query_path together prove it runs on both.
+    """
+    _make_notices_table()
+    _seed()
+    store = NoticeStore(table_name="recon-notices")
+    store.put_document_record(record=_document_record())
+
+    out = handle({}, None)
+    returned = {r["notice_id"] for r in out["rows"]}
+    assert returned == {"NTC-1", "NTC-2"}
+    assert "idp-inbox/2026/03/01/wire-0007.pdf" not in returned
+
+
+@mock_aws
+def test_tracking_row_is_excluded_from_the_indexed_query_path() -> None:
+    """The FILTER excludes a tracking row, not the index merely lacking it.
+
+    The tracking row is seeded with a `counterparty` AND `notice_date` it would not normally carry
+    (a real FAILED-before-extraction row has neither), specifically so it lands INSIDE
+    counterparty-index. If `_matches` did not exclude it, the query would return it; the assertion
+    that it is absent therefore proves the filter did the work, not an accident of what the GSI
+    happens to contain.
+    """
+    _make_notices_table()
+    _seed()
+    store = NoticeStore(table_name="recon-notices")
+    store.put_document_record(
+        record=_document_record(
+            notice_id="idp-inbox/2026/03/09/tracking-only.pdf",
+            counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.",
+            notice_date="2026-03-09",
+        )
+    )
+
+    out = handle({"counterparty": "CINDERMOOR LOGISTICS HOLDINGS INC."}, None)
+    returned = {r["notice_id"] for r in out["rows"]}
+    assert "idp-inbox/2026/03/09/tracking-only.pdf" not in returned
+    assert returned == {"NTC-1", "NTC-2"}
+
+
+@mock_aws
+def test_a_row_with_no_record_kind_attribute_is_still_returned() -> None:
+    """Absence of `record_kind` must mean "notice" -- every row written before the field existed.
+
+    Written directly with `table.put_item`, bypassing both `Notice` (whose `record_kind` field
+    defaults to `"notice"` and would always be present in the dump) and `put_document_record`
+    (which requires `record_kind == "document"`), because neither path can produce the one shape
+    this test needs: a real row that predates the attribute entirely.
+    """
+    table = _make_notices_table()
+    table.put_item(
+        Item={
+            "notice_id": "NTC-LEGACY",
+            "notice_class": "wire_confirmation",
+            "counterparty": "CINDERMOOR LOGISTICS HOLDINGS INC.",
+            "notice_date": "2026-03-01",
+            "extraction_confidence": Decimal("0.9"),
+            "confidence_alert_count": 0,
+        }
+    )
+
+    out = handle({"counterparty": "CINDERMOOR LOGISTICS HOLDINGS INC."}, None)
+    assert {r["notice_id"] for r in out["rows"]} == {"NTC-LEGACY"}
+
+
+@mock_aws
+def test_idp_bookkeeping_fields_are_withheld_but_still_stored() -> None:
+    """`record_kind`, `idp_record`, `idp_started_at` and `idp_tracking` never reach the model.
+
+    Asserted against a row that DOES carry all four (via `store.raw()`) rather than one that never
+    had them, so this test would fail if a future change stopped writing them instead of merely
+    passing by accident.
+    """
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    store.put(
+        notice=Notice(
+            notice_id="NTC-TRACKED",
+            notice_class="wire_confirmation",
+            counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.",
+            notice_date="2026-03-02",
+            idp_tracking=_tracking_snapshot(),
+            extraction_confidence=Decimal("0.9"),
+            confidence_alert_count=0,
+        )
+    )
+
+    out = handle({"counterparty": "CINDERMOOR LOGISTICS HOLDINGS INC."}, None)
+    row = next(r for r in out["rows"] if r["notice_id"] == "NTC-TRACKED")
+    withheld = ("record_kind", "idp_record", "idp_started_at", "idp_tracking")
+    for name in withheld:
+        assert name not in row
+
+    raw = store.raw(notice_id="NTC-TRACKED")
+    for name in withheld:
+        assert name in raw

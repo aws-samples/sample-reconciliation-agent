@@ -21,9 +21,10 @@ from backend.recon_core.schema import Proposal, ReasoningStep, ReconItem
 from backend.recon_core.status import CaseStatus
 from backend.recon_core.tier1_hint import read_hint
 
-# NOTE: IDP document lookup (get_results) is a gateway tool — the agent calls it over MCP through
-# the egress gateway (gateway_mcp: document-extraction___IDPTools___get_results), like every other
-# tool. There is no second IDP path: every document read is subject to the same interceptor.
+# NOTE: the agent has NO document-pipeline tool at all. What it needs about an extracted document —
+# the per-section classification and the extracted field values — is already on recon's own notice
+# row as `idp_sections`, which `notices___search_notices` returns. So a document lookup is an
+# ordinary gateway read of recon's own storage, subject to the same interceptor as every other tool.
 
 _LOG = logging.getLogger(__name__)
 
@@ -44,12 +45,12 @@ def flush_traces() -> None:
     entrypoint returns, so a short investigation returns with nearly everything still queued and
     those spans die with the container.
 
-    The symptom is not "no traces at all", which is why this survived. A long investigation looks
-    perfectly healthy because the batch timer fires several times mid-run -- observed live on
-    2026-09-04: sessions with 2516, 115 and 88 spans alongside sessions with exactly 1. Online
-    evaluation groups spans by session and cannot score a single span, so the short cases show
-    "No evaluation recorded for this case" indefinitely while the long ones score normally. The
-    evaluation config, its role, its data source and its evaluators were all correct the whole time.
+    The symptom is not "no traces at all", which is what makes it easy to miss. A long investigation
+    looks perfectly healthy because the batch timer fires several times mid-run, so sessions with
+    thousands of spans sit alongside sessions with exactly one. Online evaluation groups spans by
+    session and cannot score a single span, so the short cases show "No evaluation recorded for this
+    case" indefinitely while the long ones score normally — with the evaluation config, its role, its
+    data source and its evaluators all correct.
 
     Never raises. A tracing failure must not fail an invocation that already produced a proposal --
     that would trade a missing trace for a lost case.
@@ -71,22 +72,22 @@ def persist_proposal(*, cases: CaseStore, proposal: Proposal, advance: bool = Tr
     """Attach the proposal (classification + per-step reasoning) to the case, then (when
     ``advance``) transition IN_PROGRESS -> PROPOSED (guarded). All float confidences → Decimal.
 
-    ``advance=False`` re-attaches the proposal WITHOUT transitioning — used to re-persist after
-    the autonomous write so the appended ``execute`` trace step is stored (the case is already
-    PROPOSED by then; a second PROPOSED transition would be a guarded no-op)."""
+    ``advance=False`` re-attaches the proposal WITHOUT transitioning, which is how the appended
+    ``execute`` trace step gets stored after the autonomous write (the case is already PROPOSED by
+    then; a second PROPOSED transition would be a guarded no-op)."""
     steps = [
         {
             "skill": s.skill,
             "reasoning": s.reasoning,
             "evidence": s.evidence,
             "ts": s.ts,
-            # Typed-trace fields (None-valued keys are dropped so old cases stay lean).
+            # Typed-trace fields; None-valued keys are dropped so a stored trace stays lean.
             **{
                 k: v
                 for k, v in {
                     "kind": s.kind,
-                    # Written by nobody; present only on traces persisted before 2026-09-04. It sits
-                    # in this block precisely because it is None now — `Decimal(str(None))` raises.
+                    # Written by nobody, so always None. It sits inside this dropping block for
+                    # exactly that reason — `Decimal(str(None))` raises.
                     "confidence": None if s.confidence is None else Decimal(str(s.confidence)),
                     "tool": s.tool,
                     "tool_input": s.tool_input,
@@ -123,9 +124,105 @@ def persist_proposal(*, cases: CaseStore, proposal: Proposal, advance: bool = Tr
         # Decimal-safe like `steps`: notice rows carry float `amount` and `extraction_confidence`, and
         # boto3 rejects raw Python floats.
         notice_search=to_decimal_safe(proposal.notice_search),
+        # Read off the PROPOSAL rather than taken as an argument to this function, which is what makes
+        # it survive the repeated writes: `handler` persists the same proposal twice (once to reach
+        # PROPOSED before the gated write, once more to store the appended `execute` step), and an
+        # argument would have to be re-supplied at each of them — one omission and the row silently
+        # reverts to NULL, the failure `attach_proposal`'s note about this parameter describes.
+        # `persist_and_execute` sets it once, before the first of those writes.
+        # NOT run through `to_decimal_safe` — see the harness's persist for why the mapper's Decimals
+        # must not be re-coerced here.
+        token_usage=proposal.token_usage,
     )
     if advance:
         cases.transition("item_id", proposal.item_id, CaseStatus.PROPOSED)
+
+
+def resolve_model_id(*, ssm=None) -> str:
+    """Resolve the model id this invocation will ACTUALLY run on, live.
+
+    Read PER INVOCATION, not once at import. This container is long-lived and warm-reused, so an
+    import-time read would pin whichever model was selected when it started — exactly the staleness
+    the live setting exists to remove. ``MODEL_ID`` is the fallback, so a fresh deploy and an
+    unreachable parameter both behave as they did before.
+
+    A module-level function rather than two lines inside :func:`handler` because the answer is stored:
+    it labels the run's ``token_usage``, which is priced against it later. The entrypoint is untestable
+    wiring, so a resolution living there could only be checked by inspection — and a hard-coded
+    default is invisible in the stored row, which would simply carry a plausible id for a model that
+    never ran.
+
+    :param ssm: an SSM client, injected by tests; ``get_agent_model_id`` creates a real one when None.
+    :returns: the model id to invoke, from the operator's SSM selection or the deployed default.
+    """
+    from backend.recon_core.model_select import get_agent_model_id
+
+    return get_agent_model_id(
+        os.environ.get("AGENT_MODEL_PARAM", ""),
+        default=os.environ.get("MODEL_ID", "us.anthropic.claude-sonnet-5"),
+        ssm=ssm,
+    )
+
+
+def persist_and_execute(
+    *,
+    cases: CaseStore,
+    proposal: Proposal,
+    usages: list[dict],
+    model_id: str,
+    threshold: float | None,
+    invoker,
+) -> tuple[str, bool]:
+    """Attach the run's token usage, persist, run the gated write, re-persist, maybe auto-resolve.
+
+    Extracted from :func:`handler` so the WHOLE tail of the runtime path is testable: it holds two
+    writes and an unattended resolution, and every one of them has to carry the cost figure.
+
+    Order matters. ``token_usage`` is set on the proposal FIRST, before any write — the proposal is
+    persisted up to twice below, and ``maybe_auto_resolve`` closes the case without re-persisting it
+    at all, so a value attached later would miss the very cases nobody ever reviews.
+
+    :param cases: the case store holding the IN_PROGRESS case.
+    :param proposal: the scored proposal; MUTATED (``token_usage``, and ``steps`` by the write).
+    :param usages: every raw usage dict this invocation's model calls reported — the k classification
+        samples' plus the investigation loop's. Summed here, once, by the shared mapper.
+    :param model_id: the model this invocation actually ran on (:func:`resolve_model_id`). Required
+        keyword with NO default, matching ``harness_agent.worker.run_investigation``: an operator can
+        switch models from the Config tab, so a default here would mislabel — and therefore
+        misprice — every run made after such a switch, with nothing downstream able to detect it.
+    :param threshold: the admin auto-resolve threshold, or None when auto-resolution is off.
+    :param invoker: ``callable(action: dict) -> result`` performing the gated ledger write.
+    :returns: ``(execution outcome, whether the case was auto-resolved)``.
+    """
+    from backend.recon_core.auto_resolve import autonomous_execute, maybe_auto_resolve
+    from backend.recon_core.token_usage import summarize_token_usage
+
+    # k+1 model calls, ONE stored figure. `summarize_token_usage` — not a local sum — because the
+    # harness backend writes the same field and the case screen shows one number without saying which
+    # backend produced it, so a second summing implementation would be a second answer to "what does
+    # `input_tokens` count".
+    proposal.token_usage = summarize_token_usage(
+        usages=usages, model_id=model_id, backend="runtime"
+    )
+
+    # Persist the proposal (-> PROPOSED) BEFORE the autonomous write: the set_draw_status tool's
+    # server-side provenance gate reads the persisted proposed_action.reference off CASES_TABLE,
+    # so it must exist before the gated write is attempted.
+    persist_proposal(cases=cases, proposal=proposal)
+    outcome = autonomous_execute(proposal=proposal, threshold=threshold, invoker=invoker)
+    # Re-persist WITHOUT advancing so the `execute` trace step appended by autonomous_execute is
+    # stored (the case is already PROPOSED). Carries `token_usage` unchanged — it rides on the
+    # proposal, so this write cannot drop it.
+    if any(getattr(s, "kind", None) == "execute" for s in proposal.steps):
+        persist_proposal(cases=cases, proposal=proposal, advance=False)
+
+    resolved = False
+    if outcome == "executed":
+        # APPROVED -> notification -> RESOLVED. It transitions status and never re-attaches the
+        # proposal, so the usage an auto-resolved case carries is whatever the writes above stored —
+        # which is why it is attached at the top of this function and not after the gate.
+        resolved = maybe_auto_resolve(cases=cases, proposal=proposal, threshold=threshold)
+    return outcome, resolved
 
 
 def observed_tools_from(*, steps: list[ReasoningStep]) -> set[str]:
@@ -270,7 +367,7 @@ def _make_write_invoker():  # pragma: no cover - thin transport wrapper
 def _make_tool_caller():  # pragma: no cover - thin transport wrapper
     """Build the investigation tool transport — the shared Gateway-MCP caller.
 
-    The reads (search_ledger, search_guidance, get_results, search_correspondence) all go through
+    The reads (search_ledger, search_notices, search_guidance, search_correspondence) all go through
     the gateway like everything else; a tool failure degrades to an error dict so investigation
     continues (missing evidence lowers grounding → likelier escalation).
 
@@ -308,17 +405,13 @@ async def handler(payload, context):  # pragma: no cover - wiring, pure parts te
     from skills_loader import catalog, catalog_s3, load_skills, load_skills_s3
     from strands_investigator import make_strands_investigator
 
-    from backend.recon_core.model_select import get_agent_model_id
-
     item = ReconItem.model_validate(payload["item"])
-    # Read PER INVOCATION, not once at import. This container is long-lived and warm-reused, so an
-    # import-time read would pin whichever model was selected when it started — exactly the staleness
-    # the live setting exists to remove. The environment variable is the fallback, so a fresh deploy
-    # and an unreachable parameter both behave as they did before.
-    model_id = get_agent_model_id(
-        os.environ.get("AGENT_MODEL_PARAM", ""),
-        default=os.environ.get("MODEL_ID", "us.anthropic.claude-sonnet-5"),
-    )
+    model_id = resolve_model_id()
+    # Every model call this invocation makes appends its raw usage report here, in call order: k from
+    # the self-consistency classifier below, one more from the investigation loop. k+1 entries, summed
+    # once at the end by `persist_and_execute`. Reading only the investigation's — the single largest —
+    # would report roughly a quarter of real spend at k=3 and look entirely plausible on screen.
+    usages: list[dict] = []
     bucket = os.environ.get("ASSETS_BUCKET", "")
     prefix = os.environ.get("SKILLS_PREFIX", "skills/")
 
@@ -349,21 +442,23 @@ async def handler(payload, context):  # pragma: no cover - wiring, pure parts te
 
     # Self-consistency classification: k independent samples, majority vote. The vote returns the
     # class and its reasoning and no number — the auto-resolve gate scores evidence completeness
-    # alone, and gating on the agreement fraction was rejected outright (design D5: three samples
-    # give it four possible values and no calibration behind them). Sampling k times still buys a
-    # more stable label than one sample would, and the label picks the scoring denominator. Each
+    # alone, and the agreement fraction is deliberately not a gate (over three samples it has four
+    # possible values and no calibration behind them). Sampling k times still buys a more stable
+    # label than one sample would, and the label picks the scoring denominator. Each
     # sample is a single-turn Strands call — this container holds no bedrock-runtime client of its own.
     #
     # Tier-1's `tier1_break_type` is deliberately NOT fed into this prompt: all k samples share one
     # prompt, so pointing them at an answer would collapse the vote to unanimous regardless of how
     # ambiguous the item really is. The hint belongs on the INVESTIGATION prompt, where the skill is
     # actually chosen (strands_investigator._class_hint_block), and on the disagreement log below.
-    name, reasoning = classify_with_consistency(
+    vote = classify_with_consistency(
         model_id=model_id, system=system, item=item, catalog=cat, lessons=lessons
     )
+    # Every sample's usage, not just the last: these are k independent calls and each is billed.
+    usages.extend(vote.usages)
     classification = pick_class(
         catalog=cat,
-        fake_llm=lambda _cat: (name, reasoning),
+        fake_llm=lambda _cat: (vote.name, vote.reasoning),
         tier1_hint=read_hint(attributes=item.attributes or {}),
     )
     # Skills remain a composable library — the agent may run one OR several to reconcile the item
@@ -377,11 +472,13 @@ async def handler(payload, context):  # pragma: no cover - wiring, pure parts te
             system=system,
             lessons=lessons,
             tool_caller=_make_tool_caller(),
+            # The (k+1)-th report lands in the same list the classification samples went into.
+            usages=usages,
         ),
         skills=skills,
     )
 
-    from backend.recon_core.auto_resolve import get_threshold, maybe_auto_resolve
+    from backend.recon_core.auto_resolve import get_threshold
 
     score_by_evidence(
         prop=prop, skills=skills, observed_tools=observed_tools_from(steps=prop.steps)
@@ -392,26 +489,17 @@ async def handler(payload, context):  # pragma: no cover - wiring, pure parts te
         audit=os.environ.get("AUDIT_TABLE", "recon-audit"),
     )
 
-    # Confidence-gated AUTONOMOUS execution: when the computed evidence completeness clears the admin
-    # threshold AND there is a clean action, perform the write NOW (appending an `execute`
-    # trace entry) and then take the full auto-resolve path. Below threshold, no clean action,
-    # or a failed write => halt unactioned and escalate (PROPOSED) for human review.
-    from backend.recon_core.auto_resolve import autonomous_execute
-
+    # Confidence-gated AUTONOMOUS execution plus persistence, including the run's token usage — see
+    # `persist_and_execute`, which owns the ordering of the two writes and the unattended resolution.
     threshold = get_threshold(os.environ.get("AUTO_RESOLVE_PARAM", ""))
-    # Persist the proposal (-> PROPOSED) BEFORE the autonomous write: the set_draw_status tool's
-    # server-side provenance gate reads the persisted proposed_action.reference off CASES_TABLE,
-    # so it must exist before the gated write is attempted.
-    persist_proposal(cases=cases, proposal=prop)
-    outcome = autonomous_execute(proposal=prop, threshold=threshold, invoker=_make_write_invoker())
-    # Re-persist WITHOUT advancing so the `execute` trace step appended by autonomous_execute is
-    # stored (the case is already PROPOSED).
-    if any(getattr(s, "kind", None) == "execute" for s in prop.steps):
-        persist_proposal(cases=cases, proposal=prop, advance=False)
-
-    resolved = False
-    if outcome == "executed":
-        resolved = maybe_auto_resolve(cases=cases, proposal=prop, threshold=threshold)
+    outcome, resolved = persist_and_execute(
+        cases=cases,
+        proposal=prop,
+        usages=usages,
+        model_id=model_id,
+        threshold=threshold,
+        invoker=_make_write_invoker(),
+    )
     # Last thing before returning: AgentCore freezes the container on return, taking any queued
     # spans with it. See flush_traces().
     flush_traces()

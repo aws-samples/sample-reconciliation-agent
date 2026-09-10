@@ -173,8 +173,8 @@ def test_model_steps_and_catalog_dicts_render_identically() -> None:
     """The two backends pass different SHAPES of the same declaration; both must render the same.
 
     The runtime prompts from ``parse_skill`` records (``EvidenceStep`` models); the harness prompts
-    from ``catalog_entry`` projections (JSON dicts). If only one shape rendered, the backend passing
-    the other would silently prompt with no ids at all — which is the 2026-09-02 harness failure.
+    from ``catalog_entry`` projections (JSON dicts). If only one shape renders, the backend passing the
+    other silently prompts with no ids at all and the model invents them.
 
     :returns: None.
     """

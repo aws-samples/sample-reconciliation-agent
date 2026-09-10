@@ -45,7 +45,8 @@ variable "auth_mode" {
 
     "client_credentials" — App-only (service-account / 2LO) auth. The gateway acquires its own
     Graph token via client_credentials against Entra, independent of the inbound token's
-    issuer. This is what a Cognito-JWT-fronted gateway (like recon's) must use. Only app-only
+    issuer. This is what a gateway whose inbound auth is not Entra must use — including recon's,
+    whose gateways are AWS_IAM. Only app-only
     compatible Graph operations are exposed (see openapi-schema-app.json) — delegated-only
     endpoints like /me are not callable without a signed-in user.
   EOT

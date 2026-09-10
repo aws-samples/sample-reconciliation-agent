@@ -140,8 +140,8 @@ def test_two_matches_report_ambiguous():
     """The load-bearing distinction: candidates WERE found and uniqueness rejected them.
 
     "the ledger has two plausible entries" sends the agent to disambiguate between known rows;
-    "the ledger has nothing" sends it to look for a missing posting. Collapsing both to None (the
-    old behaviour) forced the agent to rediscover which case it was in.
+    "the ledger has nothing" sends it to look for a missing posting. Collapsing both to a bare None
+    forces the agent to rediscover which case it is in.
     """
     rows = [_row("GL-1", "2052425.70"), _row("GL-2", "400000.00")]
     got = gl_lookup(ITEM, invoker=_FakeInvoker(rows))

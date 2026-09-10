@@ -149,10 +149,9 @@ class IdpOutputReader:
                 "fields": inference_result,
                 "output_uri": f"s3://{bucket}/{key}",
             }
-            # Flatten ONCE. Both aggregates below reduce these same records, and the records
-            # themselves are kept and stored on the notice so the Documents tab can render what was
-            # read without calling back into the pipeline. Before this they were walked three times
-            # per section and discarded every time.
+            # Flatten ONCE, rather than once per consumer: both aggregates below reduce these same
+            # records, and the records themselves are kept and stored on the notice so the Documents
+            # tab can render what was read without calling back into the pipeline.
             records = field_confidences(
                 explainability_info=explainability, inference_result=inference_result
             )

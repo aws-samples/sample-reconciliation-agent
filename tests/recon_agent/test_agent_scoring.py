@@ -146,12 +146,12 @@ def test_a_tool_call_with_no_recorded_output_does_not_count_as_observed() -> Non
             skill="s",
             reasoning="rows",
             kind="tool_call",
-            tool="get_results",
+            tool="search_notices",
             tool_output='{"rows": [1]}',
         ),
     ]
     # search_ledger left tool_output at None; search_correspondence returned an empty string.
-    assert observed_tools_from(steps=steps) == {"get_results"}
+    assert observed_tools_from(steps=steps) == {"search_notices"}
 
 
 def test_evidence_step_entries_are_not_mistaken_for_observed_tools() -> None:

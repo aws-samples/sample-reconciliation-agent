@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import boto3
 import pytest
+from boto3.dynamodb.conditions import Key
 from moto import mock_aws
 from pydantic import ValidationError
 
@@ -72,7 +73,12 @@ def test_notice_accepts_an_explicit_unresolved_alert_count() -> None:
 
 
 def _make_notices_table():
-    """Create the moto-mocked recon-notices table with both GSIs from the Terraform module.
+    """Create the moto-mocked recon-notices table with all three GSIs from the Terraform module.
+
+    ``idp-document-index`` is the GSI a later Terraform task creates for the Documents tab (hash
+    ``idp_record``, range ``idp_started_at``) -- added here now because every test in this file
+    builds its table through this helper, and a query test against that index would otherwise fail
+    for a reason unrelated to whatever it is actually testing.
 
     :returns: the boto3 Table resource, so callers can scan it directly.
     """
@@ -85,6 +91,8 @@ def _make_notices_table():
             {"AttributeName": "counterparty", "AttributeType": "S"},
             {"AttributeName": "notice_date", "AttributeType": "S"},
             {"AttributeName": "reference", "AttributeType": "S"},
+            {"AttributeName": "idp_record", "AttributeType": "S"},
+            {"AttributeName": "idp_started_at", "AttributeType": "S"},
         ],
         GlobalSecondaryIndexes=[
             {
@@ -98,6 +106,14 @@ def _make_notices_table():
             {
                 "IndexName": "reference-index",
                 "KeySchema": [{"AttributeName": "reference", "KeyType": "HASH"}],
+                "Projection": {"ProjectionType": "ALL"},
+            },
+            {
+                "IndexName": "idp-document-index",
+                "KeySchema": [
+                    {"AttributeName": "idp_record", "KeyType": "HASH"},
+                    {"AttributeName": "idp_started_at", "KeyType": "RANGE"},
+                ],
                 "Projection": {"ProjectionType": "ALL"},
             },
         ],
@@ -217,10 +233,10 @@ def test_a_blank_canonical_field_is_kept_as_blank() -> None:
 
 
 def test_no_human_validation_field_exists() -> None:
-    """Owner decision (design D7): no validation status, no reviewer, and therefore no HIGH band.
+    """Owner decision: no validation status, no reviewer, and therefore no HIGH band.
 
-    Asserted rather than trusted, because re-adding one is a one-line change that reads as an
-    improvement — and it would silently make the HIGH band reachable again.
+    Asserted rather than trusted, because adding one is a one-line change that reads as an
+    improvement — and it would silently make the HIGH band reachable.
     """
     forbidden = sorted(
         name for name in Notice.model_fields if "validation" in name or name.startswith("reviewed_")
@@ -323,3 +339,253 @@ def test_an_oversized_extraction_leaves_the_rest_of_the_notice_intact() -> None:
     assert fetched.amount == Decimal("9640.18")
     assert fetched.idp_sections == []  # the model's default, with the reason beside it
     assert fetched.idp_sections_omitted is not None
+
+
+# --- IDP tracking snapshot, and the new idp-document-index GSI it feeds ----------------------------
+
+
+def _tracking_snapshot(**overrides: object) -> dict:
+    """Build a minimal ``build_tracking_snapshot``-shaped dict, overriding named keys.
+
+    :param overrides: key values to replace in the baseline snapshot.
+    :returns: a plain dict in the shape ``backend/idp_hook/tracking.build_tracking_snapshot``
+        returns.
+    """
+    base: dict[str, object] = {
+        "object_status": "SUCCEEDED",
+        "workflow_status": "SUCCEEDED",
+        "initial_event_time": "2026-03-01T12:00:00+00:00",
+        "completion_time": "2026-03-01T12:05:00+00:00",
+        "page_count": 3,
+        "snapshot_at": "2026-03-01T12:05:01+00:00",
+        "sections_meta": [],
+    }
+    base.update(overrides)
+    return base
+
+
+def _document_record(**overrides: object) -> dict:
+    """Build a valid ``put_document_record`` payload, overriding named keys.
+
+    :param overrides: key values to replace in the baseline record.
+    :returns: a plain dict with ``notice_id``, ``record_kind`` and a usable ``idp_tracking``
+        snapshot. Deliberately does NOT include ``idp_record``/``idp_started_at``:
+        ``put_document_record`` derives both from ``idp_tracking``, and a fixture that also
+        supplied its own copy could mask a derivation bug -- see
+        ``test_put_document_record_derives_idp_started_at_from_the_snapshot`` below, which
+        supplies a deliberately WRONG copy to prove derivation wins.
+    """
+    base: dict[str, object] = {
+        "notice_id": "idp-inbox/2026/03/01/wire-0007.pdf",
+        "record_kind": "document",
+        "idp_tracking": _tracking_snapshot(object_status="FAILED", workflow_status="FAILED"),
+        "notice_failure_reason": "IDP execution FAILED before a notice could be extracted",
+    }
+    base.update(overrides)
+    return base
+
+
+@mock_aws
+def test_put_with_a_snapshot_sets_the_gsi_key_attributes() -> None:
+    """A snapshot with a start time promotes both idp_record and idp_started_at to top level."""
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    store.put(notice=_notice(idp_tracking=_tracking_snapshot()))
+    raw = store.raw(notice_id="NTC-0001")
+    assert raw["idp_record"] == "document"
+    assert raw["idp_started_at"] == "2026-03-01T12:00:00+00:00"
+
+
+@mock_aws
+def test_put_with_no_snapshot_sets_neither_gsi_key_attribute() -> None:
+    """No snapshot at all means the row correctly stays out of the new index."""
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    store.put(notice=_notice())
+    raw = store.raw(notice_id="NTC-0001")
+    assert "idp_record" not in raw
+    assert "idp_started_at" not in raw
+
+
+@mock_aws
+def test_put_with_a_snapshot_missing_initial_event_time_sets_neither_gsi_key_attribute() -> None:
+    """Half a GSI key is not stored either -- see put()'s comment on why this is deliberate."""
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    snapshot = _tracking_snapshot()
+    del snapshot["initial_event_time"]
+    store.put(notice=_notice(idp_tracking=snapshot))
+    raw = store.raw(notice_id="NTC-0001")
+    assert "idp_record" not in raw
+    assert "idp_started_at" not in raw
+
+
+@mock_aws
+def test_put_document_record_round_trips() -> None:
+    """A tracking-only row is readable via raw() and carries no Notice-only fields."""
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    store.put_document_record(record=_document_record())
+    raw = store.raw(notice_id="idp-inbox/2026/03/01/wire-0007.pdf")
+    assert raw["record_kind"] == "document"
+    assert raw["idp_record"] == "document"
+    assert raw["idp_started_at"] == "2026-03-01T12:00:00+00:00"
+    assert raw["notice_failure_reason"] == "IDP execution FAILED before a notice could be extracted"
+
+
+@pytest.mark.parametrize("missing_key", ["notice_id", "record_kind"])
+# "   " (whitespace-only) pins the validator's `.strip()` call specifically: `""` alone is already
+# falsy without stripping, so a future edit that weakened the check to `not value` and dropped
+# `.strip()` would still pass every case here if this one were missing.
+@pytest.mark.parametrize("bad_value", [None, "", "   "])
+@mock_aws
+def test_put_document_record_rejects_a_blank_notice_id_or_record_kind(
+    missing_key: str, bad_value: object
+) -> None:
+    """`notice_id` and `record_kind` must be caught by name, never defaulted."""
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    record = _document_record()
+    record[missing_key] = bad_value
+    with pytest.raises(ValueError, match=missing_key):
+        store.put_document_record(record=record)
+
+
+@pytest.mark.parametrize("missing_key", ["notice_id", "record_kind"])
+@mock_aws
+def test_put_document_record_rejects_an_absent_notice_id_or_record_kind(missing_key: str) -> None:
+    """Deleting the key outright must also be caught by name."""
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    record = _document_record()
+    del record[missing_key]
+    with pytest.raises(ValueError, match=missing_key):
+        store.put_document_record(record=record)
+
+
+@mock_aws
+def test_put_document_record_rejects_a_falsy_non_string_record_kind() -> None:
+    """`0`/`False` are falsy but not blank strings -- the equality check must catch them too.
+
+    This is the hole a mere blank check (``isinstance(value, str) and not value.strip()``) would
+    miss: `isinstance` is False for a non-string, so a falsy-but-non-string value would sail
+    through it. `record_kind` gets no backstop from DynamoDB's own string-typed key attributes the
+    way `notice_id` does, so this has to be caught here.
+    """
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    for bad_value in (0, False):
+        record = _document_record(record_kind=bad_value)
+        with pytest.raises(ValueError, match="record_kind"):
+            store.put_document_record(record=record)
+
+
+@mock_aws
+def test_put_document_record_rejects_a_record_kind_that_is_not_document() -> None:
+    """A typo'd or wrong-value record_kind (e.g. "notice") must be rejected outright.
+
+    Letting it through would corrupt the row this method is meant to write with a value the
+    ConditionExpression's `:doc` literal can never match again -- see the comment at the check
+    this test exercises for the exact failure mode that would follow.
+    """
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    record = _document_record(record_kind="notice")
+    with pytest.raises(ValueError, match="record_kind"):
+        store.put_document_record(record=record)
+
+
+@mock_aws
+def test_put_document_record_rejects_a_missing_idp_tracking() -> None:
+    """No snapshot at all leaves nothing to derive the GSI key attributes from."""
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    record = _document_record()
+    del record["idp_tracking"]
+    with pytest.raises(ValueError, match="idp_tracking"):
+        store.put_document_record(record=record)
+
+
+@mock_aws
+def test_put_document_record_rejects_an_idp_tracking_with_no_initial_event_time() -> None:
+    """A snapshot missing the one field the GSI's range key comes from is just as unusable."""
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    snapshot = _tracking_snapshot()
+    del snapshot["initial_event_time"]
+    record = _document_record(idp_tracking=snapshot)
+    with pytest.raises(ValueError, match="idp_tracking"):
+        store.put_document_record(record=record)
+
+
+@mock_aws
+def test_put_document_record_derives_idp_started_at_from_the_snapshot() -> None:
+    """The GSI's range key must come FROM idp_tracking, never from an independently-supplied copy.
+
+    This is the test that would have caught a Task 4 bug computing `idp_started_at` from
+    failure-detection time instead of ingestion-start time: a caller-supplied `idp_started_at` that
+    disagrees with the snapshot is deliberately supplied here and must be IGNORED.
+    """
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    record = _document_record(
+        idp_tracking=_tracking_snapshot(initial_event_time="2026-03-01T09:30:00+00:00"),
+    )
+    record["idp_record"] = "document"
+    record["idp_started_at"] = "1999-01-01T00:00:00+00:00"  # wrong on purpose; must be overwritten
+    store.put_document_record(record=record)
+    raw = store.raw(notice_id=record["notice_id"])
+    assert raw["idp_started_at"] == "2026-03-01T09:30:00+00:00"
+    assert raw["idp_record"] == "document"
+
+
+@mock_aws
+def test_put_over_an_existing_tracking_row_leaves_exactly_one_notice_item() -> None:
+    """The duplicate-row guard: a successful reprocess overwrites its own FAILED tracking row."""
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    notice_id = "idp-inbox/2026/03/01/wire-0007.pdf"
+    store.put_document_record(record=_document_record(notice_id=notice_id))
+
+    store.put(notice=_notice(notice_id=notice_id))
+
+    table = boto3.resource("dynamodb", region_name="us-east-1").Table("recon-notices")
+    items = table.scan()["Items"]
+    assert len(items) == 1
+    assert items[0]["record_kind"] == "notice"
+    assert "notice_failure_reason" not in items[0]
+
+
+@mock_aws
+def test_put_document_record_over_an_existing_notice_is_a_no_op() -> None:
+    """A reprocess FAILURE must never clobber a good notice already written for this id."""
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    notice_id = "idp-inbox/2026/03/01/wire-0007.pdf"
+    store.put(notice=_notice(notice_id=notice_id, reference="WIRE-KEEP-ME"))
+
+    # Must not raise, and must not change the stored notice.
+    store.put_document_record(record=_document_record(notice_id=notice_id))
+
+    fetched = store.get(notice_id=notice_id)
+    assert fetched.reference == "WIRE-KEEP-ME"
+    assert fetched.record_kind == "notice"
+
+
+@mock_aws
+def test_a_document_row_is_queryable_on_the_new_index_and_absent_from_counterparty_index() -> None:
+    """The GSI is what lets the tab list documents by ingest time; a tracking row has no counterparty."""
+    _make_notices_table()
+    store = NoticeStore(table_name="recon-notices")
+    store.put_document_record(record=_document_record())
+
+    table = boto3.resource("dynamodb", region_name="us-east-1").Table("recon-notices")
+    by_index = table.query(
+        IndexName="idp-document-index",
+        KeyConditionExpression=Key("idp_record").eq("document"),
+    )["Items"]
+    assert len(by_index) == 1
+    assert by_index[0]["notice_id"] == "idp-inbox/2026/03/01/wire-0007.pdf"
+
+    by_counterparty = table.scan(IndexName="counterparty-index")["Items"]
+    assert by_counterparty == []

@@ -4,10 +4,10 @@ Tier-1 auto-resolutions land in AUTO_CLEARED (terminal). Escalated items flow
 PENDING -> IN_PROGRESS -> PROPOSED -> APPROVED -> RESOLVED, with REJECTED looping back
 to IN_PROGRESS for re-investigation. AUTO_CLEARED and RESOLVED are terminal.
 
-An investigation that ERRORS lands in FAILED, which is retryable (FAILED -> IN_PROGRESS).
-Before FAILED existed, a runtime error left the case in IN_PROGRESS forever: only the agent
-writes the PROPOSED row, so a failed run produced a queue entry that never advanced and gave
-an analyst nothing to distinguish "still thinking" from "died 40 minutes ago".
+An investigation that ERRORS lands in FAILED, which is retryable (FAILED -> IN_PROGRESS). FAILED
+exists because only the agent writes the PROPOSED row: without it a runtime error leaves the case in
+IN_PROGRESS forever, a queue entry that never advances and gives an analyst nothing to distinguish
+"still thinking" from "died 40 minutes ago".
 """
 
 from enum import Enum
@@ -42,7 +42,7 @@ _ALLOWED: dict[CaseStatus, set[CaseStatus]] = {
     },
     # From FAILED: retry (back to IN_PROGRESS), give up terminally, or age out when the retry cap
     # is reached. Deliberately NOT terminal — most causes are transient (throttling, a token cap, a
-    # tool outage), and the alternative was an analyst re-submitting the item by hand.
+    # tool outage), and the alternative is an analyst re-submitting the item by hand.
     CaseStatus.FAILED: {CaseStatus.IN_PROGRESS, CaseStatus.CLOSED_NO_ACTION, CaseStatus.AGED},
     CaseStatus.PROPOSED: {CaseStatus.APPROVED, CaseStatus.REJECTED},
     CaseStatus.APPROVED: {CaseStatus.RESOLVED},

@@ -1,7 +1,7 @@
 /**
  * Okta OIDC configuration. Active when NEXT_PUBLIC_AUTH_PROVIDER === 'okta'.
  *
- * Replaces Cognito/Entra as the identity provider when configured. Live login requires an Okta
+ * Replaces Entra as the identity provider when configured. Live login requires an Okta
  * org + OIDC app (issuer + client id); with the env vars unset the app runs unauthenticated
  * (local dev / build) exactly like the Entra path.
  */
@@ -27,14 +27,14 @@ export const OKTA_REDIRECT_URI_IS_PINNED = !!pinnedRedirectUri;
 /**
  * Redirect URI Okta returns to after login (the app's OIDC callback).
  *
- * `NEXT_PUBLIC_OKTA_REDIRECT_URI` wins when set. That precedence is the fix for live-QA finding
- * P0-1: deriving the URI from `window.location.origin` alone means it silently becomes whatever
- * host the app is served from, and this deployment's public host is a generated
- * `*.cloudfront.net` domain that changes whenever the distribution is recreated. Okta only
- * redirects to URIs pre-registered on the app, so every such rebuild broke login until someone
- * re-registered the new domain by hand — and the failure looked like a hung spinner, not a
- * configuration error. Pinning it to a stable URL (a custom domain, or a distribution domain you
- * intend to keep) makes the registered value and the requested value the same by construction.
+ * `NEXT_PUBLIC_OKTA_REDIRECT_URI` wins when set, and that precedence is load-bearing: deriving the
+ * URI from `window.location.origin` alone means it silently becomes whatever host the app is served
+ * from, and this deployment's public host is a generated `*.cloudfront.net` domain that changes
+ * whenever the distribution is recreated. Okta only redirects to URIs pre-registered on the app, so
+ * every such rebuild breaks login until someone re-registers the new domain by hand — and the
+ * failure looks like a hung spinner, not a configuration error. Pinning it to a stable URL (a custom
+ * domain, or a distribution domain you intend to keep) makes the registered value and the requested
+ * value the same by construction.
  *
  * The origin-derived fallback is retained deliberately: it is what makes `next dev` on
  * localhost work with no configuration at all.

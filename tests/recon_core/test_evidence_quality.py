@@ -1,11 +1,11 @@
 """One case per row of the verdict table, plus the traps the table cannot express.
 
-Three of these rows did not exist before this workstream, and each closes a hole where a write PASSED
-that should not have. Those three carry the weight here:
+Three of the rows carry the weight here, because each is a shape that an ungated write sails straight
+through:
 
-* more than one distinct notice — previously derived a None notice id and passed ungated;
-* a playbook cited as evidence — previously indistinguishable from citing nothing, so it passed;
-* correspondence cited while the route is disabled — previously no such concept.
+* more than one distinct notice — derives a None notice id, which reads as nothing to doubt;
+* a playbook cited as evidence — indistinguishable from citing nothing unless the axis names it;
+* correspondence cited while the route is disabled.
 """
 
 from decimal import Decimal
@@ -109,11 +109,11 @@ def test_a_notice_missing_the_attribute_entirely_is_unverifiable() -> None:
 
 
 def test_more_than_one_distinct_notice_is_unverifiable() -> None:
-    """⚠️ NEW, and a hole that was open: this previously passed ungated.
+    """⚠️ The shape most likely to slip through ungated.
 
-    `derive_notice_id` returns None when a search matched several notices, and an absent id read as
-    "nothing to be doubtful about". `record-match-review` declares `cardinality: ranked_set`, so a
-    multi-candidate result is the normal case rather than an edge one.
+    `derive_notice_id` returns None when a search matched several notices, and an absent id reads as
+    "nothing to be doubtful about" unless this axis refuses it. `record-match-review` declares
+    `cardinality: ranked_set`, so a multi-candidate result is the normal case rather than an edge one.
     """
     verdict, reason = _decide(notices=[_notice(), _notice(notice_id="NTC-2")])
     assert verdict == UNVERIFIABLE
@@ -153,13 +153,12 @@ def test_nothing_cited_at_all_is_clean() -> None:
 
 
 def test_consulting_a_playbook_does_not_affect_the_verdict() -> None:
-    """⚠️ A design correction a test caught, and the reason it matters.
+    """⚠️ The tempting rule that must NOT be written here, and why.
 
-    An earlier version refused any proposal that had touched guidance without matching a notice. But
-    EVERY investigation consults method — that is what guidance is for — so the rule refused nearly every
-    legitimate ledger-only resolution. Retrieving a playbook says nothing about what a conclusion rests
-    on, so it is not on this axis at all: it can never make a verdict clean, and it never makes one
-    worse.
+    Refusing any proposal that touched guidance without matching a notice sounds strict but refuses
+    nearly every legitimate ledger-only resolution, because EVERY investigation consults method — that
+    is what guidance is for. Retrieving a playbook says nothing about what a conclusion rests on, so it
+    is not on this axis at all: it can never make a verdict clean, and it never makes one worse.
     """
     verdict, reason = _decide(kb=[_kb("playbook")])
     assert verdict == CLEAN

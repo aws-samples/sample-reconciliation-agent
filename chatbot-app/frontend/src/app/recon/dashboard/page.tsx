@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { listCases, type ReconCase } from "@/lib/reconApi";
-import { getStoredAccessToken } from "@/lib/reconToken";
 import {
   ConfidenceMeter,
   Eyebrow,
@@ -58,7 +57,7 @@ export default function DashboardPage() {
 
   useEffect(() => {
     // Full history — the dashboard reflects every status, not just the open queue.
-    listCases(getStoredAccessToken(), { scope: "all" })
+    listCases({ scope: "all" })
       .then(setCases)
       .catch((e) => setError(String(e)));
   }, []);
@@ -201,8 +200,9 @@ export default function DashboardPage() {
 
         <div className="space-y-4">
           <Panel className="rc-rise p-6">
-            {/* "Evidence Score" everywhere, matching the case screen: "Proposal Confidence" read
-                as something the model reported about itself, which no longer exists. */}
+            {/* "Evidence Score" everywhere, matching the case screen. "Proposal Confidence" would
+                read as a number the model reported about itself; no such number exists anywhere in
+                the system, and this one is computed evidence completeness. */}
             <Eyebrow>Mean Evidence Score</Eyebrow>
             <div className="mt-4">
               <ConfidenceMeter value={avgConf} />

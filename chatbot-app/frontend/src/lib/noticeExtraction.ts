@@ -1,22 +1,22 @@
 /**
  * What the extractor read out of one document, read from recon's OWN notice row.
  *
- * Server-side only. This used to go to the document pipeline's GraphQL API — one `getDocument` for
- * the section pointers, then one `getFileContents` per section to read the result JSON behind each
- * pointer — and it failed 401 in the deployed console, because `appsync:GraphQL` is authorised per
- * FIELD and the ECS task role is granted only `listDocuments` and `getDocument`. Two things made
- * that worth replacing rather than widening:
+ * Server-side only, and deliberately NOT a call to the document pipeline's GraphQL API. Going there
+ * (one `getDocument` for the section pointers, then one `getFileContents` per section to read the
+ * result JSON behind each pointer) fails 401 in the deployed console, because `appsync:GraphQL` is
+ * authorised per FIELD and the ECS task role is granted only `listDocuments` and `getDocument`.
+ * Widening that grant would not be the right fix either:
  *
  *   - a field-scoped grant on somebody else's API can only be verified by the principal that will
  *     make the call, so "the schema accepts IAM callers" is not evidence the task role may call it;
- *   - reading the result JSON here meant re-implementing `backend/idp_hook/explainability.py` in
- *     TypeScript, and the UI must never compute an extraction confidence differently from the hook,
- *     whose number is what the gateway interceptor refuses ledger writes on.
+ *   - reading the result JSON here would mean re-implementing `backend/idp_hook/explainability.py`
+ *     in TypeScript, and the UI must never compute an extraction confidence differently from the
+ *     hook, whose number is what the gateway interceptor refuses ledger writes on.
  *
- * The hook already holds every value and every per-field confidence at ingest, so it now embeds them
- * on the notice row (`idp_sections`) exactly as it already embedded the page-image locations
- * (`idp_pages`). This module reads that attribute back. There is one implementation of the
- * flattening rules, in Python, and this file does no arithmetic at all.
+ * The hook already holds every value and every per-field confidence at ingest, so it embeds them on
+ * the notice row (`idp_sections`) exactly as it embeds the page-image locations (`idp_pages`). This
+ * module reads that attribute back. There is one implementation of the flattening rules, in Python,
+ * and this file does no arithmetic at all.
  *
  * The row is keyed `idp-<ObjectKey>` — see `idp_event_to_notice`, which derives the id that way so a
  * re-delivered completion event overwrites rather than duplicates.
@@ -67,9 +67,11 @@ export interface ExtractedSection {
 /**
  * One document's embedded extraction.
  *
- * `unavailable` is set when the notice row EXISTS but carries no per-field detail, which is a
- * different answer from having no notice at all and is reported as such rather than as an error: the
- * document was extracted, and what is missing is only the display detail.
+ * `unavailable` is set when the row EXISTS but carries no per-field detail, which is a different
+ * answer from having no row at all and is reported as such rather than as an error. Which of those
+ * two the operator is looking at matters: for a notice the document was extracted and only the
+ * display detail is missing, whereas for a tracking-only row no notice was ever mapped. See
+ * `unavailableReason`, which tells them apart from the row rather than by inference.
  */
 export interface NoticeExtraction {
   sections: ExtractedSection[];
@@ -122,20 +124,65 @@ export function noticeIdFor(objectKey: string): string {
  *
  * `notice_id` is in the projection although the caller already knows it: it is the key, so it is
  * always present, which is what makes "the row exists" distinguishable from "the row exists and
- * carries no extraction". Without it a pre-embedding row would project to nothing and read as a
- * document recon has never heard of.
+ * carries no extraction". Without it a row carrying no sections would project to nothing and read as
+ * a document recon has never heard of.
+ *
+ * `record_kind` and `notice_failure_reason` are here for `unavailableReason`. A projection that omits
+ * them cannot tell a tracking-only row from a notice, and the branch that reports the row's own
+ * reason would then be unreachable — silently, because a projected-away attribute is indistinguishable
+ * from an absent one. Dropping either from this list is the one edit to this file that breaks it
+ * without breaking anything that looks like it should fail.
  */
-const PROJECTION = "notice_id, idp_sections, idp_sections_omitted";
+const PROJECTION =
+  "notice_id, record_kind, notice_failure_reason, idp_sections, idp_sections_omitted";
 
 /** What a projected notice row looks like once unmarshalled. */
 interface NoticeRow {
   notice_id: string;
+  /**
+   * `"notice"` | `"document"` | ABSENT, where ABSENT means `"notice"`.
+   *
+   * ⚠️ The default is a fact about the data, not a convenience: every row written before the
+   * attribute existed has none, and 16 of those are live right now. `unavailableReason` therefore
+   * compares against the literal `"document"` and never tests truthiness. The same rule is stated at
+   * `DocumentRow.record_kind` in `src/lib/idpDocumentStore.ts` and at `Notice.record_kind` in
+   * `backend/recon_core/notices.py`.
+   */
+  record_kind?: unknown;
+  /**
+   * Why recon mapped no notice out of the document, as `backend/idp_hook/handler.py` recorded it.
+   * Only ever present on a `record_kind == "document"` row.
+   */
+  notice_failure_reason?: unknown;
   idp_sections?: unknown;
   idp_sections_omitted?: unknown;
 }
 
 /**
  * Why a row that exists carries no per-field detail, or null when it does carry some.
+ *
+ * Both readers below go through here, so the table's `failed` map and the detail panel's
+ * `unavailable` can never disagree about the same row. Three answers, and each is read from what the
+ * row SAYS rather than guessed from what it is missing:
+ *
+ *   - the hook had the detail and dropped it to keep the row inside DynamoDB's item limit, storing
+ *     the sentence that says so;
+ *   - the row is tracking-only (`record_kind == "document"`): the pipeline finished the document but
+ *     recon mapped no notice out of it, and the row records why. There was never any per-field detail
+ *     to drop, so the reason is the row's own and nothing is inferred;
+ *   - anything else is a notice row with no `idp_sections`, which is stated plainly and WITHOUT a
+ *     cause, because the row carries nothing that names one.
+ *
+ * ⚠️ There was a fourth, and it is gone rather than reordered: an `idp_sections === undefined` row
+ * used to be told it "was extracted before recon stored per-field detail on the row … re-uploading
+ * the document produces a notice that has it". Written for rows predating a 2026-09-08 change, it was
+ * false on the only row in the live table that ever reached it — the tracking row above, whose
+ * document the pipeline had finished that same day and whose re-upload yields the same unmappable
+ * document, so the advice sent the operator to do work that cannot help. It was also dead as a
+ * migration message: all 28 notices carry `idp_sections`, and `infra/modules/notice-store/main.tf`
+ * records that this table is deliberately never seeded, so a fresh deployment starts empty and can
+ * never hold a pre-2026-09-08 row. Reordering it below the tracking check would have left a guessed
+ * cause as the default for every other sectionless row; do not reinstate it.
  *
  * @param row - the projected notice row.
  * @returns the reason to show the operator, or null.
@@ -145,10 +192,26 @@ function unavailableReason(row: NoticeRow): string | null {
   // sentence names the sizes, so it is shown rather than paraphrased.
   if (typeof row.idp_sections_omitted === "string")
     return row.idp_sections_omitted;
-  // A row written before the hook embedded any of this. Not an error and not an empty extraction:
-  // re-uploading the document produces a row that has it.
+  // A tracking-only row. Compared against the literal because ABSENT means `"notice"` -- a truthiness
+  // test here would call every one of the 16 attribute-less live rows a document.
+  if (row.record_kind === "document") {
+    if (
+      typeof row.notice_failure_reason === "string" &&
+      row.notice_failure_reason !== ""
+    )
+      // The row's own sentence, prefixed with only the subject it lacks: unlike the detail panel, the
+      // table renders this as one line with no surrounding prose to supply one, and a bare "extracted
+      // no notice_date" beside a filename does not say who failed to do what. `_failure_reason` in
+      // `backend/idp_hook/handler.py` guarantees the stored half is non-blank.
+      return `recon mapped no notice from this document: ${row.notice_failure_reason}`;
+    // Only reachable if something other than that hook wrote the row. Says what is known and stops,
+    // rather than supplying a cause on the row's behalf.
+    return "recon mapped no notice from this document and recorded no reason for it";
+  }
+  // A notice row with no `idp_sections` attribute at all. Stated, not explained -- see the docstring
+  // for the explanation that used to live here and why guessing was worse than admitting.
   if (row.idp_sections === undefined)
-    return "this notice was extracted before recon stored per-field detail on the row, so there is nothing to show for it; re-uploading the document produces a notice that has it";
+    return "recon has no per-field detail stored for this document";
   return null;
 }
 

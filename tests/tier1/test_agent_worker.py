@@ -177,9 +177,9 @@ def test_both_backends_receive_the_tier1_keys(monkeypatch):
 def test_an_ingress_timeout_does_not_start_a_second_investigation(monkeypatch):
     """A timeout means the agent IS running; falling back would duplicate a multi-minute LLM run.
 
-    This is the 2026-09-02 production failure: the ingress POST had a hard-coded 290s timeout while
-    real investigations ran 700-1100s, so every run timed out, fell back to a direct invoke, and the
-    two (plus Lambda's async retries) stacked up to seven concurrent investigations of one item.
+    The failure mode is not hypothetical: real investigations run 700-1100s, so any ingress timeout
+    shorter than that makes EVERY run time out, fall back to a direct invoke, and stack up — the two
+    invocations plus Lambda's async retries reach seven concurrent investigations of one item.
 
     :returns: None.
     """

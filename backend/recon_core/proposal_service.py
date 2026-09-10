@@ -96,9 +96,9 @@ def notice_search_summary(*, results: list) -> dict:
 
     Exists because the trace's ``tool_output`` is a ~600-character display summary
     (``harness_agent.stream._summarize`` / the runtime's ``_summarize_tool_output``) and one notice
-    row exceeds that — so the stored trace holds a JSON *fragment*. The UI used to re-parse that
-    fragment, fail, and report "matched no notices" on cases that had matched several. The rows
-    themselves were never lost, only never persisted.
+    row exceeds that — so the stored trace holds a JSON *fragment*. A UI re-parsing that fragment
+    fails and reports "matched no notices" on a case that matched several, which is why the rows are
+    persisted here instead of recovered from the display summary.
 
     Shared by BOTH backends, and takes the RESULT LIST rather than a tool-outputs container because
     that is the only input shape the two have in common: the harness holds

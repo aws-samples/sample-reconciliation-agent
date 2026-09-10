@@ -1,10 +1,10 @@
 /**
  * Tests for lintPromptPolicy.
  *
- * The fixtures are real text, not invented: RECOMMENDED_EXCERPT is from
- * rec_sysprompt_syncverify (2026-08-03), a run whose baseline contained NO approval language —
- * the optimizer injected it anyway. LIVE_CORE_EXCERPT is the shared core that baseline came from,
- * which must lint clean or the guard would cry wolf on every deploy.
+ * The fixtures are real text, not invented: RECOMMENDED_EXCERPT is an optimizer recommendation whose
+ * baseline contained NO approval language — the optimizer injected it anyway. LIVE_CORE_EXCERPT is the
+ * shared core that baseline came from, which must lint clean or the guard would cry wolf on every
+ * deploy.
  */
 import { describe, it, expect } from "vitest";
 import { lintPromptPolicy } from "@/lib/promptPolicyLint";
@@ -18,9 +18,7 @@ or with no action, it routes to an analyst queue.
 Before taking any action with real-world consequences (sending mail, writing ledger status),
 state the planned action and wait for explicit approval. Do not treat silence as consent.`;
 
-// Re-taken from agent-blueprint/recon-agent/system-prompt.md after 2026-09-04: the composite the
-// old excerpt described ("combining your stated confidence with signals it computes itself") was
-// deleted along with every model-reported confidence number. The excerpt has to track the live file
+// Kept in step with agent-blueprint/recon-agent/system-prompt.md: the excerpt has to track that file,
 // or "passes the live shared core clean" stops being a statement about the deployed prompt.
 const LIVE_CORE_EXCERPT = `You have a **library of skills** — reusable investigation and resolution _procedures_, each backed
 by one or more gateway tools. **Skills are NOT categories, and you are not choosing exactly one.**
@@ -36,9 +34,9 @@ describe("lintPromptPolicy", () => {
     const warnings = lintPromptPolicy(RECOMMENDED_EXCERPT);
 
     // Three, not two: "combining your stated confidence with self-consistency, grounding, and
-    // extraction alerts" describes the composite that was deleted on 2026-09-04, so the same
-    // fixture now trips the self-grading rule as well. Warnings come back in rule order, and the
-    // self-grading rule is last.
+    // extraction alerts" describes a composite score that does not exist, so the same fixture trips
+    // the self-grading rule as well. Warnings come back in rule order, and the self-grading rule is
+    // last.
     expect(warnings.length).toBe(3);
     expect(warnings[0]).toMatch(/wait for approval it is never offered/);
     expect(warnings[1]).toMatch(/interactive approver/);
@@ -74,8 +72,8 @@ describe("lintPromptPolicy", () => {
   });
 
   it("flags a prompt that asks the agent to grade its own certainty", () => {
-    // The first string is verbatim the sentence deleted from step 1 of both system prompts on
-    // 2026-09-04 — the exact text this rule exists to keep from coming back.
+    // The first string is verbatim the sentence neither system prompt may carry in step 1 — the exact
+    // text this rule exists to keep out.
     for (const text of [
       "**Characterize the break.** Identify what kind of exception this is and state your reasoning with a confidence in [0,1].",
       "Report your confidence in the classification.",

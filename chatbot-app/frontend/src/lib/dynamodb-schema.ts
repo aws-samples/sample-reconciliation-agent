@@ -2,7 +2,7 @@
  * DynamoDB Single Table Schema for User and Session Management
  *
  * Single Table Design:
- * - PK: userId (Cognito sub UUID)
+ * - PK: userId (OIDC `sub`)
  * - SK: Record type discriminator
  *   - "PROFILE" for user profile
  *   - "SESSION#{timestamp}#{sessionId}" for session metadata
@@ -22,7 +22,7 @@
  * Base DynamoDB record interface
  */
 export interface DynamoDBRecord {
-  userId: string  // PK - Cognito sub (UUID)
+  userId: string  // PK - OIDC `sub`
   sk: string      // SK - Record type discriminator
   ttl?: number    // Unix timestamp for auto-deletion (optional)
 }

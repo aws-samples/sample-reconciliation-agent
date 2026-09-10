@@ -1,5 +1,9 @@
 ####################################################################################
-# Foundation module: Cognito (OAuth), S3 buckets, and recon-flow DynamoDB tables.
+# Foundation module: S3 buckets, recon-flow DynamoDB tables and the SSM configuration parameters.
+#
+# No identity provider lives here. The console signs in through Okta/Entra (modules/frontend-ecs) and
+# the intake API's JWT authorizer validates that same issuer, so the Cognito user pool this module used
+# to own — which nothing authenticated against — is gone.
 # Classification types are NOT stored here — they live in the SKILL.md files. DynamoDB
 # holds only recon-flow state: items, cases, and the audit trail.
 ####################################################################################
@@ -19,7 +23,7 @@ resource "aws_dynamodb_table" "items" {
     type = "S"
   }
 
-  # Stream feeds the Tier-1 consumer (Task 18).
+  # Stream feeds the Tier-1 consumer, which is how an intaken item becomes a case.
   stream_enabled   = true
   stream_view_type = "NEW_IMAGE"
 
@@ -116,20 +120,21 @@ resource "aws_dynamodb_table" "lessons" {
 }
 
 # ---------------------------------------------------------------------------------
-# Runtime config — deterministic Tier-1 on/off toggle (Config UI writes it; Tier-1
-# Lambda reads it per batch). Created with an initial "true" default; the Config UI
-# overwrites the value, so ignore value drift on subsequent applies.
+# Runtime config — SSM parameters the Config tab writes and the runtime reads.
+#
+# Every parameter here is seeded with a starting value and then carries
+# `ignore_changes = [value]`: the UI is the owner at runtime, so an apply must create the parameter
+# but never revert an operator's setting.
 # ---------------------------------------------------------------------------------
 
 # Auto-resolve threshold (Config UI writes it; the agent reads it after each proposal).
 # Evidence-completeness score >= threshold -> unattended approve path; "off" disables.
 #
-# The score is `satisfied / prescribed required steps` for the classified skill — a STEP FUNCTION, not
-# a continuum. The shipped skills prescribe 4 (ledger-status-resolution), 5 (document-cross-reference)
-# and 6 (record-match-review) required steps, whose highest partial scores are 0.75, 0.8 and 0.833. All
-# three are below 0.85, so this default means exactly one thing today: EVERY prescribed step obtained
-# data. That is deliberate and conservative — it is NOT the weighted-composite arithmetic this comment
-# used to describe (a verbalized term capping the sum at 0.89-0.91), which was deleted on 2026-09-04.
+# ⚠️ The score is `satisfied / prescribed required steps` for the classified skill — a STEP FUNCTION,
+# not a continuum, so this threshold does not behave like a percentage dial. The shipped skills
+# prescribe 4 (ledger-status-resolution), 5 (document-cross-reference) and 6 (record-match-review)
+# required steps, whose highest PARTIAL scores are 0.75, 0.8 and 0.833. All three sit below 0.85, so
+# this default means exactly one thing: EVERY prescribed step obtained data. Deliberately conservative.
 #
 # Before changing it, work out the reachable values for the skills you actually run. The gaps are wide
 # and uneven: 0.8 still means 6-of-6 for record-match-review but drops document-cross-reference to
@@ -190,13 +195,12 @@ resource "aws_ssm_parameter" "agent_backend" {
 }
 
 # Which Bedrock model BOTH Tier-2 backends invoke. Selected in the Config tab alongside the backend
-# itself: switching backend was already one click while switching model needed a merge and an apply,
-# even though comparing two models on one queue is the more common experiment.
+# itself, so comparing two models over one queue is a click rather than a merge and an apply.
 #
-# The seed is the same default the two backend env vars carry (recon-agent `model_id`,
-# tier1 `harness_model_id`), so a fresh deploy behaves exactly as it did before this parameter
-# existed. The allowlist of selectable ids lives in backend/recon_core/model_select.py — not here,
-# because it is enforced on read by the code that invokes the model.
+# The seed matches the default the two backend env vars carry (recon-agent `model_id`, tier1
+# `harness_model_id`), so a fresh deploy and an untouched parameter agree. The allowlist of
+# selectable ids lives in backend/recon_core/model_select.py rather than here, because it is
+# enforced on read by the code that invokes the model.
 resource "aws_ssm_parameter" "agent_model_id" {
   name  = "/${var.name_prefix}/agent-model-id"
   type  = "String"
@@ -249,48 +253,4 @@ resource "aws_s3_bucket_public_access_block" "assets" {
   block_public_policy     = true
   ignore_public_acls      = true
   restrict_public_buckets = true
-}
-
-# ---------------------------------------------------------------------------------
-# Cognito — OAuth 2.0 authorization-code + PKCE for the SPA login flow
-# ---------------------------------------------------------------------------------
-
-resource "aws_cognito_user_pool" "this" {
-  name = "${var.name_prefix}-users"
-
-  admin_create_user_config {
-    allow_admin_create_user_only = true
-  }
-}
-
-resource "aws_cognito_user_pool_domain" "this" {
-  domain       = var.hosted_ui_prefix
-  user_pool_id = aws_cognito_user_pool.this.id
-}
-
-resource "aws_cognito_user_pool_client" "spa" {
-  name         = "${var.name_prefix}-spa"
-  user_pool_id = aws_cognito_user_pool.this.id
-
-  # Public SPA client using PKCE — no client secret.
-  generate_secret = false
-
-  allowed_oauth_flows                  = ["code"]
-  allowed_oauth_scopes                 = ["openid", "email", "profile"]
-  allowed_oauth_flows_user_pool_client = true
-  supported_identity_providers         = ["COGNITO"]
-
-  callback_urls = var.callback_urls
-  logout_urls   = var.logout_urls
-
-  explicit_auth_flows = ["ALLOW_REFRESH_TOKEN_AUTH", "ALLOW_USER_SRP_AUTH"]
-
-  # The real CloudFront callback/logout URLs are patched in out-of-band by
-  # null_resource.cognito_callbacks (environments/recon/main.tf) once the frontend
-  # distribution exists — that patch is never fed back into this resource's declared state,
-  # so every subsequent plan would otherwise want to revert it to the placeholder default,
-  # breaking login. This lifecycle block is the fix, not just documentation.
-  lifecycle {
-    ignore_changes = [callback_urls, logout_urls]
-  }
 }

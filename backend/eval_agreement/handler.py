@@ -1,11 +1,18 @@
 """Analyst-agreement custom evaluator for AgentCore Online/Batch Evaluations.
 
-Scores agent sessions against the ground-truth analyst decision. Among all decision lessons
-for the item, the one with the LATEST ``created_at`` wins (an approval issued after a
-correction supersedes it — mirroring that the eval always reviews the latest session spans):
-  - latest is USER_CORRECTION → 0.0 (the agent's proposal was wrong)
-  - latest is USER_APPROVED or AUTO_RESOLVED → 1.0 (the agent agreed with the analyst)
-  - no decision lesson → abstain (the item hasn't been reviewed yet)
+Measures whether the human who reviewed the case in the console ACCEPTED what the agent
+proposed. This is deliberately not "scoring against ground truth": there is no labelled answer
+key anywhere: the lessons ledger is the RECORD of a reviewer's decision, written when they
+acted on the case. Among all decision lessons for the item, the one with the LATEST
+``created_at`` wins (an approval issued after a correction supersedes it — mirroring that the
+eval always reviews the latest session spans):
+  - latest is USER_CORRECTION → 0.0 (a reviewer changed the proposal, so it was not accepted)
+  - latest is USER_APPROVED → 1.0 (a reviewer accepted it as proposed)
+  - latest is AUTO_RESOLVED → 1.0. ⚠️ No human looked at this one: the agent's confidence
+    cleared the auto-resolve threshold and Policy permitted the write. It scores as agreement
+    because nobody objected, which is weaker evidence than an approval and is why the two
+    labels stay distinct in the ledger even though they score the same here.
+  - no decision lesson → abstain (nobody has reviewed the case yet)
 
 Session ids cannot contain dots (AgentCore constraint), so they carry a SANITIZED item id
 (``idp-Notice-pdf``) while lessons are keyed by the raw id (``idp-Notice.pdf``). The
@@ -13,9 +20,10 @@ sanitization is irreversible, so matching happens on the sanitized side: the tab
 and each lesson's ``item_id`` is sanitized before comparison (the lessons ledger is
 demo-scale; a keyed lookup cannot express this).
 
-The evaluator is registered as a SESSION-level custom code-based evaluator. It parses the item
-id from the session id (shared regex in `backend/harness_agent/session.py`) and returns
-`{value, label, explanation}` or a label-only ABSTAIN.
+The evaluator is registered as a SESSION-level custom code-based evaluator. It parses the
+sanitized item id out of the session id — shape ``recon-<sanitized item_id>-<sha256 fragment>``,
+truncated to 64 characters; see `backend/harness_agent/session.py` for the full contract and the
+truncation caveat — and returns `{value, label, explanation}` or a label-only ABSTAIN.
 """
 
 import json
@@ -35,8 +43,9 @@ _POSITIVE = {"USER_APPROVED", "AUTO_RESOLVED"}
 _NEGATIVE = {"USER_CORRECTION"}
 _DECISION_TRIGGERS = _POSITIVE | _NEGATIVE
 
-# Must match the BFF's session-id sanitization (cases/[id]/route.ts): AgentCore session ids
-# only allow [a-zA-Z0-9-_], so every other character becomes '-'.
+# Must match the session-id sanitization in BOTH builders — backend/tier1/invoke_agent.py
+# (the normal path) and the BFF's retry/reprocess actions (cases/[id]/route.ts). AgentCore
+# session ids only allow [a-zA-Z0-9-_], so every other character becomes '-'.
 _SANITIZE_RE = re.compile(r"[^a-zA-Z0-9_-]")
 
 
@@ -70,12 +79,11 @@ def _decision_lessons(table, sanitized_item_id: str) -> list[dict[str, Any]]:
         scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
 
 
-def score_session(
-    *, session_id: str, lessons_table: str, ddb=None
-) -> dict[str, Any] | None:
+def score_session(*, session_id: str, lessons_table: str, ddb=None) -> dict[str, Any] | None:
     """Score one agent session against the lessons ledger (latest decision wins).
 
-    :param session_id: the AgentCore runtime session id (``recon-<item>-<attempt>-<uuid>``).
+    :param session_id: the AgentCore runtime session id (``recon-<sanitized item_id>-<sha256
+        fragment>``, truncated to 64 characters).
     :param lessons_table: DynamoDB lessons table name.
     :param ddb: injectable DynamoDB resource (tests); real resource by default.
     :returns: ``{value: 0|1, label, explanation}`` or ``None`` to abstain (no lesson yet).

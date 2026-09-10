@@ -27,19 +27,19 @@ const SOURCE_EVALUATORS = [
 ];
 const TARGET_EVALUATOR_ARN = `arn:aws:bedrock-agentcore:::evaluator/${SOURCE_EVALUATORS[0]}`;
 
-// System-prompt optimization needs an agent-trace source that yields identifiable SESSIONS.
-// Verified live: the raw cloudwatchLogs / inline-span sources frequently fail with "No sessions
-// were identified", but a completed **batch evaluation** reliably assembles them — and
-// StartRecommendation accepts a batchEvaluation source for SYSTEM_PROMPT (only). So we kick a
-// short batch eval over the active backend's sessions and use its ARN. Tool-description
-// recommendations do NOT accept the batch source (API rejects it) and take cloudwatchLogs.
+// System-prompt optimization needs an agent-trace source that yields identifiable SESSIONS. The raw
+// cloudwatchLogs / inline-span sources frequently fail with "No sessions were identified", but a
+// completed **batch evaluation** reliably assembles them — and StartRecommendation accepts a
+// batchEvaluation source for SYSTEM_PROMPT (only). So we kick a short batch eval over the active
+// backend's sessions and use its ARN. Tool-description recommendations do NOT accept the batch
+// source (API rejects it) and take cloudwatchLogs.
 //
-// ⚠️ The batch eval MUST NOT be awaited inside a request. It took 65s live (15:51:34→15:52:39 on
-// 2026-07-29) and its duration scales with the session count, while CloudFront in front of the
-// ECS origin has origin_read_timeout = 60s (infra/modules/frontend-ecs/main.tf). Polling it
-// inline returned "recon API error 504" to the UI five seconds before the batch actually
-// finished — the origin kept working, CloudFront had already given up. So the system-prompt flow
-// is split into three short requests the CLIENT sequences:
+// ⚠️ The batch eval MUST NOT be awaited inside a request. It runs for over a minute and its duration
+// scales with the session count, while CloudFront in front of the ECS origin has
+// origin_read_timeout = 60s (infra/modules/frontend-ecs/main.tf). Polling it inline returns "recon
+// API error 504" to the UI while the origin is still working and the batch has not yet finished —
+// CloudFront has simply given up. So the system-prompt flow is split into three short requests the
+// CLIENT sequences:
 //   1. POST {type}                      → starts the batch, returns batchEvaluationId  (~1s)
 //   2. GET  ?batchId=<id>               → one status probe, client polls this          (~1s)
 //   3. POST {type, batchEvaluationArn}  → StartRecommendation, returns recommendationId (~1s)
@@ -87,8 +87,8 @@ const BATCH_USABLE = new Set(["COMPLETED", "COMPLETED_WITH_ERRORS"]);
 // The request shape follows the boto3/JS `start_recommendation` contract EXACTLY: the config is
 // a tagged union keyed by type (`systemPromptRecommendationConfig` /
 // `toolDescriptionRecommendationConfig`), each carrying the current input to optimize + an
-// `agentTraces` source. The earlier flat `{systemPrompt, agentTraces}` shape was rejected by the
-// service, which is why the button appeared to "do nothing".
+// `agentTraces` source. A flat `{systemPrompt, agentTraces}` shape is rejected by the service,
+// which surfaces in the UI as a button that appears to "do nothing".
 //
 // Every member of both unions is MANDATORY — there is no "just send the traces" mode:
 //   SYSTEM_PROMPT     → systemPrompt (text ≤20,000 chars | configurationBundle)
@@ -180,12 +180,12 @@ export async function POST(req: Request) {
 
     // Both config unions have THREE mandatory members, and the "current configuration to
     // optimize" is one of them — `systemPrompt` / `toolDescription` are documented "Required:
-    // Yes". Building them conditionally (as this route did) means a caller that sends no prompt
-    // gets `1 validation error detected: Value at
+    // Yes". Building them conditionally would mean a caller that sends no prompt gets `1
+    // validation error detected: Value at
     // 'recommendationConfig.systemPromptRecommendationConfig.systemPrompt' failed to satisfy
-    // constraint: Member must not be null` — which is what the UI showed, since the panel never
-    // sent one. Resolve the current configuration SERVER-side from the same places the backends
-    // read it, and fail loudly if it can't be resolved rather than dropping the member.
+    // constraint: Member must not be null`, and the panel does not always send one. So resolve the
+    // current configuration SERVER-side from the same places the backends read it, and fail loudly
+    // if it can't be resolved rather than dropping the member.
     let recommendationConfig: Record<string, unknown>;
     let promptSource: string | null = null;
     if (type === "SYSTEM_PROMPT_RECOMMENDATION") {

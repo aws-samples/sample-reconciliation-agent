@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Task 1 spike — verify the AgentCore Harness surface the blueprint depends on.
+"""Verify the AgentCore Harness surface the blueprint depends on.
 
 Runs the SAFE, read-only checks by default (API surface, model id, endpoint availability); the
 live create/invoke round-trip (billable, needs an execution role) is gated behind ``--create``.
 Findings are recorded in ``agent-blueprint/recon-agent-harness/README.md``.
 
 Usage:
-    python infra/scripts/spike_harness.py                 # safe read-only checks
-    python infra/scripts/spike_harness.py --create ROLE   # + live create/invoke/delete
+    python infra/scripts/verify_harness_surface.py                 # safe read-only checks
+    python infra/scripts/verify_harness_surface.py --create ROLE   # + live create/invoke/delete
 
 Uses the default AWS session (set AWS_PROFILE=<your-profile> AWS_REGION=us-east-1, or --profile/--region).
 """

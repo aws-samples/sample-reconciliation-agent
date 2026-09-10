@@ -94,8 +94,8 @@ the one check that looks for it.
 ## The extraction configuration
 
 `idp-extraction-config/classes.json` is the class-schema half of the deployed extraction
-configuration, tracked here because it previously existed only in the document pipeline's DynamoDB
-table — where it drifted away from the contract with nothing able to notice. See that folder's README;
+configuration, tracked here because its only other home is the document pipeline's DynamoDB table —
+where it can drift away from the contract with nothing able to notice. See that folder's README;
 `scripts/push_idp_extraction_config.py` installs it and `tests/input_corpus/test_extraction_config.py`
 holds it against both the contract and the ground truth above.
 

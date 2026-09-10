@@ -1,22 +1,33 @@
 ---
 name: document-cross-reference
-description: Retrieve and compare fields from a source document to confirm or refute a candidate match with records in the ledger.
-tools:
-  [
-    document-extraction___IDPTools___get_results,
-    general-ledger___search_ledger,
-    notices___search_notices,
-  ]
+description: Compare a source document's extracted fields — read off its notice row — against a candidate match, to confirm or refute it with records in the ledger.
+tools: [general-ledger___search_ledger, notices___search_notices]
 metadata:
   # No trigger: a probe is chosen by the agent when the investigation needs it, not routed to.
   tier: probe
+# ⚠️ PAIRED WITH `record-match-review`, and the pair is NOT redundant — do not consolidate them.
+# Both declare the same two tools and both compare the same two sides, so they look interchangeable.
+# What differs is which side is REQUIRED evidence, and that drives auto-resolution:
+#
+#   this skill                 | record-match-review
+#   the NOTICE is the subject  | the LEDGER entry is the subject
+#   notice_corroboration       | notice_corroboration       optional
+#     REQUIRED                 |
+#   expected_entry_match       | expected_entry_match       REQUIRED
+#     OPTIONAL                 |
+#   tier probe: the agent      | tier break-type: ROUTED by classify.py
+#     ELECTS this when an      |   when side_count == 2
+#     item's attributes are    |
+#     incomplete               |
+#
+# Merging them would force one contract on both directions. Requiring both sides makes a document
+# with no ledger row — or a sided item with no notice — permanently unresolvable. Making both
+# optional lets a case clear the threshold having corroborated NEITHER side. Neither reproduces the
+# pair. A merged skill would also need eight distinct required ids, over the six-step ceiling.
 result:
   cardinality: single_match
   max_candidates: 1
 evidence_steps:
-  # MIRROR of record-match-review: there the ledger entry is the subject of the comparison and the
-  # notice corroborates it; here the notice IS the subject, so it is required and the book-of-record
-  # lookup becomes the optional corroboration. Same two sides, opposite direction.
   - id: notice_corroboration
     required: true
     description: Retrieve the extracted notice for this document with notices___search_notices.
@@ -39,23 +50,49 @@ evidence_steps:
     description: Corroborate the identifier against the book of record via general-ledger___search_ledger.
 ---
 
-When an item's attributes are incomplete, retrieve the underlying document's extracted fields
-from IDP via the **document-extraction** MCP tool. Never read IDP's S3 output or AppSync
-directly — the only channel to IDP is this MCP tool.
+When an item's attributes are incomplete, the underlying document's extracted fields are already
+**on the notice row** — read them with `notices___search_notices`. There is no separate
+document-retrieval call to make here, and no round trip to the extraction pipeline: the ingest hook
+read the pipeline's output once, at ingest, and embedded the per-section extraction on the notice.
 
-1. Read the IDP backlink from the item's `source_refs`: the `idp:documentId=<id>` entry (and
-   `idp:section=<section_id>:<uri>` if you need a specific section). The `<id>` value is the
-   document id you pass to `get_results` below.
-2. Call the document-extraction MCP tool with the **`document_id`** parameter:
-   `document-extraction___IDPTools___get_results(document_id=<id>)` to fetch the full
-   `inference_result` fields and their `explainability_info` / `confidence_threshold_alerts`
-   confidence. **Always use `document_id` for a single document — never `batch_id`.** `batch_id`
-   routes to the multi-document batch path (which fails for a single doc), and the parameter is
-   `document_id` (snake_case), not `documentId`.
-3. If the item has **no** `idp:` backlink (e.g. it arrived via the structured API), use the
-   MCP `search` tool (natural-language query by amount / value date / counterparty) to locate
-   the corroborating document, then `document-extraction___IDPTools___get_results(document_id=<id>)`
-   on the best match.
+**As the agent you hold no other route to the document.** The extraction pipeline's output bucket and
+its own per-document APIs are not exposed to you by any tool, so do not describe reading them and do
+not claim to have. Other parts of the platform legitimately do — the ingest hook reads the output
+bucket at ingest (which is how these fields reached the notice row), and the console streams the
+source document out of the input bucket for the Documents tab — but neither is a channel you can use.
+The notice row is.
+
+1. **Find the notice row.** `search_notices` takes **no id parameter** — its only inputs are
+   `counterparty`, `fund`, `reference`, `amount` with `amount_tolerance`, `date_from` / `date_to`,
+   `notice_class`, `activity_type` and `limit`. So query with the most selective hint the item gives
+   you (`reference` first, then `counterparty` narrowed by a `date_from` / `date_to` window,
+   optionally `amount` with a tolerance). **Nothing on the item names a specific notice**, so no
+   returned row arrives pre-confirmed: say which candidate you picked and on what.
+   Read the response honestly: an empty `rows` list means searched-and-found-nothing, and
+   `truncated: true` means your query was too broad to have seen every candidate — widen or re-narrow
+   before concluding anything. A field this notice's class never extracts comes back in
+   `fields_unavailable`, which is **not** a non-match.
+2. **Read the extracted fields off `idp_sections`.** Each entry is
+   `{section_id, classification, page_ids, fields, confidences, mean_confidence, alert_count}`, where
+   `fields` is the extraction's `inference_result` **verbatim** and `confidences` is the flattened
+   per-field explainability — one record per field, `{field, confidence, threshold, value, extracted}`.
+   **Compare each confidence against that record's OWN `threshold`**, never against a single global
+   number: the thresholds are per field, and 0.8 and 0.9 both occur live, so one blanket cut-off would
+   mis-flag fields in both directions. `alert_count` is the count already below threshold for that
+   section.
+3. **Two ways this comes back with nothing, and both are reportable rather than inferable.**
+   - `idp_sections` is **absent** and `idp_sections_omitted` is set: the extraction was too large to
+     keep the row inside its byte budget, so the per-field detail was never stored. Quote
+     `idp_sections_omitted` — it names the gap.
+   - The document produced **no mappable notice**: the pipeline reached a terminal status but recon
+     could not map a notice from it, so all that exists is a tracking-only row with no extracted
+     fields. `search_notices` never returns those, so you see an empty `rows` for a document you know
+     exists.
+
+   In either case report `notice_corroboration` **unsatisfied**, say which of the two it is, and stop
+   there. Never infer, reconstruct or estimate the extracted fields — that is the one failure this
+   skill cannot tolerate, because an invented field reads exactly like a corroborated one.
+
 4. Compare the extracted values (effective date, amount, identifier, borrower) against both
    reconciliation sides.
 

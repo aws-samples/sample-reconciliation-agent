@@ -8,16 +8,17 @@ here means the next reset cannot get it wrong from memory.
 
 Tables cleared:
   <prefix>-cases   agent proposals, one row per investigated item
-  <prefix>-items   reconciliation items, written by intake and the IDP hook
+  <prefix>-items   reconciliation items, written by the intake API alone (the IDP hook never
+                   writes one — it writes a notice, and the notices table has no stream)
   <prefix>-audit   append-only action log (item_id + ts)
   <prefix>-lessons analyst lessons learned
   <prefix>-gl-status ledger status overrides written by the GL mock
   <prefix>-notices extracted counterparty notices, written by the IDP hook
 
-`notices` used to be excluded here, because it carried a Terraform-declared fixture and deleting those
-rows would have left the next `terraform plan` proposing to recreate them. That fixture is gone: the
-table is now populated only by document extraction, which makes it accumulated pipeline output and puts
-it squarely in the clearable category by this script's own rule.
+`notices` is clearable by that same rule: nothing declares its rows, so they are runtime output of the
+document pipeline like everything else on the list. Were a Terraform-declared fixture ever added to it, dropping
+those rows would leave the next `terraform plan` proposing to recreate them, and the table would have
+to move to the excluded side.
 
 The cost of clearing it is real and accepted: after a reset the actual side is empty until a document is
 uploaded again. That is already the documented first step of a demo (see data/README.md), so a reset
@@ -36,8 +37,8 @@ import sys
 
 import boto3
 
-# Suffixes of the tables that hold accumulated runtime output. `notices` is HERE now, not excluded:
-# nothing declares its rows any more, so they are extraction output like everything else in this list.
+# Suffixes of the tables that hold accumulated runtime output. `notices` belongs here because nothing
+# declares its rows — they are extraction output like everything else in this list.
 CLEARABLE_SUFFIXES: tuple[str, ...] = ("cases", "items", "audit", "lessons", "gl-status", "notices")
 
 # A reset is irreversible, so it refuses to run against anything that does not look like a

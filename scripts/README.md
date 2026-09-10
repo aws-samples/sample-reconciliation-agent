@@ -27,15 +27,16 @@ byte-for-byte.
 
 ## Live-deployment tools
 
-| Script                          | Use                                                                                                                                                                                                                                                            |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mcp_tools_list.py`             | Dump the Gateway's live MCP tool surface (`tools/list`). What the model is actually offered — not what Terraform declares.                                                                                                                                     |
-| `mcp_tool_call.py`              | Invoke one tool (`tools/call`) and show the raw result.                                                                                                                                                                                                        |
-| `live_qa.py`                    | Drive a QA sweep over the deployed UI in a real browser. `--cases id1,id2,...` re-runs the per-case assertions across scenarios: one case is not coverage, because a class can be absent, a score can be zero and an evidence table can be legitimately empty. |
-| `capture_ui_screenshots.py`     | Refresh the screenshots in `assets/img/`.                                                                                                                                                                                                                      |
-| `push_idp_extraction_config.py` | Install `data/idp-extraction-config/classes.json` into a live IDP configuration version. Rewrites the `classes` array only, backing up what was there; every other section of that config is the pipeline deployment's tuning and is left untouched.           |
+| Script                           | Use                                                                                                                                                                                                                                                                        |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mcp_tools_list.py`              | Dump the Gateway's live MCP tool surface (`tools/list`). What the model is actually offered — not what Terraform declares.                                                                                                                                                 |
+| `mcp_tool_call.py`               | Invoke one tool (`tools/call`) and show the raw result.                                                                                                                                                                                                                    |
+| `live_qa.py`                     | Drive a QA sweep over the deployed UI in a real browser. `--cases id1,id2,...` re-runs the per-case assertions across scenarios: one case is not coverage, because a class can be absent, a score can be zero and an evidence table can be legitimately empty.             |
+| `capture_ui_screenshots.py`      | Refresh the screenshots in `assets/img/`.                                                                                                                                                                                                                                  |
+| `push_idp_extraction_config.py`  | Install `data/idp-extraction-config/classes.json` into a live IDP configuration version. Rewrites the `classes` array only, backing up what was there; every other section of that config is the pipeline deployment's tuning and is left untouched.                       |
+| `backfill_idp_document_index.py` | Add the `idp-document-index` key attributes (and the `record_kind` discriminator) to notice rows written before that GSI existed, which would otherwise be absent from the Documents tab. Attribute-only: creates no row, copies no S3 object, touches no extracted field. |
 
-The last two need `pip install playwright` (deliberately not in `requirements-dev.txt`: no test
+`live_qa.py` and `capture_ui_screenshots.py` need `pip install playwright` (deliberately not in `requirements-dev.txt`: no test
 imports it, so pinning it there would make every CI run download a browser-automation stack for
 nothing). They attach to a **running** Chrome over CDP rather than launching one, because every
 `/recon` screen is gated by `src/proxy.ts` behind Okta and a fresh browser has no session. Start
@@ -53,6 +54,6 @@ profile does persist between runs, so later sweeps reuse the session until it ex
 
 ⚠️ The provider session is short lived and **expires mid-run**. Both scripts re-check that the app —
 not the login wall — is on screen before every assertion and every capture. That guard is not
-defensive padding: an earlier version checked once at startup and wrote seven screenshots of the
-Okta sign-in page, which is worse than failing, because a login wall is a plausible-looking image
-nobody questions in a README.
+defensive padding: check once at startup instead and a sweep that loses its session mid-run writes
+seven screenshots of the Okta sign-in page, which is worse than failing, because a login wall is a
+plausible-looking image nobody questions in a README.

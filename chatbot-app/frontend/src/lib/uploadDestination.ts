@@ -140,9 +140,9 @@ export function destinationFor(request: DestinationRequest): UploadDestination {
           sender: request.sender ?? "",
           receiver: request.recipients ?? [],
           messageId: request.messageId ?? "",
-          // Falls back to the submission time. An empty string here would reach `yyyymmdd("")`,
-          // which throws -- so before this fallback existed, every knowledge-base upload that was
-          // not an email (a plain PDF has no received date) failed the whole request.
+          // Falls back to the submission time. An empty string here reaches `yyyymmdd("")`, which
+          // throws and fails the whole request — and any knowledge-base upload that is not an email
+          // has no received date to supply (a plain PDF carries none).
           receivedDate: request.receivedDate || request.uploadedAt,
           hasAttachments: request.hasAttachments ?? false,
           attachmentFormat: request.attachmentFormat,

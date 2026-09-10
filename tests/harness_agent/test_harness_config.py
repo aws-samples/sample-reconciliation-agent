@@ -26,8 +26,8 @@ def test_submit_proposal_tool_is_inline_function_with_json_schema():
 
 
 def test_allowed_tools_uses_server_scoped_patterns():
-    """allowedTools requires @server/tool patterns (plain gateway names match nothing and
-    silently filter every gateway tool out — observed live 2026-07-26)."""
+    """allowedTools requires @server/tool patterns: a plain gateway name matches nothing and
+    silently filters every gateway tool out of the model's toolset."""
     assert "@egress-tools/general-ledger___search_ledger" in hc.ALLOWED_TOOLS
     # The KB is reached through the managed bedrock-knowledge-bases connector, whose operation name
     # is Bedrock's own `Retrieve`. The retired Lambda-backed knowledge-base target must not linger
@@ -35,7 +35,20 @@ def test_allowed_tools_uses_server_scoped_patterns():
     # migration rather than failing.
     assert "@egress-tools/managed-kb___Retrieve" in hc.ALLOWED_TOOLS
     assert not any("knowledge-base___" in t for t in hc.ALLOWED_TOOLS)
-    assert "@egress-tools/document-extraction___IDPTools___get_results" in hc.ALLOWED_TOOLS
+    # An EXACT list, because this is the ENFORCED grant: every entry is a tool a model may call, so
+    # widening it is a security decision and must not be reviewable only as a one-line diff elsewhere.
+    # A membership check per tool cannot notice an ADDITION, which is the direction that matters — it
+    # is what let a retired document-pipeline grant sit here unnoticed after its last caller was
+    # rewritten to read the notice row instead.
+    assert hc.ALLOWED_TOOLS == [
+        "@egress-tools/general-ledger___search_ledger",
+        "@egress-tools/notices___search_notices",
+        "@egress-tools/managed-kb___Retrieve",
+        "@egress-tools/correspondence-search___search_correspondence",
+        "@egress-tools/contacts___list_contacts",
+        "@egress-tools/templates___list_templates",
+        "submit_proposal",
+    ]
     # The model is propose-only: the WORKER executes the gated ledger write.
     assert not any("set_draw_status" in t for t in hc.ALLOWED_TOOLS)
     # The Graph SEND op is NOT offered. Not for a schema reason — its argument names are all
@@ -65,10 +78,9 @@ def test_status_enum_matches_write_allowlist():
 def test_allowed_tools_is_a_subset_of_the_gateway_surface():
     """ALLOWED_TOOLS is the ENFORCED list; GATEWAY_TOOLS only describes the gateway's surface.
 
-    Guards the confusion that made two live harness runs look like model tool-selection
-    behaviour when the tools were simply never offered (2026-08-07): every scoped entry must
-    correspond to a real gateway tool, so a typo in ALLOWED_TOOLS fails here rather than
-    silently removing a tool from the model's toolset.
+    Guards a confusion that reads as model tool-selection behaviour when the tools were simply never
+    offered: every scoped entry must correspond to a real gateway tool, so a typo in ALLOWED_TOOLS
+    fails here rather than silently removing a tool from the model's toolset.
     """
     scoped = [t for t in hc.ALLOWED_TOOLS if t != hc.SUBMIT_PROPOSAL]
     bare = {t.removeprefix("@egress-tools/") for t in scoped}
@@ -78,14 +90,12 @@ def test_allowed_tools_is_a_subset_of_the_gateway_surface():
 def test_system_prompt_only_advertises_tools_the_model_may_call():
     """The prompt's tool table must never name a gateway tool that ALLOWED_TOOLS filters out.
 
-    Shipped defect (2026-08-07): the table instructed the model to call
-    microsoft-graph___listSharedMailboxMessages and ___sendSharedMailboxMail, neither of which is
-    in ALLOWED_TOOLS — so the model burned turns on tools it was never offered, and the two
-    dependent skills were silently inert.
+    A table that instructs the model to call microsoft-graph___listSharedMailboxMessages or
+    ___sendSharedMailboxMail — neither of which is in ALLOWED_TOOLS — makes the model burn turns on
+    tools it was never offered and leaves the two dependent skills silently inert.
 
-    This also guards the direction the send op just moved in. It left ALLOWED_TOOLS deliberately, so
-    the prompt's tool table must not name it either — the prompt may only say, in prose, that no
-    send tool exists.
+    The send op is absent from ALLOWED_TOOLS deliberately, so the prompt's tool table must not name
+    it either — the prompt may only say, in prose, that no send tool exists.
     """
     import re
     from pathlib import Path
@@ -184,11 +194,10 @@ def test_no_self_reported_confidence_in_the_submit_schema() -> None:
     """A tool property is an instruction. Asking for a number that nothing reads teaches the model
     that grading itself is part of the job, and invites a reader to start gating on it.
 
-    Both fields used to be REQUIRED here. `classification_confidence` was thresholded against
-    DEFAULT_CLASS_THRESHOLD, and on 2026-09-02 that scored every harness case 0.0 at once — the
-    property was optional in practice (the harness does not enforce `required` on inline functions),
-    an absent value read as 0.0, and 'unknown' declares no evidence_steps so nothing was scoreable.
-    `verbalized_confidence` was required and read by nothing at all.
+    Declaring `classification_confidence` and thresholding it against a class threshold scores every
+    harness case 0.0 at once: the property is optional in practice (the harness does not enforce
+    `required` on inline functions), an absent value reads as 0.0, and 'unknown' declares no
+    evidence_steps so nothing is scoreable. `verbalized_confidence` is read by nothing at all.
 
     :returns: None.
     """

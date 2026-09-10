@@ -26,8 +26,8 @@ def read_hint(*, attributes: dict) -> str | None:
 
     Returns ``None`` rather than the raw value for anything unusable, so no caller has to re-check the
     type. Tier-1 omits the key entirely when its rules matched nothing, and the attribute bag is
-    untrusted stored text — an older deploy, a manual submission or the Cases UI could have written
-    anything there, and it is heading for a model prompt.
+    untrusted stored text — a manual submission or the Cases UI can put anything there, and it is
+    heading for a model prompt.
 
     This does NOT check the hint against the catalog. The two prompt builders do (a class whose
     procedure the agent was not given is useless to it), but :func:`warn_on_disagreement` deliberately
@@ -43,17 +43,16 @@ def read_hint(*, attributes: dict) -> str | None:
 def warn_on_disagreement(*, class_id: str, tier1_hint: str | None) -> None:
     """Log at WARNING when the agent's chosen class differs from Tier-1's hint. Advisory only.
 
-    **Never overrules and never blocks.** The point is observability, not enforcement (design D8
-    deferred the cross-check itself, correctly — Tier-1's rule table cannot see the catalog).
+    **Never overrules and never blocks.** The point is observability, not enforcement: Tier-1's rule
+    table cannot see the catalog, so it is in no position to arbitrate.
 
     Why it is worth a WARNING at all: classification selects the scoring DENOMINATOR — the one skill
     whose prescribed required steps ``recon_core.confidence.score_proposal`` divides by. The shipped
     skills prescribe 4, 5 and 6 required steps, and the auto-resolve threshold means "all of them" for
     every one, so a mis-pick does not lower the bar — it swaps WHICH checks must be evidenced before
-    an unattended ledger write. Until 2026-09-04 a model unsure of its class self-reported a low
-    confidence and a 0.6 floor escalated the case; that floor is gone (it was a mass false-negative in
-    practice), and nothing else notices a mis-pick. Logging it is what makes the residual risk
-    measurable instead of arguable.
+    an unattended ledger write. There is deliberately no self-reported confidence floor to catch a
+    model unsure of its class (as a gate it was a mass false negative), and nothing else notices a
+    mis-pick. Logging it is what makes the residual risk measurable instead of arguable.
 
     Silent when there is no hint: Tier-1 escalates plenty of items with no break type at all, and an
     every-item WARNING trains the operator to filter out the line, costing exactly the signal it

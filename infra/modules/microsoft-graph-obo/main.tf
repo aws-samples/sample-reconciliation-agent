@@ -12,11 +12,10 @@
 # module requires (CLIENT_SECRET_POST, and JWT_AUTHORIZATION_GRANT in obo mode).
 # AWS::BedrockAgentCore::OAuth2CredentialProvider models both.
 #
-# Both used to be null_resource provisioners shelling out to the AWS CLI, which meant an apply
-# needed the CLI plus jq on whatever machine ran Terraform — and a `data "external"` read the
-# provider ARN and callback URL back at PLAN time, so even a plan did.
+# Neither half shells out. Both the provider ARN and the callback URL are readOnly properties, so a
+# stack Output resolves them and no plan- or apply-time CLI, jq or interpreter is required.
 #
-# The client secret now lives in Secrets Manager and is referenced by the template
+# The client secret lives in Secrets Manager and is referenced by the template
 # (ClientSecretConfig + ClientSecretSource=EXTERNAL) rather than embedded in it. Inlining it would
 # have put the plaintext into the CloudFormation template, readable by anyone holding
 # cloudformation:GetTemplate — a far wider grant than the state bucket.
@@ -35,10 +34,10 @@ locals {
   target_name   = "microsoft-graph"
   # client_credentials mode exposes only app-only-compatible operations (no /me — there's no
   # signed-in user for an app-only token to resolve against).
-  schema_path    = local.is_cc ? "${path.module}/openapi-schema-app.json" : "${path.module}/openapi-schema.json"
+  schema_path = local.is_cc ? "${path.module}/openapi-schema-app.json" : "${path.module}/openapi-schema.json"
+  # No hash of the schema is needed: the native target diffs on the inline payload itself, so a
+  # schema edit is an ordinary in-place update.
   openapi_schema = file(local.schema_path)
-  # (No schema hash any more: it existed only to trigger the retired provisioner. The native target
-  # diffs on the payload itself, so a schema edit is an ordinary in-place update.)
   # MSAL.js issues v2.0 tokens (issuer https://login.microsoftonline.com/{tenant}/v2.0).
   # The OBO discovery URL must point at the v2.0 metadata so AgentCore Identity
   # POSTs the swap to /oauth2/v2.0/token and validates JWKS for v2 tokens. Same endpoint
@@ -100,6 +99,22 @@ resource "aws_secretsmanager_secret_version" "client_secret" {
   secret_string = jsonencode({ (local.client_secret_json_key) = var.client_secret })
 }
 
+# ⚠️ `Name` is create-only on AWS::BedrockAgentCore::OAuth2CredentialProvider, so CloudFormation
+# cannot adopt a provider that already exists outside this stack — CreateOauth2CredentialProvider
+# collides on the name. Delete it first, then apply:
+#
+#   aws bedrock-agentcore-control delete-oauth2-credential-provider \
+#     --name microsoft-graph-obo-provider --region <region>
+#
+# The provider ARN is DERIVED FROM THE NAME
+# (.../token-vault/default/oauth2credentialprovider/<name>), so a recreated provider gets the same
+# ARN and the gateway target below keeps resolving. Graph tool calls fail between the delete and the
+# apply.
+#
+# ⚠️ The callbackUrl does NOT survive a recreate: it embeds a server-generated UUID that differs on
+# every create, even for the same name. That only matters in `obo` mode, where the URL is a registered
+# Entra redirect URI — `client_credentials` has no redirect leg. In obo mode, re-register the new
+# value from the SSM parameter below on the Entra app after applying.
 resource "aws_cloudformation_stack" "oauth_provider" {
   count = var.enabled ? 1 : 0
   name  = "${var.project_name}-graph-oauth-provider"
@@ -121,8 +136,7 @@ resource "aws_cloudformation_stack" "oauth_provider" {
       }
     }
 
-    # Both readOnly on the resource type, so GetAtt resolves them — this is what retires the
-    # plan-time `data "external"` that used to shell out to the AWS CLI for the same two values.
+    # Both readOnly on the resource type, so GetAtt resolves them without a read-back API call.
     Outputs = {
       CredentialProviderArn = {
         Description = "Provider ARN, referenced by the gateway target's oauth credential config."
@@ -134,34 +148,6 @@ resource "aws_cloudformation_stack" "oauth_provider" {
       }
     }
   })
-}
-
-# Drop the retired CLI shims from state without running their destroy provisioners.
-#
-# ⚠️ ONE-TIME MANUAL STEP before the first apply in an environment that already has this provider.
-# `Name` is create-only on AWS::BedrockAgentCore::OAuth2CredentialProvider, so CloudFormation
-# cannot adopt the existing one and CreateOauth2CredentialProvider collides on the name:
-#
-#   aws bedrock-agentcore-control delete-oauth2-credential-provider \
-#     --name microsoft-graph-obo-provider --region <region>
-#
-# The provider ARN is DERIVED FROM THE NAME (.../token-vault/default/oauth2credentialprovider/<name>,
-# verified live 2026-09-02), so the recreated provider gets the same ARN and the imported gateway
-# target below keeps resolving. Graph tool calls fail between the delete and the apply.
-#
-# ⚠️ The callbackUrl does NOT survive: it embeds a server-generated UUID that changes on every
-# create (verified live — two creates of the same name produced different UUIDs). That only matters
-# in `obo` mode, where the URL is a registered Entra redirect URI; this environment runs
-# client_credentials, which has no redirect leg. In obo mode, re-register the new value from the
-# SSM parameter below on the Entra app after applying.
-# (data.external.oauth_provider_info needs no `removed` block — a data source is not tracked as a
-# managed object, so deleting its config is the whole removal.)
-removed {
-  from = null_resource.oauth_provider
-
-  lifecycle {
-    destroy = false
-  }
 }
 
 # ============================================================
@@ -186,7 +172,7 @@ resource "aws_bedrockagentcore_gateway_target" "graph" {
   }
 
   # client_credentials (app-only, 2LO): the gateway acquires its OWN Graph token via
-  # CLIENT_CREDENTIALS, independent of the inbound (Cognito) token — no token-exchange
+  # CLIENT_CREDENTIALS, independent of the inbound caller's identity — no token-exchange
   # custom_parameters, since there is no inbound assertion to swap.
   # obo (delegated, 3LO): TOKEN_EXCHANGE swaps the inbound assertion for a Graph token, and
   # requested_token_use=on_behalf_of is what tells Entra that is the swap being asked for.
@@ -205,14 +191,6 @@ resource "aws_bedrockagentcore_gateway_target" "graph" {
     # Service-managed and undeclarable: the gateway injects allowed_request_headers, which would
     # otherwise show as a perpetual diff on every plan.
     ignore_changes = [metadata_configuration]
-  }
-}
-
-removed {
-  from = null_resource.gateway_target
-
-  lifecycle {
-    destroy = false
   }
 }
 

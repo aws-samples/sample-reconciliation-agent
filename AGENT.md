@@ -97,7 +97,7 @@ aws ssm get-parameter --name /recon-dev/tier1-enabled
 
 The interceptor one matters most: it is the only place the provenance, evidence-quality and
 case-transition guards are enforced, and in `log` mode all three degrade to observation while every
-call still succeeds. Verified `enforce` on `recon-dev` on 2026-09-07.
+call still succeeds. Confirm it reads `enforce` before you trust any of the three.
 
 ## Where the real invariants live
 
@@ -112,11 +112,11 @@ Don't restate a rule in a second place — these are the single owners:
 | What extraction must emit                | `data/input/IDP-EXTRACTION-REQUIREMENTS.md`, asserted both ways by `tests/input_corpus/` |
 | The classification catalog               | `agent-blueprint/recon-agent/skills/*.md`                                                |
 
-The email-domain allowlist is the cautionary tale: it was once read in four places, and the three
-non-authoritative copies each read a container env var fixed at task start. A narrowed allowlist was
-enforced by the interceptor while the UI still displayed the old one, and an out-of-domain contact
-saved successfully but showed an amber warning that read as a failed save. **A control mirrored in
-four places is a control that lies.**
+The email-domain allowlist is the cautionary tale. Read it in four places — three of them a
+container env var fixed at task start — and narrowing it puts the interceptor on the new list while
+the UI still displays the wider one: an out-of-domain contact then saves successfully and shows an
+amber warning that reads as a failed save. **A control mirrored in four places is a control that
+lies.**
 
 ## Names and language
 

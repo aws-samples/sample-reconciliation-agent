@@ -25,7 +25,6 @@ vi.mock("@/lib/reconApi", () => ({
   listCases: (...a: unknown[]) => listCases(...a),
   bulkUpdateCases: vi.fn(),
 }));
-vi.mock("@/lib/reconToken", () => ({ getStoredAccessToken: () => "tok" }));
 vi.mock("@/hooks/useReconSubject", () => ({
   useReconSubject: () => ({ subject: "", isAdmin: false }),
 }));

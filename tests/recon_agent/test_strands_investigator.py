@@ -366,7 +366,6 @@ def test_every_offered_tool_is_a_read_and_none_of_them_sends(monkeypatch):
         "search_ledger",
         "search_notices",  # the actual side; read-only, and there is no notices write tool
         "search_guidance",
-        "get_results",
         "search_correspondence",
         # Reads that let a draft CITE a recipient and a wording. Neither widens what the model can
         # see: list_contacts answers without the address column, and list_templates answers with the
@@ -377,7 +376,6 @@ def test_every_offered_tool_is_a_read_and_none_of_them_sends(monkeypatch):
         "general-ledger___search_ledger",
         "notices___search_notices",
         "managed-kb___Retrieve",
-        "document-extraction___IDPTools___get_results",
         "microsoft-graph___listSharedMailboxMessages",
         # Two prefixes for one Lambda, because the prefix is the gateway TARGET name.
         "contacts___list_contacts",
@@ -486,9 +484,9 @@ def test_the_prompt_names_the_declared_evidence_step_ids() -> None:
     ``parse_skill`` strips the front matter out of ``body``, so the declared ids reach the model only
     if the prompt puts them back explicitly. Asking for ``"step_id": "<id from your skill's evidence
     steps>"`` while showing no id anywhere is the trap, and "in the order listed" then points at a
-    list the model cannot see. A live runtime run on 2026-09-02 reported ``account_name_match`` (the
-    skill's PROSE says "Account name") for a skill declaring ``expected_entry_match``, and the
-    investigation was discarded. Asserted on ``_prompt`` rather than on the block helper because what
+    list the model cannot see. What that produces live: ``account_name_match`` — read off the skill's
+    PROSE, which says "Account name" — for a skill declaring ``expected_entry_match``, and the whole
+    investigation is discarded. Asserted on ``_prompt`` rather than on the block helper because what
     matters is the block being PRESENT in the prompt.
 
     :returns: None.
@@ -613,10 +611,10 @@ def test_a_json_string_of_evidence_steps_survives_the_parser():
 def test_the_production_agent_sets_an_explicit_output_cap(monkeypatch) -> None:
     """The investigation loop must not run on Strands' default max_tokens.
 
-    Regression pin for 2026-09-02: with no cap set, a 4-required-step break truncated mid-JSON on
-    the final message. Strands raises ``MaxTokensReachedException`` instead of handing back the
-    partial text, so the whole invocation returned 500 and the case was stranded in IN_PROGRESS —
-    nothing downstream can recover a proposal that was never returned.
+    With no cap set, a 4-required-step break truncates mid-JSON on the final message. Strands raises
+    ``MaxTokensReachedException`` instead of handing back the partial text, so the whole invocation
+    returns 500 and the case is stranded in IN_PROGRESS — nothing downstream can recover a proposal
+    that was never returned.
 
     :param monkeypatch: pytest fixture, used to stand in for the Strands classes.
     :returns: None.

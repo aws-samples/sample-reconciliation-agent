@@ -208,36 +208,6 @@ def test_start_kb_ingestion_raises_on_a_failed_job(patch_boto):
         hnd.start_kb_ingestion(knowledge_base_id="kb", data_source_id="ds")
 
 
-# --- cognito --------------------------------------------------------------------------------
-
-
-def test_patch_cognito_callbacks_resends_every_replaced_field(patch_boto):
-    """⚠️ UpdateUserPoolClient REPLACES the client's config; it does not merge.
-
-    Omitting the auth flows, scopes or supported providers would silently strip them from a working
-    client and break sign-in — with a successful apply. So assert they are all present, not just the
-    URLs this action exists to set.
-    """
-    client = patch_boto(FakeClient([{}]))
-    hnd.patch_cognito_callbacks(
-        user_pool_id="pool",
-        client_id="spa",
-        callback_urls=["https://d1.cloudfront.net/callback"],
-        logout_urls=["https://d1.cloudfront.net/"],
-    )
-    _, kwargs = next(c for c in client.calls if c[0] == "update_user_pool_client")
-    assert kwargs["CallbackURLs"] == ["https://d1.cloudfront.net/callback"]
-    assert kwargs["LogoutURLs"] == ["https://d1.cloudfront.net/"]
-    assert kwargs["AllowedOAuthFlows"] == ["code"]
-    assert kwargs["AllowedOAuthScopes"] == ["openid", "email", "profile"]
-    assert kwargs["AllowedOAuthFlowsUserPoolClient"] is True
-    assert kwargs["SupportedIdentityProviders"] == ["COGNITO"]
-    assert set(kwargs["ExplicitAuthFlows"]) == {
-        "ALLOW_REFRESH_TOKEN_AUTH",
-        "ALLOW_USER_SRP_AUTH",
-    }
-
-
 # --- dispatch -------------------------------------------------------------------------------
 
 

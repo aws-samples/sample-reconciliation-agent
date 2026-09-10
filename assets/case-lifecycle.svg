@@ -1,0 +1,340 @@
+<svg viewBox="0 0 1240 1126" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    text {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .title { font-size: 19px; font-weight: 700; fill: #232f3e; }
+    .subtitle { font-size: 12px; fill: #5f6b7a; }
+    .band-label { font-size: 11px; font-weight: 600; fill: #232f3e; letter-spacing: 0.5px; }
+    .tb { font-size: 10px; font-weight: 600; fill: #232f3e; text-anchor: middle; }
+    .t { font-size: 9.5px; fill: #333; text-anchor: middle; }
+    .mono { font-size: 9px; fill: #5f6b7a; text-anchor: middle;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .edge { font-size: 9px; fill: #5f6b7a; text-anchor: middle; }
+    .foot { font-size: 9.5px; fill: #5f6b7a; }
+    .arrow { stroke: #5f6b7a; stroke-width: 1.5; fill: none; marker-end: url(#ah); }
+    .arrow-green { stroke: #1b660f; stroke-width: 1.5; fill: none; marker-end: url(#ah-green); }
+    .arrow-red { stroke: #c0392b; stroke-width: 1.5; fill: none; marker-end: url(#ah-red); }
+  </style>
+
+  <defs>
+    <marker id="ah" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#5f6b7a" />
+    </marker>
+    <marker id="ah-green" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#1b660f" />
+    </marker>
+    <marker id="ah-red" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#c0392b" />
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1240" height="1126" fill="#fafbfc" />
+
+  <text x="40" y="32" class="title">Reconciliation case lifecycle</text>
+  <text x="40" y="50" class="subtitle">Intake to resolution: what runs, what it writes, and every gate that can refuse a ledger write. Traced to the code as deployed.</text>
+
+  <!-- ============================ BAND 1 · INTAKE ============================ -->
+  <!-- TWO LANES, deliberately not one. Both Lambdas are ingest, but only the intake API produces a
+       ReconItem: put_if_absent has exactly one caller (backend/intake/handler.py). The idp-hook
+       writes a NOTICE and never touches the items table, and the notices table carries no
+       DynamoDB stream, so extraction structurally cannot open a case. A single shared arrow into
+       recon-items said the opposite and inverted that invariant. -->
+  <rect x="40" y="64" width="1160" height="124" rx="8" fill="none" stroke="#d5dbdb" stroke-width="1.5" />
+  <text x="56" y="84" class="band-label">1 · INTAKE</text>
+
+  <!-- Lane A — the ITEM path: the only route that opens a case. -->
+  <rect x="64" y="97" width="200" height="32" rx="5" fill="#f7f8fa" stroke="#d5dbdb" />
+  <text x="164" y="117" class="tb">&#955; intake &#183; API upload</text>
+
+  <path class="arrow" d="M264,113 L296,113" />
+  <text x="281" y="108" class="edge">item</text>
+
+  <rect x="300" y="91" width="190" height="44" rx="6" fill="#ffffff" stroke="#147eba" stroke-width="1.5" />
+  <text x="395" y="107" class="tb">DDB recon-items</text>
+  <text x="395" y="120" class="mono">put_if_absent</text>
+  <text x="395" y="131" class="t">same <tspan class="mono">item_id</tspan> &#8658; skipped</text>
+
+  <path class="arrow" d="M490,113 L532,113" />
+  <text x="511" y="106" class="edge">stream</text>
+
+  <rect x="536" y="91" width="190" height="44" rx="6" fill="#ffffff" stroke="#147eba" stroke-width="1.5" />
+  <text x="631" y="107" class="tb">DynamoDB Stream</text>
+  <text x="631" y="120" class="t">INSERT / MODIFY</text>
+  <text x="631" y="131" class="t">triggers Tier-1</text>
+
+  <!-- Lane B — the EVIDENCE path: a notice, searched later by the agent, never a work item. -->
+  <rect x="64" y="145" width="200" height="32" rx="5" fill="#f7f8fa" stroke="#d5dbdb" />
+  <text x="164" y="165" class="tb">&#955; idp-hook &#183; extraction</text>
+
+  <path class="arrow" d="M264,161 L296,161" />
+  <text x="281" y="156" class="edge">notice</text>
+
+  <rect x="300" y="139" width="190" height="44" rx="6" fill="#ffffff" stroke="#147eba" stroke-width="1.5" />
+  <text x="395" y="155" class="tb">DDB recon-notices</text>
+  <text x="395" y="168" class="mono">put &#183; put_document_record</text>
+  <text x="395" y="179" class="t">no stream &#8658; opens no case</text>
+
+  <!-- Kept 10px off the notices box (not aligned under the Stream column) so it reads as annotating
+       the notice row rather than the stream, which the notices table deliberately does not have. -->
+  <rect x="500" y="139" width="196" height="44" rx="6" fill="#fbfbfc" stroke="#d5dbdb" stroke-dasharray="4 2" />
+  <text x="598" y="157" class="t">evidence, not work: read in band 4</text>
+  <text x="598" y="170" class="t">via <tspan class="mono">search_notices</tspan></text>
+
+  <rect x="790" y="111" width="394" height="52" rx="6" fill="#fbfbfc" stroke="#d5dbdb" stroke-dasharray="4 2" />
+  <text x="987" y="130" class="tb">DDB recon-audit &#183; append-only</text>
+  <text x="987" y="144" class="t">One row per state change in every band below.</text>
+  <text x="987" y="157" class="t">ts is a microsecond RANGE key, bumped on collision — never overwritten.</text>
+
+  <path class="arrow" d="M726,113 L760,113 L760,196" />
+
+  <!-- ============================ BAND 2 · TIER-1 ============================ -->
+  <rect x="40" y="200" width="1160" height="160" rx="8" fill="none" stroke="#d5dbdb" stroke-width="1.5" />
+  <text x="56" y="220" class="band-label">2 · TIER-1 — DETERMINISTIC, NO LLM (backend/tier1/handler.py)</text>
+
+  <rect x="64" y="232" width="150" height="52" rx="6" fill="#f7f8fa" stroke="#d5dbdb" />
+  <text x="139" y="252" class="mono">tier1_enabled()</text>
+  <text x="139" y="266" class="t">off &#8658; everything</text>
+  <text x="139" y="278" class="t">escalates</text>
+
+  <path class="arrow" d="M214,258 L232,258" />
+
+  <rect x="236" y="232" width="180" height="52" rx="6" fill="#f7f8fa" stroke="#d5dbdb" />
+  <text x="326" y="252" class="mono">reconcile(rules)</text>
+  <text x="326" y="266" class="t">amount match,</text>
+  <text x="326" y="278" class="t">tolerance 0.05</text>
+
+  <path class="arrow" d="M416,258 L434,258" />
+
+  <rect x="438" y="232" width="196" height="52" rx="6" fill="#f7f8fa" stroke="#d5dbdb" />
+  <text x="536" y="252" class="mono">gl_lookup()</text>
+  <text x="536" y="266" class="t">only when the item has no</text>
+  <text x="536" y="278" class="t">sides; near-misses attached</text>
+
+  <path class="arrow" d="M634,258 L652,258" />
+
+  <rect x="656" y="232" width="156" height="52" rx="6" fill="#fff8e6" stroke="#d45b07" stroke-width="1.5" />
+  <text x="734" y="255" class="tb">match within</text>
+  <text x="734" y="270" class="tb">tolerance, or GL?</text>
+
+  <path class="arrow-green" d="M812,258 L832,258" />
+  <text x="822" y="251" class="edge">yes</text>
+
+  <rect x="834" y="232" width="170" height="52" rx="6" fill="#eaf7ea" stroke="#1b660f" stroke-width="1.5" />
+  <text x="919" y="255" class="tb">AUTO_CLEARED</text>
+  <text x="919" y="270" class="t">tier 1 &#183; terminal</text>
+
+  <rect x="1026" y="232" width="158" height="52" rx="6" fill="#fbfbfc" stroke="#d5dbdb" stroke-dasharray="4 2" />
+  <text x="1105" y="252" class="mono">tier1_match</text>
+  <text x="1105" y="266" class="t">why it cleared,</text>
+  <text x="1105" y="278" class="t">stored on the case</text>
+
+  <path class="arrow-red" d="M734,284 L734,296" />
+  <text x="756" y="294" class="edge">no</text>
+
+  <rect x="236" y="300" width="768" height="46" rx="6" fill="#eef6ff" stroke="#147eba" stroke-width="1.5" />
+  <text x="620" y="317" class="tb">escalate to Tier-2</text>
+  <text x="620" y="330" class="t">stamp tier1_escalation_reason + tier1_break_type &#183; cases.open(PENDING, tier 2)</text>
+  <text x="620" y="342" class="t">then transition PENDING &#8594; IN_PROGRESS under a ConditionExpression — the idempotency point</text>
+
+  <path class="arrow" d="M620,346 L620,382" />
+
+  <!-- ============================ BAND 3 · DISPATCH ============================ -->
+  <rect x="40" y="384" width="1160" height="104" rx="8" fill="none" stroke="#d5dbdb" stroke-width="1.5" />
+  <text x="56" y="404" class="band-label">3 · ASYNC DISPATCH (invoke_agent.py &#8594; agent_worker.py)</text>
+
+  <rect x="64" y="416" width="170" height="56" rx="6" fill="#f7f8fa" stroke="#d5dbdb" />
+  <text x="149" y="436" class="mono">lambda:Invoke</text>
+  <text x="149" y="450" class="t">InvocationType=Event</text>
+  <text x="149" y="463" class="t">the shard is never held</text>
+
+  <path class="arrow" d="M234,444 L252,444" />
+
+  <rect x="256" y="416" width="176" height="56" rx="6" fill="#f7f8fa" stroke="#d5dbdb" />
+  <text x="344" y="436" class="mono">_resolve_backend()</text>
+  <text x="344" y="450" class="t">SSM param — an operator</text>
+  <text x="344" y="463" class="t">switches with no redeploy</text>
+
+  <path class="arrow" d="M432,444 L450,444" />
+
+  <rect x="452" y="416" width="536" height="56" rx="6" fill="#ffffff" stroke="#147eba" stroke-width="1.5" stroke-dasharray="4 2" />
+
+  <!-- Switch 1 — WHICH implementation. The only choice an operator makes here: harness OR runtime. -->
+  <rect x="458" y="421" width="118" height="46" rx="4" fill="#f7f8fa" stroke="#d5dbdb" />
+  <text x="517" y="437" class="tb">harness</text>
+  <text x="517" y="451" class="t">managed AgentCore</text>
+
+  <!-- Switch 2 — HOW the runtime is reached. Nested inside the runtime backend on purpose: it is
+       not a third peer option, and both rows below reach the same container. -->
+  <rect x="584" y="421" width="398" height="46" rx="4" fill="#f7f8fa" stroke="#d5dbdb" />
+  <text x="612" y="441" class="tb">runtime</text>
+  <text x="612" y="454" class="t">container</text>
+
+  <rect x="640" y="424" width="336" height="18" rx="3" fill="#ffffff" stroke="#147eba" />
+  <text x="648" y="436" class="t" style="text-anchor: start">ingress (live here) &#183; SigV4 POST &#183; <tspan class="mono">use_ingress_gateway = true</tspan></text>
+
+  <rect x="640" y="445" width="336" height="18" rx="3" fill="#ffffff" stroke="#d5dbdb" />
+  <text x="648" y="457" class="t" style="text-anchor: start">direct &#183; InvokeAgentRuntime &#183; <tspan class="mono">= false</tspan>, or the auto-fallback</text>
+
+  <path class="arrow-red" d="M988,444 L1004,444" />
+
+  <rect x="1006" y="416" width="178" height="56" rx="6" fill="#fdecea" stroke="#c0392b" stroke-width="1.5" />
+  <text x="1095" y="436" class="tb">FAILED</text>
+  <text x="1095" y="450" class="t">the run died — retryable,</text>
+  <text x="1095" y="463" class="t">not terminal</text>
+
+  <path class="arrow" d="M724,472 L724,510" />
+
+  <!-- ============================ BAND 4 · TIER-2 AGENT ============================ -->
+  <rect x="40" y="512" width="1160" height="190" rx="8" fill="none" stroke="#d5dbdb" stroke-width="1.5" />
+  <text x="56" y="532" class="band-label">4 · TIER-2 AGENT — AgentCore Runtime (agent-blueprint/recon-agent/agent.py)</text>
+
+  <rect x="64" y="546" width="170" height="52" rx="6" fill="#f7f8fa" stroke="#d5dbdb" />
+  <text x="149" y="566" class="mono">retrieve_lessons()</text>
+  <text x="149" y="580" class="t">AgentCore Memory</text>
+  <text x="149" y="592" class="t">advisory &#183; fail-soft</text>
+
+  <path class="arrow" d="M234,572 L248,572" />
+
+  <rect x="250" y="546" width="200" height="52" rx="6" fill="#f7f8fa" stroke="#d5dbdb" />
+  <text x="350" y="566" class="mono">classify_with_consistency</text>
+  <text x="350" y="580" class="t">k samples &#183; majority vote</text>
+  <text x="350" y="592" class="t">the Tier-1 hint is withheld here</text>
+
+  <path class="arrow" d="M450,572 L464,572" />
+
+  <rect x="466" y="546" width="170" height="52" rx="6" fill="#f7f8fa" stroke="#d5dbdb" />
+  <text x="551" y="566" class="tb">SKILL.md catalog</text>
+  <text x="551" y="580" class="t">read from S3, ~60s TTL</text>
+  <text x="551" y="592" class="t">editable in the Config UI</text>
+
+  <path class="arrow" d="M636,572 L650,572" />
+
+  <rect x="652" y="546" width="190" height="52" rx="6" fill="#f7f8fa" stroke="#d5dbdb" />
+  <text x="747" y="566" class="tb">Strands agentic loop</text>
+  <text x="747" y="580" class="t">strands_investigator</text>
+  <text x="747" y="592" class="t">guided by the loaded skill</text>
+
+  <path class="arrow" d="M842,572 L856,572" />
+
+  <rect x="858" y="546" width="326" height="52" rx="6" fill="#ffffff" stroke="#147eba" stroke-width="1.5" />
+  <text x="1021" y="565" class="tb">Egress gateway &#183; MCP tools</text>
+  <text x="1021" y="579" class="mono">search_ledger &#183; search_notices &#183; search_guidance</text>
+  <text x="1021" y="592" class="t">a refusal comes back tagged denied:true, not as an outage</text>
+
+  <path class="arrow" d="M405,598 L405,616" />
+
+  <rect x="250" y="618" width="310" height="68" rx="6" fill="#eef6ff" stroke="#147eba" stroke-width="1.5" />
+  <text x="405" y="637" class="mono">score_by_evidence()</text>
+  <text x="405" y="652" class="tb">confidence = satisfied &#247; prescribed</text>
+  <text x="405" y="666" class="t">the fraction of the skill's REQUIRED evidence</text>
+  <text x="405" y="678" class="t">steps that came back — the model's own number is discarded</text>
+
+  <path class="arrow" d="M560,652 L578,652" />
+
+  <rect x="582" y="618" width="280" height="68" rx="6" fill="#eef6ff" stroke="#147eba" stroke-width="1.5" />
+  <text x="722" y="637" class="mono">persist_proposal()</text>
+  <text x="722" y="652" class="tb">case &#8594; PROPOSED</text>
+  <text x="722" y="666" class="t">nine attributes on recon-cases;</text>
+  <text x="722" y="678" class="t">status never moves except through transition()</text>
+
+  <rect x="882" y="618" width="302" height="68" rx="6" fill="#fbfbfc" stroke="#d5dbdb" stroke-dasharray="4 2" />
+  <text x="1033" y="640" class="t">PROPOSED is persisted BEFORE the gated</text>
+  <text x="1033" y="654" class="t">write — the interceptor's provenance check</text>
+  <text x="1033" y="668" class="t">reads proposed_action.reference off the case</text>
+  <text x="1033" y="681" class="t">row, so it has to be there first.</text>
+
+  <path class="arrow" d="M722,686 L722,724" />
+
+  <!-- ============================ BAND 5 · THE WRITE ============================ -->
+  <rect x="40" y="726" width="1160" height="190" rx="8" fill="none" stroke="#d5dbdb" stroke-width="1.5" />
+  <text x="56" y="746" class="band-label">5 · THE LEDGER WRITE — THREE INDEPENDENT GATES, EACH ABLE TO REFUSE</text>
+
+  <rect x="64" y="758" width="200" height="60" rx="6" fill="#fff8e6" stroke="#d45b07" stroke-width="1.5" />
+  <text x="164" y="777" class="tb">app gate</text>
+  <text x="164" y="791" class="mono">autonomous_execute()</text>
+  <text x="164" y="805" class="t">confidence &#8805; SSM threshold</text>
+  <text x="164" y="815" class="t">AND a clean proposed_action</text>
+
+  <path class="arrow" d="M264,788 L280,788" />
+
+  <rect x="282" y="758" width="236" height="60" rx="6" fill="#fff8e6" stroke="#d45b07" stroke-width="1.5" />
+  <text x="400" y="777" class="tb">REQUEST interceptor</text>
+  <text x="400" y="791" class="t">provenance: reference must equal the persisted one</text>
+  <text x="400" y="805" class="t">evidence_quality must read CLEAN</text>
+  <text x="400" y="815" class="t">an ABSENT verdict refuses</text>
+
+  <path class="arrow" d="M518,788 L534,788" />
+
+  <rect x="536" y="758" width="206" height="60" rx="6" fill="#fff8e6" stroke="#d45b07" stroke-width="1.5" />
+  <text x="639" y="777" class="tb">AgentCore Policy (Cedar)</text>
+  <text x="639" y="791" class="t">the independent hard guardrail</text>
+  <text x="639" y="805" class="t">confidence sent as an integer</text>
+  <text x="639" y="815" class="t">percent, as a Cedar decimal</text>
+
+  <path class="arrow-green" d="M742,788 L786,788" />
+  <text x="764" y="781" class="edge">permit</text>
+
+  <rect x="790" y="758" width="164" height="60" rx="6" fill="#eaf7ea" stroke="#1b660f" stroke-width="1.5" />
+  <text x="872" y="781" class="mono">set_draw_status</text>
+  <text x="872" y="796" class="tb">ledger write</text>
+  <text x="872" y="810" class="t">recorded as an execute step</text>
+
+  <path class="arrow-red" d="M164,818 L164,836" />
+  <path class="arrow-red" d="M400,818 L400,836" />
+  <path class="arrow-red" d="M639,818 L639,836" />
+
+  <rect x="64" y="838" width="678" height="48" rx="6" fill="#fdecea" stroke="#c0392b" stroke-width="1.5" />
+  <text x="403" y="858" class="tb">any one gate refuses &#8658; the case stays PROPOSED</text>
+  <text x="403" y="874" class="t">no write happens, the denial is recorded on the trace, and a human reviews it</text>
+
+  <path class="arrow-green" d="M872,818 L872,936" />
+  <text x="934" y="880" class="edge">write succeeded</text>
+
+  <!-- ============================ BAND 6 · RESOLUTION ============================ -->
+  <rect x="40" y="940" width="1160" height="120" rx="8" fill="none" stroke="#d5dbdb" stroke-width="1.5" />
+  <text x="56" y="960" class="band-label">6 · RESOLUTION</text>
+
+  <rect x="64" y="972" width="214" height="52" rx="6" fill="#f7f8fa" stroke="#d5dbdb" />
+  <text x="171" y="992" class="mono">maybe_auto_resolve()</text>
+  <text x="171" y="1006" class="t">skipped when the case carries</text>
+  <text x="171" y="1018" class="t">an unsent email draft</text>
+
+  <path class="arrow" d="M278,998 L294,998" />
+
+  <rect x="296" y="972" width="150" height="52" rx="6" fill="#f7f8fa" stroke="#d5dbdb" />
+  <text x="371" y="996" class="tb">APPROVED</text>
+  <text x="371" y="1011" class="t">guarded transition</text>
+
+  <path class="arrow" d="M446,998 L462,998" />
+
+  <rect x="464" y="972" width="196" height="52" rx="6" fill="#f7f8fa" stroke="#d5dbdb" />
+  <text x="562" y="992" class="tb">notification email</text>
+  <text x="562" y="1006" class="t">Graph shared mailbox,</text>
+  <text x="562" y="1018" class="t">best-effort — never blocks</text>
+
+  <path class="arrow" d="M660,998 L676,998" />
+
+  <rect x="678" y="972" width="150" height="52" rx="6" fill="#eaf7ea" stroke="#1b660f" stroke-width="1.5" />
+  <text x="753" y="996" class="tb">RESOLVED</text>
+  <text x="753" y="1011" class="t">terminal</text>
+
+  <path class="arrow" d="M828,998 L844,998" />
+
+  <rect x="846" y="972" width="170" height="52" rx="6" fill="#f7f8fa" stroke="#d5dbdb" />
+  <text x="931" y="992" class="tb">DDB recon-lessons</text>
+  <text x="931" y="1006" class="mono">AUTO_RESOLVED</text>
+  <text x="931" y="1018" class="t">recalled on later cases</text>
+
+  <rect x="1026" y="972" width="158" height="52" rx="6" fill="#eef6ff" stroke="#147eba" stroke-width="1.5" />
+  <text x="1105" y="992" class="tb">analyst</text>
+  <text x="1105" y="1006" class="t">approve / reject in</text>
+  <text x="1105" y="1018" class="t">the operator console</text>
+
+  <text x="64" y="1046" class="foot">Human path: PROPOSED &#8594; APPROVED &#8594; RESOLVED, or REJECTED &#8594; IN_PROGRESS (re-investigate, capped) / CLOSED_NO_ACTION / AGED. Every move is guarded by can_transition (backend/recon_core/status.py).</text>
+
+  <!-- ============================ FOOTNOTES ============================ -->
+  <text x="40" y="1084" class="foot">INTERCEPTOR_MODE is log (observe only) or enforce; in enforce, a guard that cannot be evaluated fails closed. The interceptor runs before Cedar and masks it — a denial there never reaches the policy engine.</text>
+  <text x="40" y="1100" class="foot">Cedar sees only set_draw_status's declared inputs (confidence, item_id, reason, reference, status), so it structurally cannot gate on evidence quality. That is why the categorical block lives in the interceptor, which can read the case row.</text>
+  <text x="40" y="1116" class="foot">Confidence is evidence completeness — satisfied &#247; prescribed REQUIRED steps of the classified skill — not a model self-report. With the threshold at 0.85, a skill with fewer than seven required steps cannot auto-resolve below full evidence.</text>
+</svg>

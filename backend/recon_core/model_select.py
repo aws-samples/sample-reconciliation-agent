@@ -1,10 +1,9 @@
 """Which Bedrock model the Tier-2 agent invokes, read live from SSM.
 
-The model id used to be deploy-time only: an environment variable on each backend, set from a
-Terraform variable. Changing it therefore meant a merge and an apply, while switching the entire
-agent *backend* was already one click in the Config tab. Comparing two models on the same queue is
-the most common thing anyone wants to do with this platform, and it was the one thing that required
-an infrastructure change.
+Read from SSM rather than a per-backend environment variable, so changing it is a Config-tab click
+and not a merge plus an apply. Comparing two models on the same queue is the most common thing
+anyone wants to do with this platform; it should not be the one thing that needs an infrastructure
+change, particularly when switching the agent *backend* is already a click.
 
 Both Tier-2 backends read through this module — ``backend/harness_agent/worker.py`` and
 ``agent-blueprint/recon-agent/agent.py``. Wiring only one of them is the failure mode to avoid here:

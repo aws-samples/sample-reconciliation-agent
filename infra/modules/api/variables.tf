@@ -17,7 +17,7 @@ variable "api_id" {
 }
 
 variable "authorizer_id" {
-  description = "Cognito JWT authorizer id (reused from intake)."
+  description = "OIDC JWT authorizer id (reused from intake)."
   type        = string
 }
 

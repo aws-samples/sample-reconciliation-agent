@@ -217,14 +217,14 @@ def test_both_backends_persist_an_identical_render_failure():
 
 
 def test_both_backends_recover_a_draft_the_model_emitted_as_a_json_string():
-    """THE parity break this file exists to catch, found in live QA (2026-08-09).
+    """THE parity break this file exists to catch.
 
-    The harness model emitted the nested ``email_draft`` object as a JSON STRING, the
-    ``isinstance(_, dict)`` guard dropped it, and the harness produced no draft at all while the
-    runtime produced one for the identical item — the exact backend-against-backend divergence
-    described at the top of this module, and one no hardcoded per-backend expectation would have
-    caught. ``email_draft`` is the first nested-object property in the harness's argument schema,
-    which the harness does not enforce, so nothing earlier had exercised this.
+    The harness model can emit the nested ``email_draft`` object as a JSON STRING; an
+    ``isinstance(_, dict)`` guard then drops it, so the harness produces no draft at all while the
+    runtime produces one for the identical item — the exact backend-against-backend divergence
+    described at the top of this module, and one no hardcoded per-backend expectation would catch.
+    ``email_draft`` is the first nested-object property in the harness's argument schema, which the
+    harness does not enforce.
     """
     stringified = json.dumps(DRAFT)
     runtime = _runtime_proposed_email(stringified)

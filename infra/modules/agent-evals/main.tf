@@ -1,7 +1,8 @@
 ####################################################################################
-# agent-evals module: AgentCore evaluator + online evaluation config + results log.
-# Uses native TF resources (aws_bedrockagentcore_evaluator, online_evaluation_config)
-# — provider ~>6.51 verified to have them (spike_evals.md).
+# agent-evals module: a custom AgentCore evaluator plus one online evaluation config per agent
+# backend, scoring live sessions continuously. Both are native provider resources
+# (aws_bedrockagentcore_evaluator, aws_bedrockagentcore_online_evaluation_config), so no
+# CloudFormation or shell-out is involved.
 ####################################################################################
 
 data "aws_caller_identity" "current" {}
@@ -111,7 +112,14 @@ resource "aws_lambda_permission" "evaluator_invoke" {
 
 resource "aws_bedrockagentcore_evaluator" "agreement" {
   evaluator_name = local.evaluator_name
-  description    = "Analyst-agreement: scores sessions against the lessons ledger ground truth."
+  # NOT "scores against ground truth" — there is no labelled dataset here. What this measures is
+  # whether the human who reviewed the case in the console accepted what the agent proposed. The
+  # lessons ledger is the RECORD of that decision, not a pre-labelled answer key.
+  #
+  # ⚠️ The service caps this at 200 characters and `terraform validate` enforces it, so the full
+  # account of the scoring (including why AUTO_RESOLVED counts as agreement when no human looked)
+  # lives in `backend/eval_agreement/handler.py`'s docstring rather than here.
+  description = "Whether the reviewer accepted the agent's proposed resolution: approved or auto-resolved 1.0, corrected 0.0, unreviewed abstains. From the latest decision recorded for the item."
 
   evaluator_config {
     code_based {
@@ -122,7 +130,42 @@ resource "aws_bedrockagentcore_evaluator" "agreement" {
     }
   }
 
+  # ⚠️ An evaluator referenced by an ENABLED online evaluation config is LOCKED, against updates
+  # AND against deletion (`locked_for_modification` reads true). Both failures are apply-time only
+  # — `terraform validate` and `plan` are both happy, so the first evidence is a red pipeline:
+  #
+  #   UpdateEvaluator -> ValidationException: Cannot update locked evaluator
+  #   DeleteEvaluator -> ValidationException: Cannot delete a locked evaluator. Please remove
+  #                      evaluator from all active online evaluation configurations before deleting
+  #
+  # ⚠️⚠️ THE DEVGUIDE'S ADVICE DOES NOT WORK. MEASURED 2026-09-10, DO NOT RETRY IT.
+  #
+  # `code-based-evaluators`'s final note says: "To make changes to the evaluator, disable the online
+  # evaluation configuration first, or clone the evaluator and create a new configuration." The first
+  # half is false. Both recon configs were set to `executionStatus: DISABLED` out of band and allowed
+  # to settle to `status: ACTIVE`; `get-evaluator` still reported `lockedForModification: true` across
+  # four polls over three minutes. The configs were restored to ENABLED, unchanged. Disabling does
+  # NOT release the lock — only DELETING the configs, or cloning the evaluator, can.
+  #
+  # `var.online_evals_enabled` still exists and still drives `execution_status`, because pausing
+  # scoring is independently useful. It just cannot unlock this resource, so do not reach for it
+  # expecting that.
+  #
+  # `description` is therefore back under `ignore_changes`. The wording above is the ACCURATE one and
+  # is where a human reads it; the DEPLOYED description is whatever was set when this evaluator was
+  # first created ("...against the lessons ledger ground truth", which misdescribes what the Lambda
+  # computes — see backend/eval_agreement/handler.py). The two legitimately disagree.
+  #
+  # To actually change the deployed text, the only route left is the devguide's SECOND option: create
+  # a NEW evaluator with the corrected description and repoint both configs at it. That changes
+  # `evaluator_id`, which flows to `ANALYST_AGREEMENT_EVALUATOR_ID` on the frontend task definition
+  # and so forces a new task-definition revision. It is a real change, not a metadata edit — which is
+  # why a cosmetically-wrong description is being tolerated instead.
   level = "SESSION"
+
+  lifecycle {
+    ignore_changes = [description]
+  }
 }
 
 # ---------------------------------------------------------------------------------
@@ -244,4 +287,12 @@ resource "aws_bedrockagentcore_online_evaluation_config" "this" {
 
   evaluation_execution_role_arn = aws_iam_role.eval_exec.arn
   enable_on_create              = true
+
+  # Managed, not just set at create: this is the lock-release lever for the custom evaluator above.
+  # Because these configs depend on `aws_bedrockagentcore_evaluator.agreement.evaluator_id`,
+  # Terraform always updates the evaluator BEFORE re-enabling them — which is exactly the order the
+  # service requires. Flip it with `-parallelism=1`: these configs share an evaluator, and the
+  # service rejects concurrent updates to two such configs with ConflictException (see the note
+  # above this resource).
+  execution_status = var.online_evals_enabled ? "ENABLED" : "DISABLED"
 }

@@ -13,11 +13,11 @@ data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
 locals {
-  # Client-side OTel tracing for the agent-worker Lambda. Enabled iff an ADOT layer ARN is given;
-  # the layer is what PROVIDES the opentelemetry packages (they are deliberately NOT vendored into
-  # the shared Lambda zip), so
-  # the layer and this env block must appear or disappear together. Empty ARN → {} → the worker's
-  # otel_client helpers stay inert and the function behaves exactly as before.
+  # Client-side OTel tracing for the agent-worker Lambda. Enabled iff an ADOT layer ARN is given.
+  # The layer is what PROVIDES the opentelemetry packages — they are deliberately NOT vendored into
+  # the shared Lambda zip — so the layer and this env block must appear or disappear together. An
+  # empty ARN yields {}, and the worker's otel_client helpers then stay inert rather than failing to
+  # import.
   worker_otel_enabled = var.otel_layer_arn != ""
   worker_otel_env = local.worker_otel_enabled ? {
     # The layer's exec wrapper: runs the handler under `opentelemetry-instrument`, which installs
@@ -265,14 +265,13 @@ resource "aws_lambda_function" "worker" {
   }
 }
 
-# Asynchronous invocations (the Tier-1 consumer calls the worker with InvocationType=Event) retry
-# TWICE by default. That default is wrong for this function and actively harmful: a worker error
-# almost always means "the agent invocation did not return in time", not "the agent did not run" —
-# the investigation is still executing server-side and writes its own case row. Each retry therefore
-# starts a SECOND full LLM investigation of the same item against the same session. On 2026-09-02
-# this stacked up to seven concurrent investigations of one item. Retrying is also pointless: there
-# is no response for the worker to salvage, so a retry can only duplicate cost, never recover
-# anything.
+# ⚠️ maximum_retry_attempts = 0 is load-bearing. Asynchronous invocations (the Tier-1 consumer calls
+# the worker with InvocationType=Event) retry TWICE by default, and that default is actively harmful
+# here: a worker error almost always means "the agent invocation did not return in time", not "the
+# agent did not run" — the investigation is still executing server-side and writes its own case row.
+# Each retry therefore starts a SECOND full LLM investigation of the same item against the same
+# session, and they stack. Retrying also cannot help: there is no response left for the worker to
+# salvage, so it can only duplicate cost.
 resource "aws_lambda_function_event_invoke_config" "worker" {
   function_name          = aws_lambda_function.worker.function_name
   maximum_retry_attempts = 0

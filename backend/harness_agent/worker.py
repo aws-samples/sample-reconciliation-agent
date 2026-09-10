@@ -29,6 +29,7 @@ from backend.harness_agent.stream import assemble_stream
 from backend.recon_core.cases import CaseStore
 from backend.recon_core.schema import ReasoningStep, ReconItem
 from backend.recon_core.tier1_hint import read_hint
+from backend.recon_core.token_usage import summarize_token_usage
 
 logger = logging.getLogger(__name__)
 
@@ -67,18 +68,22 @@ def _toolresult_message(tool_use_id: str, decision: dict) -> dict:
 
 def _persist_degraded(
     *, cases: CaseStore, item: ReconItem, steps, reason: str, now: str,
-    class_id: str = "unknown",
+    class_id: str = "unknown", token_usage: dict | None = None,
 ) -> None:
     """Persist a degraded proposal (trace-so-far, no executable action) → PROPOSED.
 
     Used when no VALID proposal was produced (failure stop / missing submit_proposal / malformed
     output) so the item always leaves IN_PROGRESS for a human rather than being stranded. The
     resolution CONFIDENCE stays 0 (there is no trustworthy resolution), but the CLASSIFICATION is
-    preserved when known — on a malformed proposal the model still typically supplied a valid
-    ``class_name``, so collapsing it to ``unknown`` needlessly discards a correct classification
-    (observed live 2026-07-27).
+    preserved when known — on a malformed proposal the model still typically supplies a valid
+    ``class_name``, so collapsing it to ``unknown`` would needlessly discard a correct
+    classification.
 
     :param class_id: preserved classification when known (default ``"unknown"``).
+    :param token_usage: the run's token usage so far (``recon_core.token_usage`` shape), or ``None``
+        when nothing was measured. Carried onto a DEGRADED proposal too: a run that timed out or
+        submitted nothing usable still burned the tokens it burned, and a cost figure that silently
+        excluded the failures would understate exactly the runs worth looking at.
     """
     from backend.recon_core.schema import Proposal
 
@@ -88,13 +93,14 @@ def _persist_degraded(
         steps=list(steps) + [ReasoningStep(skill=class_id, kind="propose",
                                            reasoning=reason)],
         proposed_action=None,
+        token_usage=token_usage,
     )
     intake.persist(cases=cases, proposal=prop)
 
 
 def run_investigation(
     *, item: ReconItem, invoke, cases: CaseStore, catalog: list[dict],
-    threshold, lessons=None, now: str = "", write_transport=None,
+    threshold, lessons=None, now: str = "", write_transport=None, model_id: str,
 ) -> str:
     """Drive the harness loop for one item. Returns 'executed' | 'escalated' | 'failed'.
 
@@ -102,19 +108,41 @@ def run_investigation(
         InvokeHarness stream per call). Production wraps boto3 InvokeHarness streaming.
     :param write_transport: test seam for the worker's gateway write
         (``callable(tool_name, arguments) -> result``); None uses the live SigV4 MCP call.
+    :param model_id: the model this run is ACTUALLY invoking, as resolved by
+        ``config_store.resolved_model_id`` from the InvokeHarness overrides. Required, with no
+        default, on purpose: the stored token usage is priced against this id, and an operator can
+        switch the model at runtime through SSM or a deployed config version, so a default here would
+        mislabel — and therefore misprice — every run made after such a switch.
     """
     messages = [prompting.build_first_message(item=item, catalog=catalog, lessons=lessons)]
+    # Every turn's raw usage report, in call order. A LIST that gets SUMMED, not a variable that gets
+    # overwritten: this loop is multi-turn — one InvokeHarness call to reach ``submit_proposal`` and
+    # another to close the session — so keeping the last turn's report would undercount every real
+    # case while a hypothetical single-turn one still looked right. The summing itself belongs to
+    # ``recon_core.token_usage``, which the runtime backend imports too.
+    usages: list[dict] = []
+
+    def _usage_so_far() -> dict | None:
+        """Fold every turn recorded so far into the stored token-usage shape (None if nothing).
+
+        :returns: the token-usage dict, or None when no turn reported any usage.
+        """
+        return summarize_token_usage(usages=usages, model_id=model_id, backend="harness")
+
     try:
         first = assemble_stream(invoke(messages))
     except Exception as exc:  # noqa: BLE001 - stream/transport failure must not strand the item
         logger.error("harness invoke failed for %s: %s", item.item_id, exc, exc_info=True)
-        _persist_degraded(cases=cases, item=item, steps=[], reason=f"harness invoke failed: {exc}", now=now)
+        _persist_degraded(cases=cases, item=item, steps=[], reason=f"harness invoke failed: {exc}",
+                          now=now, token_usage=_usage_so_far())
         return "failed"
+    usages.append(first.usage)
 
     if first.stop_reason in _FAILURE_STOPS:
         logger.warning("harness stopped early for %s: %s", item.item_id, first.stop_reason)
         _persist_degraded(cases=cases, item=item, steps=first.steps,
-                          reason=f"harness stopped: {first.stop_reason}", now=now)
+                          reason=f"harness stopped: {first.stop_reason}", now=now,
+                          token_usage=_usage_so_far())
         return "escalated"
 
     pending = first.pending_tool
@@ -122,7 +150,8 @@ def run_investigation(
         logger.warning("harness did not submit a proposal for %s (pending=%s)",
                        item.item_id, pending.get("name") if pending else None)
         _persist_degraded(cases=cases, item=item, steps=first.steps,
-                          reason="agent did not submit a proposal", now=now)
+                          reason="agent did not submit a proposal", now=now,
+                          token_usage=_usage_so_far())
         return "escalated"
 
     logger.info("harness submit_proposal for %s: keys=%s",
@@ -144,9 +173,14 @@ def run_investigation(
         _persist_degraded(
             cases=cases, item=item, steps=first.steps,
             reason=f"malformed proposal: {exc}", now=now, class_id=cls_id,
+            token_usage=_usage_so_far(),
         )
         return "escalated"
 
+    # On the proposal itself rather than as a persist argument: `intake.persist` runs up to three
+    # times below for this same proposal, and an argument would have to be re-supplied at each of
+    # them (one omission = the value silently reverts to NULL).
+    proposal.token_usage = _usage_so_far()
     intake.persist(cases=cases, proposal=proposal)
     decision = intake.decide(proposal=proposal, threshold=threshold)
 
@@ -184,9 +218,21 @@ def run_investigation(
     messages.append(_assistant_tooluse_message(pending))
     messages.append(_toolresult_message(pending["toolUseId"], {**decision, "outcome": outcome}))
     try:
-        assemble_stream(invoke(messages))
+        closing = assemble_stream(invoke(messages))
     except Exception as exc:  # noqa: BLE001 - already persisted; summary failure changes nothing
         logger.warning("harness follow-up invoke failed for %s: %s", item.item_id, exc)
+    else:
+        usages.append(closing.usage)
+        if closing.usage:
+            # The closing turn is a real model call and bills like one, but the persist above could
+            # not include a turn that had not happened yet — hence a third write for the widened
+            # total. Best-effort like the invoke itself: the case state is already final, so losing
+            # this ONE turn's count must never fail an otherwise complete investigation.
+            proposal.token_usage = _usage_so_far()
+            try:
+                intake.persist(cases=cases, proposal=proposal)
+            except Exception as exc:  # noqa: BLE001 - see above; the case is already final
+                logger.warning("harness token-usage re-persist failed for %s: %s", item.item_id, exc)
 
     logger.info("harness decision for %s: decision=%s outcome=%s confidence=%s",
                 item.item_id, decision.get("decision"), outcome, decision.get("confidence"))
@@ -203,9 +249,9 @@ def handle(event, _context=None):  # pragma: no cover - live wiring; loop tested
     from backend.recon_core.auto_resolve import get_threshold
     from backend.recon_core.skills_s3 import catalog_s3
 
-    # Lambda's root logger defaults to WARNING, hiding our INFO submit/decision breadcrumbs.
-    # Raise it so the submit_proposal keys + decision land in CloudWatch (they were invisible,
-    # forcing diagnosis off the persisted case alone — observed 2026-07-27).
+    # Lambda's root logger defaults to WARNING, which hides the INFO submit/decision breadcrumbs.
+    # Raise it so the submit_proposal keys and the decision land in CloudWatch; without them a
+    # failed run can only be diagnosed from the persisted case.
     logging.getLogger("backend").setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
     item = ReconItem.model_validate(event["item"])
@@ -251,8 +297,14 @@ def handle(event, _context=None):  # pragma: no cover - live wiring; loop tested
     # deployed (SSM pointer set), its model_id/max_iterations override the blueprint defaults.
     # Its system_prompt is NOT applied here: deploying a version writes that text into the shared
     # core object above, so both backends pick it up (see backend/recon_core/prompt_source.py).
-    # Absent pointer → use defaults (zero-config backward compatible).
-    from backend.harness_agent.config_store import active_version, apply_overrides, load_config
+    # Absent pointer → use the blueprint defaults, so an environment that has never deployed a
+    # config version needs no configuration at all.
+    from backend.harness_agent.config_store import (
+        active_version,
+        apply_overrides,
+        load_config,
+        resolved_model_id,
+    )
 
     ssm_client = boto3.client("ssm", region_name=region)
     s3_client = boto3.client("s3", region_name=region)
@@ -299,6 +351,9 @@ def handle(event, _context=None):  # pragma: no cover - live wiring; loop tested
     outcome = run_investigation(
         item=item, invoke=_invoke, cases=cases, catalog=catalog,
         threshold=threshold, lessons=lessons,
+        # Read back off the kwargs `_invoke` actually sends — after any config-version override — so
+        # the token usage is labelled with the model that ran, not the deploy-time default.
+        model_id=resolved_model_id(invoke_kwargs=invoke_kwargs),
     )
     return {"outcome": outcome, "item_id": item.item_id}
 

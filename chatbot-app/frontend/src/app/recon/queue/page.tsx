@@ -3,7 +3,6 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { listCases, bulkUpdateCases, type ReconCase } from "@/lib/reconApi";
-import { getStoredAccessToken } from "@/lib/reconToken";
 import { NewItemModal } from "@/components/recon/NewItemModal";
 import { DataTable, type DataTableColumn } from "@/components/recon/DataTable";
 import { useReconSubject } from "@/hooks/useReconSubject";
@@ -208,7 +207,7 @@ function QueueContent() {
         : f === "ALL"
           ? { scope: "all" as const }
           : { status: f };
-    return listCases(getStoredAccessToken(), opts)
+    return listCases(opts)
       .then(setCases)
       .catch((e) => setError(String(e)));
   };

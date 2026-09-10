@@ -1,10 +1,10 @@
 """The runtime backend's k-sample classifier.
 
-The vote produces no number at all any more — it returns a class and its reasoning. It still matters,
-and more than the deleted figures ever did: the class it picks names the ONE skill whose prescribed
-required steps form the denominator of the evidence-completeness score (tested separately), so getting
-the majority or the diversity temperature wrong sends the agent down the wrong playbook and then scores
-it against the wrong checks.
+The vote produces no number at all — it returns a class and its reasoning. It matters more than any
+self-reported figure would: the class it picks names the ONE skill whose prescribed required steps form
+the denominator of the evidence-completeness score (tested separately), so getting the majority or the
+diversity temperature wrong sends the agent down the wrong playbook and then scores it against the
+wrong checks.
 """
 
 import json
@@ -35,9 +35,11 @@ class _FakeCaller:
         self.temps = []
 
     def __call__(self, *, model_id, system, prompt, max_tokens, temperature):
-        """Return the next canned reply as ``(text, stop_reason)``."""
+        """Return the next canned reply as ``(text, stop_reason, usage)``."""
         self.temps.append(temperature)
-        return json.dumps(self._replies.pop(0)), "end_turn"
+        # No usage counts: this file asserts the vote, and cost has its own file
+        # (``test_runtime_token_usage.py``).
+        return json.dumps(self._replies.pop(0)), "end_turn", {}
 
 
 CATALOG = [
@@ -68,24 +70,24 @@ def test_classify_with_consistency_majority_vote():
             {"name": "timing", "reasoning": "c"},
         ]
     )
-    name, reasoning = classify_with_consistency(
+    vote = classify_with_consistency(
         model_id="m", system="s", item=ITEM, catalog=CATALOG, samples=3, caller=fc
     )
-    assert name == "timing"
-    assert reasoning in ("a", "c")  # reasoning comes from a majority-class sample
+    assert vote.name == "timing"
+    assert vote.reasoning in ("a", "c")  # reasoning comes from a majority-class sample
     # Sampling must use a diversity temperature (not the deterministic 0.2) — identical draws would
     # make the vote unanimous by construction and cost it the stability it exists for.
     assert all(t >= 0.5 for t in fc.temps)
 
 
 def test_a_stale_prompt_still_asking_for_a_confidence_does_not_break_the_vote() -> None:
-    """The deploy window: new code running against the OLD system prompt.
+    """The deploy window: this code running against a prompt that has not caught up.
 
-    Both system prompts are create-only S3 objects (``lifecycle { ignore_changes }``), so
-    ``terraform apply`` ships this code WITHOUT shipping the rewritten prompt — the seed push is a
-    separate manual step. Until it lands, the live model is still being told to "state your reasoning
-    with a confidence in [0,1]" and will duly add the key. Reading the reply by name rather than by
-    shape is what makes that window harmless, so it is asserted rather than left to inspection.
+    Both system prompts are create-only S3 objects (``lifecycle { ignore_changes }``) and are editable
+    from the UI, so the live prompt can say anything regardless of what this repo ships. A prompt that
+    tells the model to "state your reasoning with a confidence in [0,1]" gets the key added. Reading
+    the reply by name rather than by shape is what makes that harmless, so it is asserted rather than
+    left to inspection.
 
     :returns: None.
     """
@@ -93,13 +95,13 @@ def test_a_stale_prompt_still_asking_for_a_confidence_does_not_break_the_vote() 
         [
             {"name": "timing", "reasoning": "a", "confidence": 0.91},
             {"name": "timing", "reasoning": "c", "confidence": 0.2},
-            # Also the shape where the model nests it, which the old prompt's wording invited.
+            # Also the shape where the model nests it, which a loosely worded prompt invites.
             {"name": "timing", "reasoning": "d", "classification": {"confidence": 0.5}},
         ]
     )
-    name, reasoning = classify_with_consistency(
+    vote = classify_with_consistency(
         model_id="m", system="s", item=ITEM, catalog=CATALOG, samples=3, caller=fc
     )
 
-    assert name == "timing"
-    assert reasoning in ("a", "c", "d")
+    assert vote.name == "timing"
+    assert vote.reasoning in ("a", "c", "d")

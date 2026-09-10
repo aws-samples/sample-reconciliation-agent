@@ -15,12 +15,11 @@ Applies to **every** break class. Which source answers which kind of question.
   archive does not contain — a message received since the last ingestion, a settlement
   calendar, a counterparty contact.
 - **`search_notices`:** the extracted fields of counterparty notices, including the one attached to
-  the item under investigation. This is the actual side of the reconciliation and the normal way to
-  reach a notice. A field this notice's class never carried comes back in `fields_unavailable`, which
-  is not the same as not matching.
-- **IDP MCP (document-extraction):** the raw extraction for one document, when `search_notices` is not
-  enough — a specific section, a page image, an extraction detail that was not stored on the notice.
-  It is the narrower channel, not the default one.
+  the item under investigation. This is the actual side of the reconciliation and the **only** way to
+  reach a notice — there is no second, narrower channel into the document pipeline, because the
+  per-section classification and the extracted values are already on the notice row as `idp_sections`.
+  A field this notice's class never carried comes back in `fields_unavailable`, which is not the same
+  as not matching.
 - **`search_ledger`:** the book of record — what was EXPECTED. Never a notice source.
 
 ## Two routes bring documents in, and they carry different evidence

@@ -1,204 +1,279 @@
 // @vitest-environment node
 /**
- * The Documents-tab read routes.
+ * The Documents tab's list route, now a Query against recon's own notice table.
  *
- * These assertions guard failures that are all silent in the same way: the upstream GraphQL API answers
- * HTTP 200 even when it refused the query, so anything this layer gets wrong surfaces as "no documents"
- * rather than as an error. Hence the emphasis on what the routes REFUSE and on what they pass through
- * verbatim — a filter that was never applied and a key that was decoded twice both look like a working
- * screen with nothing on it.
+ * What is worth asserting here is everything that fails QUIETLY. This route used to read the extraction
+ * pipeline's GraphQL API, where a refused query arrived as HTTP 200 with an `errors` array and every
+ * mistake surfaced as "no documents"; a DynamoDB refusal at least throws. The silent failures that
+ * remain are all about the PAGE the caller gets:
  *
- * The transport is mocked; there is no live stack in CI, and signing a real request here would only test
- * the signer.
+ *  - `ScanIndexForward` the wrong way round shows the oldest 100 documents under a column header that
+ *    says newest first, which reads as "nothing has been processed for weeks";
+ *  - a continuation token that loses one of its three key attributes either restarts at page one — which
+ *    a paging client follows forever — or resumes at the wrong row;
+ *  - a `view` parameter quietly ignored looks like a filter that worked.
+ *
+ * The DynamoDB client is mocked; the store's own translation is NOT, so these assertions also cover the
+ * stored-to-wire mapping the tab renders.
  */
+import { marshall } from "@aws-sdk/util-dynamodb";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const idpGraphQL = vi.fn();
-vi.mock("@/lib/idpAppSync", () => ({ idpGraphQL }));
+const send = vi.fn();
+vi.mock("@aws-sdk/client-dynamodb", () => ({
+  DynamoDBClient: class {
+    send = send;
+  },
+  QueryCommand: class {
+    constructor(public input: Record<string, unknown>) {}
+  },
+  // Unused by this route, but the store imports it and the mock replaces the whole module.
+  GetItemCommand: class {
+    constructor(public input: Record<string, unknown>) {}
+  },
+}));
+
+// The store has no default for this and throws without it.
+process.env.NOTICES_TABLE = "recon-dev-notices";
 
 const listRoute = await import("@/app/api/recon/idp-documents/route");
-const detailRoute =
-  await import("@/app/api/recon/idp-documents/[objectKey]/route");
 
-/** One upstream row, minimal but shaped like the real thing. */
+/** One stored row, in the shape `backend/idp_hook/tracking.py` writes. */
 function row(objectKey: string): Record<string, unknown> {
   return {
-    ObjectKey: objectKey,
-    ObjectStatus: "COMPLETED",
-    WorkflowStatus: "SUCCEEDED",
-    InitialEventTime: "2026-08-25T01:36:12Z",
-    CompletionTime: "2026-08-25T01:38:09Z",
-    ConfigVersion: "unapplied-cash-v1",
-    EvaluationStatus: "COMPLETED",
-    HITLStatus: null,
-    HITLTriggered: null,
-    HITLCompleted: null,
-    HITLReviewOwner: null,
-    HITLReviewedBy: null,
-    PageCount: 4,
-    ConfidenceAlertCount: 2,
+    notice_id: `idp-${objectKey}`,
+    record_kind: "notice",
+    source_document: objectKey,
+    parse_method: "IDP",
+    confidence_alert_count: 2,
+    idp_record: "document",
+    idp_started_at: "2026-08-25T01:36:12Z",
+    idp_tracking: {
+      object_status: "COMPLETED",
+      workflow_status: "SUCCEEDED",
+      initial_event_time: "2026-08-25T01:36:12Z",
+      completion_time: "2026-08-25T01:38:09Z",
+      config_version: "unapplied-cash-v1",
+      evaluation_status: "COMPLETED",
+      page_count: 4,
+    },
   };
 }
 
-/** The variables the route passed to the transport on its most recent call. */
-function lastVariables(): Record<string, unknown> {
-  return idpGraphQL.mock.calls.at(-1)![0].variables as Record<string, unknown>;
+/** A GSI `LastEvaluatedKey`: the index's hash and range PLUS the table's own key. */
+const LAST_KEY = {
+  idp_record: { S: "document" },
+  idp_started_at: { S: "2026-08-25T01:36:12Z" },
+  notice_id: { S: "idp-a/one.pdf" },
+};
+
+/** The `QueryCommand` input the route built on its most recent call. */
+function lastQuery(): Record<string, unknown> {
+  return (send.mock.calls.at(-1)![0] as { input: Record<string, unknown> })
+    .input;
+}
+
+/** The key values the route bound into its key condition. */
+function lastValues(): Record<string, { S: string }> {
+  return lastQuery().ExpressionAttributeValues as Record<string, { S: string }>;
+}
+
+/** Call the route with a query string. */
+async function get(qs = ""): Promise<Response> {
+  return listRoute.GET(new Request(`http://x/api/recon/idp-documents${qs}`));
 }
 
 beforeEach(() => {
-  idpGraphQL.mockReset();
+  send.mockReset();
+  send.mockResolvedValue({ Items: [], LastEvaluatedKey: undefined });
 });
 
 describe("GET /api/recon/idp-documents", () => {
-  it("returns the rows, the continuation token, and the window it actually used", async () => {
-    idpGraphQL.mockResolvedValue({
-      listDocuments: { nextToken: "tok", Documents: [row("a/one.pdf")] },
+  it("returns the rows, a continuation token, and the window it actually used", async () => {
+    send.mockResolvedValue({
+      Items: [marshall(row("a/one.pdf"))],
+      LastEvaluatedKey: LAST_KEY,
     });
-    const res = await listRoute.GET(
-      new Request("http://x/api/recon/idp-documents"),
-    );
+    const res = await get();
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.documents).toHaveLength(1);
-    expect(body.nextToken).toBe("tok");
     expect(body.count).toBe(1);
+    expect(body.documents).toHaveLength(1);
+    // Translated by the store, not forwarded: the stored attributes are snake_case and nested.
+    expect(body.documents[0].ObjectKey).toBe("a/one.pdf");
+    expect(body.documents[0].ConfigVersion).toBe("unapplied-cash-v1");
+    expect(body.documents[0].PageCount).toBe(4);
+    expect(body.documents[0].ConfidenceAlertCount).toBe(2);
+    expect(typeof body.nextToken).toBe("string");
     // The echoed window is what lets the tab state the range on screen instead of the range requested.
     expect(typeof body.window.startDateTime).toBe("string");
     expect(typeof body.window.endDateTime).toBe("string");
   });
 
-  it("defaults to a 30-day window when the caller gives none", async () => {
-    idpGraphQL.mockResolvedValue({
-      listDocuments: { nextToken: null, Documents: [] },
+  it("reads the document index over the requested window, newest first", async () => {
+    await get(
+      "?startDateTime=2026-08-01T00:00:00Z&endDateTime=2026-09-01T00:00:00Z",
+    );
+    const q = lastQuery();
+    expect(q.TableName).toBe("recon-dev-notices");
+    expect(q.IndexName).toBe("idp-document-index");
+    expect(q.KeyConditionExpression).toBe(
+      "idp_record = :r AND idp_started_at BETWEEN :s AND :e",
+    );
+    expect(lastValues()).toEqual({
+      ":r": { S: "document" },
+      ":s": { S: "2026-08-01T00:00:00Z" },
+      ":e": { S: "2026-09-01T00:00:00Z" },
     });
-    await listRoute.GET(new Request("http://x/api/recon/idp-documents"));
-    const v = lastVariables();
-    const span = Date.parse(v.end as string) - Date.parse(v.start as string);
+    // Newest first. The range key sorts ascending by default, so this is the whole of the tab's claim.
+    expect(q.ScanIndexForward).toBe(false);
+  });
+
+  it("defaults to a 30-day window when the caller gives none", async () => {
+    await get();
+    const v = lastValues();
+    const span = Date.parse(v[":e"].S) - Date.parse(v[":s"].S);
     expect(span).toBeCloseTo(30 * 24 * 60 * 60 * 1000, -4);
   });
 
-  it("refuses a `view` parameter instead of forwarding it", async () => {
-    // The upstream query has no such argument, and asking for one is a validation error returned as
-    // HTTP 200 — so forwarding it would read as an empty result, and ignoring it would read as a
-    // filter that worked. Neither is acceptable, so it is a 400 and nothing is called.
-    const res = await listRoute.GET(
-      new Request("http://x/api/recon/idp-documents?view=TEST"),
-    );
+  it("refuses a `view` parameter instead of ignoring it", async () => {
+    // Recon records no production/test flag, so there is nothing to filter on. Ignoring the parameter
+    // would read as a filter that worked, which is the one outcome nobody can see is wrong.
+    const res = await get("?view=TEST");
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toMatch(/production\/test filter/i);
-    expect(idpGraphQL).not.toHaveBeenCalled();
+    expect((await res.json()).error).toMatch(/production\/test flag/i);
+    expect(send).not.toHaveBeenCalled();
   });
 
-  it("clamps an oversized limit rather than passing it upstream", async () => {
-    idpGraphQL.mockResolvedValue({
-      listDocuments: { nextToken: null, Documents: [] },
-    });
-    await listRoute.GET(
-      new Request("http://x/api/recon/idp-documents?limit=5000"),
-    );
-    expect(lastVariables().limit).toBe(100);
+  it("clamps an oversized limit and defaults to the same ceiling", async () => {
+    await get("?limit=5000");
+    expect(lastQuery().Limit).toBe(100);
+    await get("?limit=7");
+    expect(lastQuery().Limit).toBe(7);
+    await get();
+    expect(lastQuery().Limit).toBe(100);
   });
 
   it("rejects a non-integer limit", async () => {
-    const res = await listRoute.GET(
-      new Request("http://x/api/recon/idp-documents?limit=abc"),
-    );
+    const res = await get("?limit=abc");
     expect(res.status).toBe(400);
-    expect(idpGraphQL).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
   });
 
   it("rejects an unparseable timestamp and an inverted window", async () => {
-    const bad = await listRoute.GET(
-      new Request("http://x/api/recon/idp-documents?startDateTime=yesterday"),
-    );
-    expect(bad.status).toBe(400);
-    const inverted = await listRoute.GET(
-      new Request(
-        "http://x/api/recon/idp-documents?startDateTime=2026-09-01T00:00:00Z&endDateTime=2026-08-01T00:00:00Z",
-      ),
-    );
-    expect(inverted.status).toBe(400);
-    expect(idpGraphQL).not.toHaveBeenCalled();
+    expect((await get("?startDateTime=yesterday")).status).toBe(400);
+    expect(
+      (
+        await get(
+          "?startDateTime=2026-09-01T00:00:00Z&endDateTime=2026-08-01T00:00:00Z",
+        )
+      ).status,
+    ).toBe(400);
+    expect(send).not.toHaveBeenCalled();
   });
 
-  it("passes the continuation token through unchanged", async () => {
-    idpGraphQL.mockResolvedValue({
-      listDocuments: { nextToken: null, Documents: [] },
-    });
-    // Real tokens are base64 with `=` padding; a token mangled in transit pages back to page one
-    // forever without ever failing.
-    const token = "eyJ2ZXJzaW9uIjozfQ==";
-    await listRoute.GET(
-      new Request(
-        `http://x/api/recon/idp-documents?nextToken=${encodeURIComponent(token)}`,
-      ),
-    );
-    expect(lastVariables().nextToken).toBe(token);
+  it("round-trips a continuation token with all three key attributes intact", async () => {
+    // ⚠️ THE paging assertion. A key on a GSI is the index's hash and range plus the table's own key,
+    // because the index is not unique. A token that dropped `notice_id` would be rejected outright, and
+    // one that kept only the timestamp would resume at whichever row happened to share it.
+    send.mockResolvedValue({ Items: [], LastEvaluatedKey: LAST_KEY });
+    const first = await (await get()).json();
+    // Opaque to the caller, and URL-safe: `+` in a query string is a space, which is exactly the
+    // corruption that pages back to the first page forever without ever failing.
+    expect(first.nextToken).not.toMatch(/[+/=]/);
+
+    await get(`?nextToken=${encodeURIComponent(first.nextToken)}`);
+    expect(lastQuery().ExclusiveStartKey).toEqual(LAST_KEY);
   });
 
-  it("reports an upstream refusal as 502, not as an empty list", async () => {
-    idpGraphQL.mockRejectedValue(
-      new Error("IDP GraphQL error: Not Authorized to access listDocuments"),
-    );
-    const res = await listRoute.GET(
-      new Request("http://x/api/recon/idp-documents"),
-    );
-    expect(res.status).toBe(502);
-    expect((await res.json()).error).toMatch(/Not Authorized/);
+  it("reports an undecodable nextToken as a 400 naming the parameter", async () => {
+    // Never a silent restart from page one: a paging client reads the first page arriving again as more
+    // results and follows the token round in a circle.
+    for (const bad of [
+      "not-a-token",
+      "e30",
+      "W10",
+      Buffer.from('"x"').toString("base64url"),
+    ]) {
+      const res = await get(`?nextToken=${encodeURIComponent(bad)}`);
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/nextToken/);
+    }
+    expect(send).not.toHaveBeenCalled();
   });
 
-  it("treats a null page as an empty list rather than an error", async () => {
-    idpGraphQL.mockResolvedValue({ listDocuments: null });
-    const res = await listRoute.GET(
-      new Request("http://x/api/recon/idp-documents"),
+  it("reports a failed read as 500, not as an empty list", async () => {
+    // 500 and not 502: this is recon's own table, so sending the operator upstream to the document
+    // pipeline would waste the one person who could fix it.
+    send.mockRejectedValue(
+      new Error("User is not authorized to perform: dynamodb:Query"),
     );
+    const res = await get();
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toMatch(/dynamodb:Query/);
+  });
+
+  it("answers an empty index with an empty list and no token", async () => {
+    send.mockResolvedValue({});
+    const res = await get();
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.documents).toEqual([]);
     expect(body.count).toBe(0);
-  });
-});
-
-describe("GET /api/recon/idp-documents/[objectKey]", () => {
-  it("returns the document for a key containing slashes", async () => {
-    idpGraphQL.mockResolvedValue({ getDocument: row("batch-1/notice.pdf") });
-    const res = await detailRoute.GET(new Request("http://x/"), {
-      params: Promise.resolve({ objectKey: "batch-1/notice.pdf" }),
-    });
-    expect(res.status).toBe(200);
-    expect((await res.json()).document.ObjectKey).toBe("batch-1/notice.pdf");
-    expect(lastVariables().key).toBe("batch-1/notice.pdf");
+    expect(body.nextToken).toBeNull();
   });
 
-  it("does not decode the key a second time", async () => {
-    // Next.js has already decoded the segment. A key with a literal `%` is the only case that catches a
-    // double decode — ordinary keys survive it, which is why this assertion exists at all. `%20abc`
-    // would decode to a space and `%zz` would throw URIError.
-    idpGraphQL.mockResolvedValue({ getDocument: row("odd/100%25 done.pdf") });
-    const key = "odd/100% done.pdf";
-    const res = await detailRoute.GET(new Request("http://x/"), {
-      params: Promise.resolve({ objectKey: key }),
-    });
-    expect(res.status).toBe(200);
-    expect(lastVariables().key).toBe(key);
+  it("reads a backfilled row's start time off the row, and invents nothing else", async () => {
+    // ⚠️ 16 such rows are live. They pre-date the tracking snapshot, so they carry NO `idp_tracking`
+    // whatsoever — only the top-level index attributes a backfill wrote. Taking the start time from the
+    // snapshot alone returned null for every one of them, which put an em dash in the Started column and
+    // left the `≈` marker beside nothing on exactly the rows it exists for. `idp_started_at` is the
+    // index's range key, so it is the value these rows were ORDERED by: showing it is what makes their
+    // position in the list explainable.
+    const backfilled = {
+      notice_id: "idp-old/backfilled.pdf",
+      record_kind: "notice",
+      source_document: "old/backfilled.pdf",
+      parse_method: "IDP",
+      idp_record: "document",
+      idp_started_at: "2026-03-04T00:00:00Z",
+      idp_started_at_approximate: true,
+    };
+    send.mockResolvedValue({ Items: [marshall(backfilled)] });
+    const doc = (await (await get()).json()).documents[0];
+    expect(doc.InitialEventTime).toBe("2026-03-04T00:00:00Z");
+    // And it is marked as derived, which is the whole reason the time may be shown at all.
+    expect(doc.idp_started_at_approximate).toBe(true);
+    // Everything the snapshot would have carried stays ABSENT. Recon holds no second-hand version of any
+    // of these, and a manufactured `ConfigVersion` in particular would claim the row ran under a
+    // configuration nobody recorded — the one field the tab's filter reads.
+    expect(doc.ConfigVersion).toBeNull();
+    expect(doc.ObjectStatus).toBeNull();
+    expect(doc.WorkflowStatus).toBeNull();
+    expect(doc.EvaluationStatus).toBeNull();
+    expect(doc.PageCount).toBeNull();
+    expect(doc.CompletionTime).toBeNull();
   });
 
-  it("answers 404 when no document has that key", async () => {
-    // Null with no GraphQL error means unknown key. Rendering a blank detail page instead would look
-    // like a document that processed and produced nothing.
-    idpGraphQL.mockResolvedValue({ getDocument: null });
-    const res = await detailRoute.GET(new Request("http://x/"), {
-      params: Promise.resolve({ objectKey: "missing.pdf" }),
-    });
-    expect(res.status).toBe(404);
-    expect((await res.json()).error).toMatch(/missing\.pdf/);
+  it("prefers the observed start time over the row's derived one", async () => {
+    // The fallback is a fallback. Where the hook captured a snapshot, that time is the one the pipeline
+    // OBSERVED; `idp_started_at` on a backfilled row was derived from the notice's business date.
+    const both = row("a/one.pdf");
+    both.idp_started_at = "2026-01-01T00:00:00Z";
+    (both.idp_tracking as Record<string, unknown>).initial_event_time =
+      "2026-08-25T01:36:12Z";
+    send.mockResolvedValue({ Items: [marshall(both)] });
+    const doc = (await (await get()).json()).documents[0];
+    expect(doc.InitialEventTime).toBe("2026-08-25T01:36:12Z");
   });
 
-  it("reports an upstream failure as 502", async () => {
-    idpGraphQL.mockRejectedValue(new Error("IDP GraphQL HTTP 500: boom"));
-    const res = await detailRoute.GET(new Request("http://x/"), {
-      params: Promise.resolve({ objectKey: "any.pdf" }),
-    });
-    expect(res.status).toBe(502);
+  it("treats a row written before `record_kind` existed as a notice", async () => {
+    // 16 such rows are live. Absence is not a gap to paper over: it is the pre-change history.
+    const legacy = row("old/one.pdf");
+    delete legacy.record_kind;
+    send.mockResolvedValue({ Items: [marshall(legacy)] });
+    const body = await (await get()).json();
+    expect(body.documents[0].ObjectKey).toBe("old/one.pdf");
+    expect(body.documents[0].notice_failure_reason).toBeNull();
   });
 });
