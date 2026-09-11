@@ -44,16 +44,29 @@ function noticeCall(payload: unknown): ReasoningStep {
   } as ReasoningStep;
 }
 
+// One row exactly as `search_notices` returns it: the index keys and recon's bookkeeping as attributes,
+// and everything the extractor read inside `idp_sections[].fields` as the STRINGS it emitted. The panel
+// has to flatten that itself, so a fixture that put the extracted fields at the top level would test a
+// shape the tool never produces.
 const ROW = {
   notice_id: "NTC-20260302-0001",
   notice_class: "wire_confirmation",
   notice_date: "2026-03-02",
   counterparty: "CINDERMOOR LOGISTICS HOLDINGS INC.",
-  fund: "Direct Lending Fund I",
-  facility: "CINDERMOOR LOGISTICS TL-A $160MM",
   reference: "WIRE-20260302-EVG",
-  amount: 9640.18,
-  currency: "USD",
+  idp_sections: [
+    {
+      section_id: "1",
+      classification: "wire_confirmation",
+      fields: {
+        fund: "Direct Lending Fund I",
+        facility: "CINDERMOOR LOGISTICS TL-A $160MM",
+        amount: "9640.18",
+        currency: "USD",
+        cusip: "12345AB6",
+      },
+    },
+  ],
   extraction_confidence: 0.94,
   confidence_alert_count: 0,
   source_document: "Paydown_and_Interest_Notice.pdf",
@@ -299,5 +312,45 @@ describe("MatchedNoticesPanel", () => {
     expect(
       screen.getByText(/7 further matched notices are not shown/),
     ).toBeTruthy();
+  });
+
+  it("renders extracted fields flattened out of idp_sections", () => {
+    // Extracted content is not a top-level attribute -- only the index keys are -- so a panel that read
+    // the row directly would show the notice's identity and none of its content.
+    render(
+      <MatchedNoticesPanel noticeSearch={persisted({})} steps={undefined} />,
+    );
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+
+    expect(screen.getByText("Direct Lending Fund I")).toBeTruthy();
+    expect(screen.getByText("12345AB6")).toBeTruthy();
+    // And the container itself is not rendered beside them: that would print every value twice, the
+    // second time as a JSON blob.
+    expect(screen.queryByText(/Idp Sections/)).toBeNull();
+  });
+
+  it("formats the summary amount from the extracted string, with its currency", () => {
+    render(
+      <MatchedNoticesPanel noticeSearch={persisted({})} steps={undefined} />,
+    );
+    expect(screen.getByText("USD 9,640.18")).toBeTruthy();
+  });
+
+  it("shows no summary amount when the extracted value is not a number", () => {
+    // A malformed amount reaches the table rather than dead-lettering the document, so the panel has to
+    // cope with one. Omitting the summary figure is right: the expanded view still shows it verbatim,
+    // and a NaN or a silently-zeroed figure beside a counterparty would be read as the real amount.
+    const row = {
+      ...ROW,
+      idp_sections: [{ section_id: "1", fields: { amount: "n/a" } }],
+    };
+    render(
+      <MatchedNoticesPanel
+        noticeSearch={{ ...persisted({}), rows: [row] } as NoticeSearch}
+        steps={undefined}
+      />,
+    );
+    expect(screen.queryByText(/9,640.18/)).toBeNull();
+    expect(screen.queryByText(/NaN/)).toBeNull();
   });
 });

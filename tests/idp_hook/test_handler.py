@@ -33,6 +33,7 @@ def _notices_table_env(monkeypatch: pytest.MonkeyPatch) -> None:
     :returns: None.
     """
     monkeypatch.setenv("NOTICES_TABLE", "recon-notices")
+    monkeypatch.setenv("NOTICE_SEARCH_TABLE", "recon-notice-search")
 
 
 def _make_items_table():
@@ -114,9 +115,10 @@ DOC = {
     ],
 }
 
-# Same document, minus the only two fields the mapper accepts as a notice_date -- the ONE way
-# idp_event_to_notice raises ValueError on a SUCCEEDED execution.
-DOC_NO_NOTICE_DATE = {
+# A well-formed document used with `_force_mapping_failure` below. It maps cleanly on its own; the
+# tests that use it are about the HANDLER's behaviour when mapping fails, not about which validation
+# the mapper happens to enforce, so the failure is injected rather than provoked by malformed input.
+DOC_UNMAPPABLE = {
     "id": "doc-2",
     "input_key": "n/2.pdf",
     "output_bucket": "idp-out",
@@ -126,19 +128,41 @@ DOC_NO_NOTICE_DATE = {
             "classification": "Notice",
             "attributes": {
                 "counterparty": "UNMAPPABLE COUNTERPARTY INC.",
-                "amount": "5.00",
+                "notice_date": "2026-03-02",
             },
         }
     ],
 }
 
-# Same failure as DOC_NO_NOTICE_DATE, but the resolved record ALSO carries the pipeline's own
-# `errors` field -- used to prove that field wins over the mapper's ValueError text.
-DOC_NO_NOTICE_DATE_WITH_ERRORS = {
-    **DOC_NO_NOTICE_DATE,
+# Same document, plus the pipeline's own `errors` field -- used to prove that field wins over the
+# mapper's ValueError text.
+DOC_UNMAPPABLE_WITH_ERRORS = {
+    **DOC_UNMAPPABLE,
     "id": "doc-3",
     "errors": "IDP Assessment step raised InternalServiceException",
 }
+
+MAPPING_ERROR = "synthetic mapping failure: this document is not a record"
+
+
+def _force_mapping_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make `idp_event_to_notice` raise, so the handler's failure branch is what is under test.
+
+    Injected rather than provoked with malformed input. Every concrete trigger couples the test to one
+    of the mapper's validation rules, so the test breaks whenever that rule legitimately changes even
+    though the branch it covers has not -- and a malformed document can fail somewhere EARLIER than the
+    mapper (`tracking.build_tracking_snapshot` raises AttributeError on a bare-string section), which
+    exercises a different path while still going red.
+
+    :param monkeypatch: pytest's attribute patcher.
+    :returns: None.
+    """
+
+    def _raise(*_args, **_kwargs):
+        raise ValueError(MAPPING_ERROR)
+
+    monkeypatch.setattr("backend.idp_hook.handler.idp_event_to_notice", _raise)
+
 
 # A document whose section carries no OutputJSONUri/Sections at all -- output_bucket/input_key
 # (the snake_case fallback _derive_output_location reads) point the mapper at a REAL seeded IDP
@@ -210,7 +234,7 @@ def test_succeeded_event_writes_one_notice_and_no_items() -> None:
 
     result = handle(_event(DOC), None)
 
-    assert result == {"written": 1, "notice_id": "idp-doc-1"}
+    assert result["written"] == 1 and result["notice_id"] == "idp-doc-1"
     assert items.scan()["Count"] == 0
 
 
@@ -299,7 +323,7 @@ def test_a_new_idp_run_overwrites_without_redriving_anything() -> None:
     handle(_event(DOC, execution_arn="run-A"), None)
     result = handle(_event(DOC, execution_arn="run-B"), None)
 
-    assert result == {"written": 1, "notice_id": "idp-doc-1"}
+    assert result["written"] == 1 and result["notice_id"] == "idp-doc-1"
     assert table.scan()["Count"] == 1
     rows = table.scan()["Items"]
     assert rows[0]["idp_execution_arn"] == "run-B"
@@ -344,7 +368,7 @@ def test_a_compressed_event_is_resolved_before_mapping() -> None:
 
     # The resolved record's own id wins, so the notice is the same row a non-compressed delivery of
     # the same document would have written — re-delivery in either shape must not fork the notice.
-    assert result == {"written": 1, "notice_id": "idp-doc-1"}
+    assert result["written"] == 1 and result["notice_id"] == "idp-doc-1"
     assert items.scan()["Count"] == 0
 
 
@@ -419,15 +443,18 @@ def test_every_terminal_non_succeeded_status_writes_a_tracking_row(status: str) 
 
 
 @mock_aws
-def test_succeeded_with_no_notice_date_writes_a_tracking_row_then_raises() -> None:
+def test_an_unmappable_document_writes_a_tracking_row_then_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The ONE bend in this module's fail-loudly convention: the tracking row is written FIRST so
     the document is visible to an operator, and THEN the ValueError is re-raised so EventBridge's
     retry/DLQ still engages -- the row must never be written and the error swallowed."""
+    _force_mapping_failure(monkeypatch)
     table = _make_notices_table()
     items = _make_items_table()
 
-    with pytest.raises(ValueError, match="notice_date"):
-        handle(_event(DOC_NO_NOTICE_DATE), None)
+    with pytest.raises(ValueError, match="synthetic mapping failure"):
+        handle(_event(DOC_UNMAPPABLE), None)
 
     assert items.scan()["Count"] == 0
     rows = table.scan()["Items"]
@@ -435,18 +462,52 @@ def test_succeeded_with_no_notice_date_writes_a_tracking_row_then_raises() -> No
     row = rows[0]
     assert row["notice_id"] == "idp-doc-2"
     assert row["record_kind"] == "document"
-    assert "notice_date" in row["notice_failure_reason"]
+    assert MAPPING_ERROR in row["notice_failure_reason"]
 
 
 @mock_aws
-def test_notice_failure_reason_prefers_the_records_own_errors_field() -> None:
+def test_a_dateless_document_is_stored_as_a_notice_not_dead_lettered() -> None:
+    """A dateless document becomes a real notice, not a tracking-only failure row.
+
+    A fax cover carrying a counterparty and an agent bank is worth keeping. `notice_date` is ABSENT on
+    it -- not blank, and not back-filled from the pipeline's start time -- because `search_notices`
+    reports absence as `fields_unavailable` while any stored value reads as a date the extractor
+    resolved.
+    """
+    table = _make_notices_table()
+    doc = {
+        **DOC_UNMAPPABLE,
+        "id": "doc-4",
+        "sections": [
+            {
+                "section_id": "s0",
+                "classification": "Notice",
+                "attributes": {"counterparty": "PARTIAL FAX COVER LLP", "agent_bank": "Meridian"},
+            }
+        ],
+    }
+
+    result = handle(_event(doc), None)
+
+    assert result["written"] == 1 and result["notice_id"] == "idp-doc-4"
+    row = next(r for r in table.scan()["Items"] if r["notice_id"] == "idp-doc-4")
+    assert row["record_kind"] == "notice"
+    assert "notice_date" not in row, "a dateless notice must store the field as ABSENT"
+    assert "notice_failure_reason" not in row
+
+
+@mock_aws
+def test_notice_failure_reason_prefers_the_records_own_errors_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A genuine pipeline failure describes itself better than recon's mapping step can, so the
     resolved record's own `errors` field must win over the mapper's ValueError text when both
     exist."""
+    _force_mapping_failure(monkeypatch)
     _make_notices_table()
 
     with pytest.raises(ValueError):
-        handle(_event(DOC_NO_NOTICE_DATE_WITH_ERRORS), None)
+        handle(_event(DOC_UNMAPPABLE_WITH_ERRORS), None)
 
     from backend.recon_core.notices import NoticeStore
 
@@ -463,7 +524,7 @@ def test_failed_then_succeeded_for_the_same_document_leaves_exactly_one_row() ->
     handle(_event(DOC, status="FAILED"), None)
     result = handle(_event(DOC, status="SUCCEEDED"), None)
 
-    assert result == {"written": 1, "notice_id": "idp-doc-1"}
+    assert result["written"] == 1 and result["notice_id"] == "idp-doc-1"
     rows = table.scan()["Items"]
     assert len(rows) == 1
     row = rows[0]

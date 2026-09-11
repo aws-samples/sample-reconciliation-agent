@@ -44,6 +44,23 @@ python3 scripts/push_idp_extraction_config.py --table idp-configuration-table-XX
 The script backs the previous configuration up to `Config#<name>-prepush-<UTC>` (marked inactive)
 before writing, and prints the change per class and per field key.
 
+## Checking it
+
+`--check` writes nothing and **exits non-zero** when the deployed classes are not this artifact:
+
+```bash
+python3 scripts/push_idp_extraction_config.py --table idp-configuration-table-XXXXXXXX \
+    --config-name Recon-IDP --profile <profile> --region us-east-1 --check
+```
+
+Safe to run against a live deployment and suitable for CI — it reuses the same diff a push would apply,
+so the gate cannot disagree with the thing it guards.
+
+This is the only check that can see the drift this file exists to prevent.
+`tests/input_corpus/test_extraction_config.py` holds the **artifact** against the contract and the corpus,
+which is a different question: it passes whether or not the artifact is what is actually deployed. Until
+`--check` runs somewhere automatic, the two can be far apart with everything green.
+
 ⚠️ **A push does not re-extract anything.** Documents already processed keep the fields they were
 extracted with, so a notice that failed to ingest before a push still has no usable date after one.
 Re-upload the document.

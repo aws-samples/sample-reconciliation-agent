@@ -104,6 +104,13 @@ into a LoanX id: no arithmetic relates them, and the only thing that links them 
 id with no row here means asset identity is **unavailable** — say so, and cap confidence at MEDIUM.
 Inventing the correspondence is how a match gets made against the wrong facility.
 
+> **Where to read `facility_id_source_raw`, `loanx_id`, `cusip` and `isin` on a notice row.** They are
+> NOT top-level fields on the rows `search_notices` returns. Look inside `idp_sections[].fields`, which
+> holds what the extractor read under the extractor's own key names. A row can have several sections;
+> check each. If a name below is absent from every section's `fields`, the document did not carry it —
+> treat that as unavailable, exactly as you would a blank top-level field, and never substitute a value
+> from the crosswalk table for one the document did not print.
+
 One facility carries up to four identifiers, and counterparty documents pick whichever one they like.
 Normalize to the **canonical LoanX ID** first; everything else keys off it.
 
@@ -143,13 +150,14 @@ When the only candidate for an item is a rateset or rollover notice:
 2. Surface this conclusion in your reasoning, in these words: _notice type indicates no standalone cash
    is expected — confirm whether the break relates to accrual, timing, or a linked interest event._
 3. Surface `contract_id` and `new_contract_id`, which identify the linked event a real cash movement
-   would be attached to. That is what `linked_contract_ids` exists to record; report it unsatisfied when
-   the notice carries neither.
+   would be attached to. Both live in `idp_sections[].fields` on the notice row, not at the top level —
+   see the note under **Facility identifier crosswalk**. That is what `linked_contract_ids` exists to
+   record; report it unsatisfied when no section's `fields` carries either.
 4. Route to manual review. Do not propose a resolution.
 5. **Cap confidence below the top band** no matter how well fund, date and facility align. The
    alignment is real; what is missing is any evidence that cash was due.
 
 How to recognise one: `activity_type` is `Rateset` or `Rollover`; the notice carries a repricing or
-rollover table rather than a payment line; and `amount_type` is often `UNKNOWN` because there is no
-payment amount to extract. A notice that bundles a rate set WITH an interest payment is not this case —
-it moves cash, and the payment line is the evidence.
+rollover table rather than a payment line; and `amount` is usually absent altogether, arriving in
+`fields_unavailable`, because there is no payment amount to extract. A notice that bundles a rate set
+WITH an interest payment is not this case — it moves cash, and the payment line is the evidence.

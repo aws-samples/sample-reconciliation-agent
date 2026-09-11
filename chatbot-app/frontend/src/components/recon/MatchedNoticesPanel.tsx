@@ -37,8 +37,7 @@ interface NoticeRow {
   fund?: string;
   facility?: string;
   reference?: string;
-  amount?: number;
-  currency?: string;
+  idp_sections?: unknown;
   extraction_confidence?: number;
   confidence_alert_count?: number;
   source_document?: string;
@@ -193,18 +192,56 @@ export function resolveNoticeSearch({
 }
 
 /**
- * Format a notice's amount for the collapsed summary line.
+ * Flatten a row's embedded extraction into one field map.
+ *
+ * Extracted content is not a top-level attribute on a notice — only the index keys are — so this is
+ * where `amount`, `currency`, `fund`, `facility` and every other extracted field actually live. Mirrors
+ * `_extracted_fields` in `backend/notice_tool/handler.py`, including first-section-wins, so the panel
+ * shows the same value the tool matched on.
  *
  * @param row - the notice row.
- * @returns the amount with its currency, or null when the notice carries no amount.
+ * @returns field name to value, empty when the row embeds no sections.
  */
-function amountLabel(row: NoticeRow): string | null {
-  if (typeof row.amount !== "number") return null;
-  const formatted = row.amount.toLocaleString("en-US", {
+function extractedFields(row: NoticeRow): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const sections = row.idp_sections;
+  if (!Array.isArray(sections)) return out;
+  for (const section of sections) {
+    if (!section || typeof section !== "object") continue;
+    const fields = (section as { fields?: unknown }).fields;
+    if (!fields || typeof fields !== "object" || Array.isArray(fields))
+      continue;
+    for (const [name, value] of Object.entries(
+      fields as Record<string, unknown>,
+    ))
+      if (!(name in out)) out[name] = value;
+  }
+  return out;
+}
+
+/**
+ * Format a notice's amount for the collapsed summary line.
+ *
+ * The extraction stores what the document printed, so the value is a STRING and has to be parsed here.
+ * A value that will not parse yields null — the same answer as no amount at all, because the summary
+ * line cannot say anything useful about it and the expanded view shows it verbatim anyway.
+ *
+ * @param fields - the row's flattened extraction.
+ * @returns the amount with its currency, or null when the notice carries no usable amount.
+ */
+function amountLabel(fields: Record<string, unknown>): string | null {
+  const raw = fields.amount;
+  if (raw === null || raw === undefined || raw === "") return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return null;
+  const formatted = value.toLocaleString("en-US", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
-  return row.currency ? `${row.currency} ${formatted}` : formatted;
+  const currency = fields.currency;
+  return typeof currency === "string" && currency
+    ? `${currency} ${formatted}`
+    : formatted;
 }
 
 /**
@@ -216,7 +253,8 @@ function amountLabel(row: NoticeRow): string | null {
 function NoticeRowView({ row, index }: { row: NoticeRow; index: number }) {
   const [open, setOpen] = useState(false);
   const label = row.notice_id ?? `notice ${index + 1}`;
-  const amount = amountLabel(row);
+  const fields = extractedFields(row);
+  const amount = amountLabel(fields);
   const alerts = row.confidence_alert_count ?? 0;
   // `source_document` IS the pipeline's object key for an IDP-ingested notice -- the hook writes
   // `source_document=object_key` (backend/idp_hook/mapper.py). Whether a given notice HAS a source file
@@ -230,11 +268,19 @@ function NoticeRowView({ row, index }: { row: NoticeRow; index: number }) {
   // `infra/modules/notice-store/main.tf`), so every row in it came from a real document.
   const sourceKey = (row.source_document ?? "").trim() || null;
 
-  // Listed keys first in their declared order, then anything else the tool returned, so an upstream
-  // addition shows up instead of disappearing.
+  // The row's own attributes plus its extracted fields, flattened into one view. `idp_sections` itself
+  // is dropped: it is the CONTAINER these came out of, and rendering it too would print every value
+  // twice, the second time as a JSON blob.
+  const shown: Record<string, unknown> = { ...fields };
+  for (const [k, v] of Object.entries(row))
+    if (k !== "idp_sections") shown[k] = v;
+
+  // Listed keys first in their declared order, then everything else, so a field the extraction starts
+  // emitting shows up instead of disappearing. FIELD_ORDER is a READING ORDER only -- an unlisted field
+  // still renders, which is what keeps this panel from needing an edit per extracted field.
   const keys = [
-    ...FIELD_ORDER.filter((k) => k in row),
-    ...Object.keys(row).filter((k) => !FIELD_ORDER.includes(k)),
+    ...FIELD_ORDER.filter((k) => k in shown),
+    ...Object.keys(shown).filter((k) => !FIELD_ORDER.includes(k)),
   ];
 
   return (
@@ -294,7 +340,7 @@ function NoticeRowView({ row, index }: { row: NoticeRow; index: number }) {
                   {humanizeKey(k)}
                 </dt>
                 <dd className="min-w-0 break-words text-[12px] text-[var(--rc-ink-dim)]">
-                  <FieldValue value={row[k]} />
+                  <FieldValue value={shown[k]} />
                 </dd>
               </div>
             ))}

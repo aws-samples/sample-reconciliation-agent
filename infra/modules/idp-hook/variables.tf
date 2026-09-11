@@ -21,6 +21,19 @@ variable "notices_table_arn" {
   type        = string
 }
 
+# The inverted index over every extracted field. The hook is its only writer, for the same reason it
+# is the notices table's only writer: both are derived from one extraction, and a second writer could
+# leave the index describing a notice that no longer says that.
+variable "notice_search_table" {
+  description = "DynamoDB table name of the notice search index (recon-notice-search)."
+  type        = string
+}
+
+variable "notice_search_table_arn" {
+  description = "ARN of the notice search index, for the hook's BatchWriteItem grant."
+  type        = string
+}
+
 # Two buckets, not one: the section results and page images live in IDP's OUTPUT bucket, but for any
 # document whose tracking record exceeds Step Functions' 256 KB output cap the record itself is written
 # to IDP's WORKING bucket and the event carries only a pointer to it (see

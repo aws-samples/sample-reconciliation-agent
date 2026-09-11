@@ -72,25 +72,33 @@ a wire/transaction code, not the uploaded file name). Compare these three attrib
    sum-to-total.
 
    **Which amount.** A notice may carry a facility-wide total, a fund-level share, or both — they are
-   separate fields and they are not interchangeable:
+   not interchangeable, and only one of them is a top-level field:
 
-   - Compare the **fund-level** amount. A facility-wide total covers every fund on the facility and is
-     never valid for validating one of them.
-   - When only a total exists, the notice's `amount_type` reads `GLOBAL_ONLY` and its `amount` comes
-     back in `fields_unavailable`. Report `fund_level_amount_available` as **not satisfied**, say
-     fund-level amount validation was unavailable, and cap your confidence at MEDIUM. Do not compute a
-     share yourself — the allocation is the agent bank's to state, not yours to infer.
+   - Compare the **fund-level** amount, which is the top-level `amount`. A facility-wide total covers
+     every fund on the facility and is never valid for validating one of them.
+   - The facility-wide total and the fee amount are **not** top-level fields. They are in
+     `idp_sections[].fields` under the extractor's own names (`global_amount`, `fee_amount` in the
+     current configuration). Read them from there when you need to describe what the document showed.
+   - When only a total exists, `amount` comes back in `fields_unavailable`. Report
+     `fund_level_amount_available` as **not satisfied**, say fund-level amount validation was
+     unavailable, and cap your confidence at MEDIUM. Do not compute a share yourself, and do not
+     compare the total to a ledger figure as though it were the share — the allocation is the agent
+     bank's to state, not yours to infer.
    - For **fee** activity compare the fee amount, not the payment amount.
 
    Match on fund **and** date **and** activity. Never on facility alone: one facility legitimately
    issues separate notices for several funds, so a facility-only match can be confidently wrong.
 
    Compare ISO dates, never a raw printed date string — a notice's `notice_date_source_raw` is kept for
-   audit and is not normalised.
+   audit and is not normalised. Use the top-level `notice_date`, which is the ISO one; the raw printed
+   string sits in `idp_sections[].fields` and is evidence, not a comparison key.
 
 3. **Asset identity** — the facility or security identifier. The ledger side carries `loanx_id`,
-   `cusip` and `isin`; the notice side carries those plus `facility_id_source_raw`, which is the
-   source's own identifier in its own namespace and is **not** interchangeable with a LoanX id. Resolve
+   `cusip` and `isin` as top-level columns. The notice side carries those plus `facility_id_source_raw`
+   **inside `idp_sections[].fields`**, under the extractor's own key names — not as top-level fields on
+   the row. Check every section; absent from all of them means the document did not print it.
+   `facility_id_source_raw` is the source's own identifier in its own namespace and is **not**
+   interchangeable with a LoanX id. Resolve
    through the crosswalk in `document-cross-reference`. If no crosswalk entry links them, that is
    asset identity **unavailable** — an absence of proof, which caps confidence at MEDIUM. It is not a
    mismatch. Two identifiers that are both present and disagree IS a mismatch, and disqualifies.

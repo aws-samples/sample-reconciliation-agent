@@ -44,10 +44,15 @@ def test_notice_requires_confidence_alert_count() -> None:
 
 
 def test_notice_distinguishes_absent_from_empty_optional_fields() -> None:
-    """Not-extracted-for-this-class and extracted-and-blank are different answers."""
-    notice = _notice(fund="", facility=None)
-    assert notice.fund == ""  # extracted, and genuinely blank
-    assert notice.facility is None  # this class never extracts a facility
+    """Not-extracted-for-this-class and extracted-and-blank are different answers.
+
+    Asserted on `reference`, an index key and therefore one of the three extracted fields that is still
+    an attribute. The same distinction holds for every other extracted field, but there it is a property
+    of `idp_sections[].fields`, which stores whatever the extractor emitted.
+    """
+    notice = _notice(reference="")
+    assert notice.reference == ""  # extracted, and genuinely blank
+    assert _notice().reference is None  # this class never extracts a reference
 
 
 def test_notice_rejects_confidence_outside_unit_interval() -> None:
@@ -72,6 +77,17 @@ def test_notice_accepts_an_explicit_unresolved_alert_count() -> None:
 # --- NoticeStore ----------------------------------------------------------------------------------
 
 
+SEARCH_TABLE_NAME = "recon-notice-search"
+
+
+def _make_search_table():
+    """Handle on the search-index table `_make_notices_table` created.
+
+    :returns: the boto3 Table resource.
+    """
+    return boto3.resource("dynamodb", region_name="us-east-1").Table(SEARCH_TABLE_NAME)
+
+
 def _make_notices_table():
     """Create the moto-mocked recon-notices table with all three GSIs from the Terraform module.
 
@@ -80,9 +96,26 @@ def _make_notices_table():
     builds its table through this helper, and a query test against that index would otherwise fail
     for a reason unrelated to whatever it is actually testing.
 
-    :returns: the boto3 Table resource, so callers can scan it directly.
+    Also creates the notice SEARCH INDEX table, because the two are one Terraform module and the IDP
+    hook writes both in the same invocation -- a test that created only the notices table would fail in
+    the index write for a reason unrelated to whatever it is asserting. Use `_make_search_table()` to get
+    a handle on it.
+
+    :returns: the boto3 Table resource for the notices table, so callers can scan it directly.
     """
     ddb = boto3.resource("dynamodb", region_name="us-east-1")
+    ddb.create_table(
+        TableName=SEARCH_TABLE_NAME,
+        KeySchema=[
+            {"AttributeName": "search_field", "KeyType": "HASH"},
+            {"AttributeName": "search_value", "KeyType": "RANGE"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": "search_field", "AttributeType": "S"},
+            {"AttributeName": "search_value", "AttributeType": "S"},
+        ],
+        BillingMode="PAY_PER_REQUEST",
+    )
     return ddb.create_table(
         TableName="recon-notices",
         KeySchema=[{"AttributeName": "notice_id", "KeyType": "HASH"}],
@@ -123,14 +156,24 @@ def _make_notices_table():
 
 @mock_aws
 def test_put_stores_and_get_round_trips() -> None:
-    """A stored notice comes back with its Decimal amount and its unextracted fields still None."""
+    """A stored notice round-trips its index keys and its embedded extraction."""
     _make_notices_table()
     store = NoticeStore(table_name="recon-notices")
-    store.put(notice=_notice(fund="Direct Lending Fund I", amount=Decimal("2052425.70")))
+    store.put(
+        notice=_notice(
+            reference="WIRE-20260302-EVG",
+            idp_sections=[
+                {
+                    "section_id": "1",
+                    "fields": {"fund": "Direct Lending Fund I", "amount": "2052425.70"},
+                }
+            ],
+        )
+    )
     fetched = store.get(notice_id="NTC-0001")
-    assert fetched.fund == "Direct Lending Fund I"
-    assert fetched.amount == Decimal("2052425.70")
-    assert fetched.facility is None  # not extracted for this class, and absent from the row
+    assert fetched.reference == "WIRE-20260302-EVG"
+    assert fetched.idp_sections[0]["fields"]["fund"] == "Direct Lending Fund I"
+    assert fetched.idp_sections[0]["fields"]["amount"] == "2052425.70"
 
 
 @mock_aws
@@ -160,38 +203,30 @@ def test_unextracted_fields_are_absent_not_null() -> None:
     store = NoticeStore(table_name="recon-notices")
     store.put(notice=_notice())
     raw = store.raw(notice_id="NTC-0001")
-    assert "facility" not in raw
+    assert "reference" not in raw
     assert "confidence_alert_count" in raw
 
 
 # --- The CUJ's canonical fields --------------------------------------------------------------------
 
-# Every field this plan added, with a value of the right type. Parametrised rather than asserted one by
-# one so adding a field to the model without adding it here fails the count test below, instead of
-# shipping a field nothing has ever round-tripped.
+# Recon's own bookkeeping attributes, with a value of the right type. Parametrised rather than asserted
+# one by one so adding one to the model without adding it here fails, instead of shipping a field nothing
+# has ever round-tripped through DynamoDB.
+#
+# No EXTRACTED field appears here, and none may be added: extracted content is not a model attribute, so
+# there is nothing for `getattr` to round-trip. `idp_sections` is what carries it, covered by
+# `test_put_stores_and_get_round_trips` above and by
+# `test_removed_promotions_survive_in_idp_sections` in tests/idp_hook/test_mapper_notice.py.
 CANONICAL_FIELDS: dict[str, object] = {
-    "activity_type": "Interest",
-    "global_amount": Decimal("3939077.64"),
-    "fee_amount": Decimal("446.67"),
-    "fee_percentage": Decimal("0.375"),
-    "amount_type": "FUND_SPECIFIC",
-    "facility_id_source_raw": "SL-204811",
-    "loanx_id": "LX0063110",
-    "cusip": "34567EF8",
-    "isin": "US34567EF80",
-    "agent_bank": "Meridian Agency Services LLC",
-    "agent_contact_name": "Dana Whitfield",
-    "agent_email": "loan.ops@meridian-agent.example",
-    "agent_telephone": "+1-555-0100",
-    "contract_id": "CT-204811-A",
-    "new_contract_id": "CT-204811-B",
-    "notice_comment": "only interest notice",
-    "notice_date_source_raw": "26-Jan-2026",
     "source_system": "OTHER",
     "parse_method": "IDP",
     "subscription_status": "",
     "source_status_raw": "",
 }
+# ⚠️ Do NOT add an extracted field name to this dict. These tests round-trip a MODEL ATTRIBUTE, and an
+# extracted field does not have one -- `idp_sections` carries it. That path is covered by
+# `test_put_stores_and_get_round_trips` above and by
+# `test_extracted_fields_survive_in_idp_sections` in tests/idp_hook/test_mapper_notice.py.
 
 
 @mock_aws
@@ -244,11 +279,16 @@ def test_no_human_validation_field_exists() -> None:
     assert not forbidden, f"Notice grew a human-validation field: {forbidden}"
 
 
-def test_amount_and_global_amount_are_independent() -> None:
-    """The global total must never stand in for the fund share — AM1, and the reason for two fields."""
-    notice = _notice(amount=None, global_amount=Decimal("462150998.05"))
-    assert notice.amount is None  # fund-level validation is unavailable, and visibly so
-    assert notice.global_amount == Decimal("462150998.05")
+def test_the_model_has_no_home_for_a_facility_wide_total() -> None:
+    """AM1, restated for a model that no longer stores the total: `amount` is the share or nothing.
+
+    Neither the share nor the facility-wide total is a model attribute, so there is no field either could
+    be written to and no attribute a reader could grab in place of the other. The failure this guards is
+    someone "helpfully" promoting a total under a name that a share lookup falls back to, which turns a
+    visibly-absent fund amount into a plausible wrong one.
+    """
+    assert "global_amount" not in Notice.model_fields
+    assert "amount" not in Notice.model_fields
 
 
 # --- The embedded per-section extraction, and the one place it yields ------------------------------
@@ -336,7 +376,6 @@ def test_an_oversized_extraction_leaves_the_rest_of_the_notice_intact() -> None:
     )
     fetched = store.get(notice_id="NTC-0001")
     assert fetched.reference == "WIRE-20260302-EVG"
-    assert fetched.amount == Decimal("9640.18")
     assert fetched.idp_sections == []  # the model's default, with the reason beside it
     assert fetched.idp_sections_omitted is not None
 

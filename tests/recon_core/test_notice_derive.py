@@ -1,81 +1,16 @@
 """Tests for the notice derivations.
 
-The three functions are pure, so these tests are cheap — which matters, because each one guards a
-mistake that is invisible downstream. A misclassified `amount_type` points an amount comparison at the
-wrong number; a finalisation status read as False when it was unreadable turns a contract break into
-evidence; a mis-converted serial shifts a notice out of its own match window.
+Both functions are pure, so these tests are cheap — which matters, because each one guards a mistake
+that is invisible downstream. A finalisation status read as False when it was unreadable turns a
+contract break into evidence; a mis-converted serial shifts a notice out of its own match window.
 """
-
-from decimal import Decimal
 
 import pytest
 
 from backend.recon_core.notice_derive import (
-    AMOUNT_TYPE_FEE,
-    AMOUNT_TYPE_FUND_SPECIFIC,
-    AMOUNT_TYPE_GLOBAL_ONLY,
-    AMOUNT_TYPE_UNKNOWN,
-    derive_amount_type,
     excel_serial_to_iso,
     is_source_finalized,
 )
-
-# --- derive_amount_type ---------------------------------------------------------------------------
-
-
-def test_a_fee_notice_is_a_fee_even_with_a_share_amount() -> None:
-    """The priority order is the point of the function, and this is the case that proves it.
-
-    A commitment-fee notice carrying both a fee and a share must classify as FEE, because a fee break
-    validates against `fee_amount` (AM4). Classifying it FUND_SPECIFIC would send the comparison to
-    `amount` and quietly reconcile the wrong figure.
-    """
-    assert (
-        derive_amount_type(
-            amount=Decimal("100.00"),
-            global_amount=Decimal("5000.00"),
-            fee_amount=Decimal("446.67"),
-        )
-        == AMOUNT_TYPE_FEE
-    )
-
-
-def test_a_share_amount_beats_a_global_total() -> None:
-    """Both present means the share is the fund-attributable figure and the total is context (AM1)."""
-    assert (
-        derive_amount_type(
-            amount=Decimal("9640.18"), global_amount=Decimal("462150998.05"), fee_amount=None
-        )
-        == AMOUNT_TYPE_FUND_SPECIFIC
-    )
-
-
-def test_a_global_total_alone_is_global_only() -> None:
-    """This is the Medium-band case: an amount exists, but not one that validates THIS fund (AM2/AM5)."""
-    assert (
-        derive_amount_type(amount=None, global_amount=Decimal("418255.00"), fee_amount=None)
-        == AMOUNT_TYPE_GLOBAL_ONLY
-    )
-
-
-def test_no_amount_at_all_is_unknown() -> None:
-    """A rollover notice carries no cash figure, and UNKNOWN says so rather than implying zero."""
-    assert (
-        derive_amount_type(amount=None, global_amount=None, fee_amount=None) == AMOUNT_TYPE_UNKNOWN
-    )
-
-
-def test_a_zero_amount_is_a_value_not_an_absence() -> None:
-    """Decimal("0") is falsy, so an `if amount:` implementation would misclassify it as absent.
-
-    A genuine zero share — a lender whose allocation rounded to nothing — is extracted data, and it
-    must not be reported as "this notice carries no fund-level amount".
-    """
-    assert (
-        derive_amount_type(amount=Decimal("0"), global_amount=Decimal("500.00"), fee_amount=None)
-        == AMOUNT_TYPE_FUND_SPECIFIC
-    )
-
 
 # --- is_source_finalized --------------------------------------------------------------------------
 

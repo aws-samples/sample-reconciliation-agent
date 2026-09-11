@@ -104,8 +104,11 @@ after the time the counterparty is allowed. Decide in this order:
    outreach. Cash expected today is not cash that is late.
 3. **Past the grace period?** Now it is a **cash chase**. Name the party to contact and why:
    - no evidence the cash was ever sent → the **agent bank**, using the contact on the matched notice
-     (`agent_contact_name`, `agent_email`, `agent_telephone`). That contact is authoritative for this
-     facility, which is why it travels on the notice rather than coming from a directory.
+     (`agent_contact_name`, `agent_email`, `agent_telephone`). Read all three from
+     `idp_sections[].fields` on the notice row — they are not top-level fields — and check every
+     section. That contact is authoritative for this facility, which is why it travels on the notice
+     rather than coming from a directory. If no section carries an address, say the notice supplies no
+     contact and route to manual review; do not fall back to a directory or invent one.
    - evidence it was sent but not applied → the **custodian**, using the configured contact.
    - the notice is invalid or absent → manual review, not an inquiry.
 

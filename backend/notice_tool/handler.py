@@ -16,9 +16,24 @@ from boto3.dynamodb.conditions import Key
 # DynamoDB page/result cap. Matches backend/gl_tool/handler.py so the two tools agree.
 MAX_LIMIT = 100
 
-# Fields a caller may filter on that are class-dependent, i.e. legitimately absent from some
-# notices. Filtering on one of these NEVER excludes a row; it annotates it instead.
-CLASS_DEPENDENT_FIELDS = ("fund", "facility", "reference", "amount", "currency", "activity_type")
+# This tool's OWN input names that are not field filters. Everything else the caller sends is treated
+# as an equality filter on a field of that name, whatever it is called.
+#
+# ⚠️ A DENYLIST, and that direction is the point. An allowlist of extracted field names would make a
+# field the pipeline starts extracting unfilterable until somebody edits this file, and one it renames
+# silently unfilterable. The rule this module follows: recon may hardcode names IT owns; it may never
+# hardcode names the extraction configuration owns.
+CONTROL_PARAMS = frozenset(
+    {"amount", "amount_tolerance", "date_from", "date_to", "limit", "notice_date"}
+)
+
+# Recon's own structural attributes on a notice row. Everything else a row carries is extracted
+# content, whose absence is ALWAYS class-dependent and must therefore be annotated rather than treated
+# as a non-match. These are never absent, so they never reach that branch -- they are listed so the
+# distinction is explicit rather than implied by a list of IDP's field names.
+STRUCTURAL_FIELDS = frozenset(
+    {"notice_id", "notice_class", "record_kind", "source_system", "parse_method"}
+)
 
 # Stored attributes withheld from the tool's rows. `idp_pages` is page-image S3 locations, read by
 # the case screen directly from the table — the model cannot act on them, and a notice now carries
@@ -33,10 +48,102 @@ CLASS_DEPENDENT_FIELDS = ("fund", "facility", "reference", "amount", "currency",
 # part of the notice's matchable, extracted content.
 WITHHELD_FIELDS = ("idp_pages", "record_kind", "idp_record", "idp_started_at", "idp_tracking")
 
-# The subset of CLASS_DEPENDENT_FIELDS compared for string equality. `amount` is deliberately NOT
-# here: it is matched by the tolerance band in _matches. Equality-matching it would reject every
-# row whose amount differs from the centre by any amount at all, making amount_tolerance a no-op.
-EXACT_MATCH_FIELDS = ("fund", "facility", "reference", "currency", "activity_type")
+
+def _extracted_fields(row: dict) -> dict:
+    """Flatten a row's embedded extraction into one field map.
+
+    This is what makes the tool dynamic: `idp_sections[].fields` is IDP's ``inference_result``
+    verbatim, so every extracted field is filterable under the name the extractor gave it, with no
+    entry in any list here. A field the pipeline starts emitting tomorrow is searchable tomorrow.
+
+    First section wins on a duplicate key, matching how ``idp_event_to_notice`` derives a notice's
+    scalars from ``sections[0]`` — so a multi-section document answers a filter with the same value it
+    put in its top-level attributes, rather than one from a later section that disagrees.
+
+    :param row: the raw DynamoDB item.
+    :returns: field name -> value, empty when the row embeds no sections.
+    """
+    out: dict = {}
+    sections = row.get("idp_sections")
+    if not isinstance(sections, list):
+        return out
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        fields = section.get("fields")
+        if isinstance(fields, dict):
+            for name, value in fields.items():
+                out.setdefault(name, value)
+    return out
+
+
+def _resolve(name: str, *, row: dict, extracted: dict):
+    """Read one field for matching, taking the index-visible attribute over the embedded copy.
+
+    The three index key attributes exist both as attributes and inside the extraction. The attribute
+    wins because it is the value the GSI was built from and the one the mapper normalised, so a filter
+    can never match a row the index would not have returned. Every other field resolves from the
+    extraction, which is the only place it lives.
+
+    :param name: the field name the caller filtered on.
+    :param row: the raw DynamoDB item.
+    :param extracted: the flattened extraction from :func:`_extracted_fields`.
+    :returns: the value, or None when the row carries the field nowhere.
+    """
+    if name in row:
+        return row[name]
+    return extracted.get(name)
+
+
+# What a section is projected down to for the model. `classification` says which document the fields came
+# out of, and `fields` is the extracted content -- since extracted content is not a top-level attribute,
+# this IS the notice's payload rather than a duplicate of it, so it cannot be withheld wholesale the way
+# `idp_pages` is.
+#
+# Everything else is dropped. `confidences` is the bulk of it -- 72% of the sections and 39% of the whole
+# row on the live corpus -- and the model cannot act on a per-field score: the confidence the agent is
+# gated on is the notice-level `extraction_confidence`/`confidence_alert_count` pair, which stays, and it
+# is the same number the gateway interceptor refuses ledger writes on. `section_id`, `page_ids`,
+# `mean_confidence` and `alert_count` are pipeline bookkeeping. The Documents tab still renders all of it,
+# because it reads the table directly rather than through this tool.
+SECTION_PROJECTION = ("classification", "fields")
+
+
+def _trim_sections(sections: object) -> list[dict]:
+    """Project a row's embedded sections down to what the model can use.
+
+    :param sections: the row's raw ``idp_sections`` value.
+    :returns: one dict per section carrying only :data:`SECTION_PROJECTION`, empty when there are none.
+    """
+    if not isinstance(sections, list):
+        return []
+    out: list[dict] = []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        out.append({k: section[k] for k in SECTION_PROJECTION if k in section})
+    return out
+
+
+def _as_decimal(value: object) -> Decimal | None:
+    """Parse a stored field value as a number, or None when it is not one.
+
+    None rather than a raise, and the asymmetry with :func:`_decimal` is deliberate. A non-numeric value
+    in the CALLER's input is a bad request and fails loudly, because a band silently widened to
+    everything reads as a successful broad match. A non-numeric value in ONE STORED ROW is bad data in
+    the corpus, and raising on it would let a single unparseable amount break every amount search
+    against the whole table. The row is reported as un-comparable instead, which is the same treatment a
+    field the class never extracted gets.
+
+    :param value: the stored value, typically the string the extractor emitted.
+    :returns: the Decimal, or None when it will not parse.
+    """
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except InvalidOperation:
+        return None
 
 
 @dataclass(frozen=True)
@@ -159,11 +266,40 @@ def plan_query(
     )
 
 
+def _unavailable(row: dict, *, referenced: set[str], plan: QueryPlan) -> list[str]:
+    """The fields the caller leaned on that this row could not answer.
+
+    Unavailable means the row carries the field NOWHERE — not as an attribute and not in its embedded
+    extraction — or carries a value the comparison could not use. Both are "we could not check this for
+    you", which is what the agent must be told; a row returned with an empty list is a row claiming every
+    requested field was verified against it.
+
+    Resolving through the extraction is what keeps this honest now that extracted fields are not
+    attributes: testing membership of the raw item alone would report a field the row plainly carries as
+    unavailable, and the agent reads that as "this class does not extract it" and stops looking.
+
+    :param row: the raw DynamoDB item.
+    :param referenced: every field name the caller filtered or bounded on.
+    :param plan: the query plan, for whether the amount band was requested.
+    :returns: the sorted field names, empty when the row answered everything asked of it.
+    """
+    extracted = _extracted_fields(row)
+    out = {n for n in referenced if _resolve(n, row=row, extracted=extracted) is None}
+    # Present but not a number: the band could not be applied, so say so rather than imply it passed.
+    if plan.amount_low is not None and "amount" not in out:
+        if _as_decimal(_resolve("amount", row=row, extracted=extracted)) is None:
+            out.add("amount")
+    return sorted(out)
+
+
 def _matches(row: dict[str, object], *, plan: QueryPlan, hints: dict[str, str]) -> bool:
     """Decide whether a fetched row satisfies the non-key filters.
 
-    A hint naming a CLASS_DEPENDENT_FIELD that this row does not carry is NOT a mismatch — the row
-    is kept and the field is reported in ``fields_unavailable`` by the caller.
+    A hint naming a field this row does not carry — top-level OR in its embedded extraction — is NOT a
+    mismatch. The row is kept and the field is reported in ``fields_unavailable`` by the caller. That is
+    the rule for EVERY field, not a listed subset: every extracted field is class-dependent by nature and
+    recon cannot enumerate the ones the pipeline emits. Only :data:`STRUCTURAL_FIELDS` excludes on
+    absence, and none of those is ever absent.
 
     :param row: the raw DynamoDB item.
     :param plan: the query plan, for the amount band and the date bounds.
@@ -181,20 +317,35 @@ def _matches(row: dict[str, object], *, plan: QueryPlan, hints: dict[str, str]) 
     # row through this function, so the guard belongs here and nowhere else.
     if row.get("record_kind", "notice") != "notice":
         return False
+    extracted = _extracted_fields(row)
     for name, value in hints.items():
-        if name not in row:
-            if name in CLASS_DEPENDENT_FIELDS:
-                continue  # absent for this class: annotate, do not exclude
+        stored = _resolve(name, row=row, extracted=extracted)
+        if stored is None:
+            # Absent here OR in the embedded extraction: annotate, do not exclude. A STRUCTURAL field
+            # is the one case where absence is a real mismatch, and none of those is ever absent -- so
+            # this stays a mismatch only for a caller inventing a recon-owned name.
+            if name in STRUCTURAL_FIELDS:
+                return False
+            continue
+        if str(stored).strip().lower() != value.strip().lower():
             return False
-        if str(row[name]).strip().lower() != value.strip().lower():
+    # The extraction stores what the document printed, as a string, so parsing happens here. A value
+    # that will not parse leaves the row un-comparable rather than excluded or fatal -- see
+    # `_as_decimal`, and `_unavailable` which reports it to the agent.
+    if plan.amount_low is not None:
+        amount = _as_decimal(_resolve("amount", row=row, extracted=extracted))
+        if amount is not None and not (plan.amount_low <= amount <= plan.amount_high):
             return False
-    if plan.amount_low is not None and "amount" in row:
-        if not (plan.amount_low <= Decimal(str(row["amount"])) <= plan.amount_high):
+    # Applied ONLY to a row that carries a date. A dateless notice is kept and annotated, exactly as an
+    # amount-less one is above. ⚠️ Never fold the absent case into the comparison by defaulting to `""`:
+    # that sorts below every ISO date, so a `date_from` bound alone would drop every dateless notice from
+    # every bounded search, and nothing anywhere would say so.
+    stored_date = _resolve("notice_date", row=row, extracted=extracted)
+    if stored_date is not None:
+        if plan.date_from and str(stored_date) < plan.date_from:
             return False
-    if plan.date_from and str(row.get("notice_date", "")) < plan.date_from:
-        return False
-    if plan.date_to and str(row.get("notice_date", "")) > plan.date_to:
-        return False
+        if plan.date_to and str(stored_date) > plan.date_to:
+            return False
     return True
 
 
@@ -243,24 +394,41 @@ def handle(event: dict, _context, *, ddb=None) -> dict[str, object]:
         raise RuntimeError(f"search_notices read failed: {exc}") from exc
 
     hints = {k: v for k, v in plan.filtered_fields.items() if k != "notice_date"}
-    # A facility/fund hint that never became a key condition still needs annotating, so carry the
-    # caller's raw hints too — filtered_fields drops the one that became the key.
-    for name in EXACT_MATCH_FIELDS:
-        if event.get(name) and name not in hints and name != plan.key_field:
-            hints[name] = str(event[name])
+    # Every remaining input the caller sent is an equality filter on a field of that name, whatever it is
+    # called -- so a field the pipeline starts extracting is filterable with no change here, because
+    # `_matches` resolves the name through the row's embedded extraction. `filtered_fields` wins where it
+    # has an entry, since `plan_query` has already normalised those, and the key field is excluded
+    # because it became a key condition rather than a filter.
+    for name, value in event.items():
+        if name in CONTROL_PARAMS or name in hints or name == plan.key_field:
+            continue
+        if value not in (None, ""):
+            hints[name] = str(value)
 
-    # Every class-dependent field the caller leaned on, whether by equality or by band. This is
-    # what gets annotated per row; `hints` alone would omit the band-matched amount.
-    referenced = {name for name in hints if name in CLASS_DEPENDENT_FIELDS}
+    # Every field the caller leaned on, whether by equality or by band. This is what gets annotated per
+    # row; `hints` alone would omit the band-matched amount.
+    referenced = set(hints)
     if plan.amount_low is not None:
         referenced.add("amount")
+    # A date bound the caller asked for, whether it became the index range key or a `_matches` bound.
+    # `hints` cannot supply this: `notice_date` is stripped from it a few lines above, and on the
+    # counterparty-index path the bound never enters `filtered_fields` at all. So without this the
+    # dateless notice `_matches` now keeps would come back with an empty `fields_unavailable` -- the
+    # agent would see a row that satisfied a date window it was never checked against.
+    if plan.date_from or plan.date_to:
+        referenced.add("notice_date")
 
     rows: list[dict[str, object]] = []
     for raw in resp.get("Items", []):
         if not _matches(raw, plan=plan, hints=hints):
             continue
         row = {k: v for k, v in raw.items() if k not in WITHHELD_FIELDS}
-        row["fields_unavailable"] = sorted(n for n in referenced if n not in raw)
+        # Trimmed on the OUTPUT row only. Every read that decides anything -- `_matches` above and
+        # `_unavailable` below -- resolves against `raw`, so the projection can never change which rows
+        # come back or what is reported unavailable about them.
+        if "idp_sections" in row:
+            row["idp_sections"] = _trim_sections(raw.get("idp_sections"))
+        row["fields_unavailable"] = _unavailable(raw, referenced=referenced, plan=plan)
         rows.append(row)
 
     truncated = len(rows) > plan.limit

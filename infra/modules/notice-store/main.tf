@@ -90,6 +90,63 @@ resource "aws_dynamodb_table" "notices" {
 }
 
 # ---------------------------------------------------------------------------------
+# The notice SEARCH INDEX: an inverted index over every extracted field.
+#
+# The problem it solves. A GSI key attribute holds ONE value per item, so a single GSI cannot index
+# twenty different fields of the same notice -- you would need one GSI per field, against a hard cap
+# of twenty per table, each costing write throughput. That is why the two GSIs above index only
+# `counterparty`/`notice_date` and `reference`, and why those three names are the only extracted field
+# names recon hardcodes anywhere (see PROMOTED_EXTRACTED_FIELDS in backend/recon_core/notices.py).
+#
+# So the index lives in items of its own, in their own table. The key attributes are names RECON
+# owns -- `search_field` and `search_value` -- and the extracted field's name is DATA in the first of
+# them. Any field becomes an indexed lookup with no schema change, no Terraform edit and no rename
+# risk, which is the whole point: recon may hardcode names it owns, never names the extraction
+# configuration owns.
+#
+#     search_field = "counterparty"                                    <- from the extraction
+#     search_value = "cindermoor logistics holdings, inc.#idp-Notice.pdf"
+#
+# A separate TABLE rather than more items in recon-notices: that table is hash-only on `notice_id`,
+# so a second item kind would need a sort key added, which DynamoDB cannot do in place -- the table
+# would have to be recreated. This also leaves the console's GetItem/BatchGetItem path and
+# idp-document-index completely untouched.
+#
+# Partitioned on the field NAME with the value in the sort key, so one item shape serves both query
+# kinds and the writer never has to know which fields will be range-queried:
+#   * equality -> search_field = "cusip"      AND begins_with(search_value, "12345ab6#")
+#   * range    -> search_field = "notice_date" AND search_value BETWEEN "2026-01-01" AND "2026-01-31#~"
+#
+# Partition sizing, checked rather than assumed. At 5,000 notices/month the busiest partition is the
+# one for a field every notice carries: 180,000 items after three years at ~150 bytes each is ~27 MB
+# against DynamoDB's 10 GB per-partition ceiling. Writes are the tighter limit and still nowhere
+# close -- 5,000 notices arriving in a single 15-minute batch is ~6 WCU/s on that partition against a
+# 1,000 WCU/s cap.
+# ---------------------------------------------------------------------------------
+
+resource "aws_dynamodb_table" "notice_search" {
+  #checkov:skip=CKV_AWS_119:Demo uses the AWS-owned DynamoDB encryption key (encrypted at rest by default); a customer-managed CMK adds key-management cost/rotation overhead not warranted for synthetic demo data.
+  name         = "${var.name_prefix}-notice-search"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "search_field"
+  range_key    = "search_value"
+
+  attribute {
+    name = "search_field"
+    type = "S"
+  }
+  attribute {
+    name = "search_value"
+    type = "S"
+  }
+
+  # NO stream and NO GSI. This table is only ever read by its own keys -- it IS the index.
+  point_in_time_recovery {
+    enabled = true
+  }
+}
+
+# ---------------------------------------------------------------------------------
 # The search_notices query Lambda. Mirrors aws_lambda_function.gl_query in
 # infra/modules/gl-mock/main.tf: same runtime, same shared backend zip, same optional
 # vpc_config. Its grant is READ ONLY -- the IDP hook is the only writer to recon-notices.
@@ -136,12 +193,14 @@ resource "aws_iam_role_policy" "notice_query" {
       },
       {
         # READ ONLY. search_notices is a retrieval tool; the IDP hook is the only writer.
-        # Query covers both GSIs via the index ARNs.
+        # Query covers both GSIs via the index ARNs. BatchGetItem is how the index path fetches the
+        # notices a posting-list intersection selected -- one call per 100 ids instead of N GetItems.
         Effect = "Allow"
-        Action = ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan"]
+        Action = ["dynamodb:GetItem", "dynamodb:BatchGetItem", "dynamodb:Query", "dynamodb:Scan"]
         Resource = [
           aws_dynamodb_table.notices.arn,
           "${aws_dynamodb_table.notices.arn}/index/*",
+          aws_dynamodb_table.notice_search.arn,
         ]
       },
       {
@@ -172,9 +231,10 @@ resource "aws_lambda_function" "notice_query" {
 
   environment {
     variables = {
-      # The handler reads os.environ["NOTICES_TABLE"] with no default: an unset value must fail
-      # the invocation, not silently search a table named "".
-      NOTICES_TABLE = aws_dynamodb_table.notices.name
+      # The handler reads both with no default: an unset value must fail the invocation, not silently
+      # search a table named "".
+      NOTICES_TABLE       = aws_dynamodb_table.notices.name
+      NOTICE_SEARCH_TABLE = aws_dynamodb_table.notice_search.name
     }
   }
 }

@@ -62,6 +62,15 @@ resource "aws_iam_role_policy" "hook" {
         Resource = var.notices_table_arn
       },
       {
+        # The search index. Query and DeleteItem alongside the writes because re-extracting a document
+        # must REPLACE its postings, not add a second set: the index is keyed on (field, value), so a
+        # notice whose counterparty was corrected would otherwise stay findable under the old one
+        # forever. The hook queries this table only to find its own document's stale postings.
+        Effect   = "Allow"
+        Action   = ["dynamodb:BatchWriteItem", "dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Query"]
+        Resource = var.notice_search_table_arn
+      },
+      {
         # READ-ONLY read of IDP's own buckets at ingest, to embed extracted field values +
         # page-image locations into the notice. This is the one sanctioned IDP-storage read
         # (user-approved); the recon runtime/agent never reads IDP S3. See var.idp_source_buckets
@@ -130,8 +139,9 @@ resource "aws_lambda_function" "hook" {
 
   environment {
     variables = {
-      NOTICES_TABLE = var.notices_table
-      ASSETS_BUCKET = var.assets_bucket
+      NOTICES_TABLE       = var.notices_table
+      NOTICE_SEARCH_TABLE = var.notice_search_table
+      ASSETS_BUCKET       = var.assets_bucket
     }
   }
 }
