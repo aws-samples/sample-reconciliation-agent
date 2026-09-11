@@ -57,6 +57,20 @@ planned for destruction. **Check that variable before approving anything.**
   secret _name_ rather than ARN: an ARN reference would close a module cycle.
 - **`observability/`** — delivers runtime traces into `aws/spans`, which is what lets the online
   evaluation config score runtime-backend sessions at all.
+- **`tier2-dispatch/`** — the only Step Functions in the repo, and the thing that bounds Bedrock token
+  spend for the **runtime** backend via the Distributed Map's `MaxConcurrency`. Four things to know
+  before editing it:
+  - **The schedule ships `DISABLED`.** Enabling it starts firing agent runs, and therefore Bedrock
+    spend, unattended. Opt in per environment with `schedule_enabled`.
+  - **`terraform validate` does not check the ASL.** An invalid definition applies cleanly and fails
+    at runtime. Validate the rendered definition with
+    `aws stepfunctions validate-state-machine-definition` before merging.
+  - **The states role needs `states:StartExecution` on itself.** A Distributed Map runs each iteration
+    as a child execution of the same state machine, and the failure without it names `StartExecution`
+    rather than the Map.
+  - **`MaxConcurrency` here and `max_concurrent_investigations` on `tier1/` are the same quota** in two
+    mechanisms — the map bounds the runtime backend, the worker's reserved concurrency bounds the
+    harness backend. Change one and change the other.
 
 ## Seeds
 

@@ -190,10 +190,26 @@ def _default_json_caller(
     :returns: (reply text, stop reason, raw usage dict). The usage is this ONE sample's — the Agent
         is fresh, so its accumulated total covers nothing but this call.
     """
+    from botocore.config import Config as BotocoreConfig
     from strands import Agent
     from strands.models import BedrockModel
 
-    config: dict = {"model_id": model_id, "streaming": False, "max_tokens": max_tokens}
+    config: dict = {
+        "model_id": model_id,
+        "streaming": False,
+        "max_tokens": max_tokens,
+        # ⚠️ Not tuning. Without `boto_client_config` Strands builds its own bedrock-runtime client
+        # with `retries` unset, which resolves to botocore's LEGACY mode: 5 attempts, no client-side
+        # rate limiting. Adaptive mode is the only mode with a token-bucket rate limiter that LEARNS
+        # the throttle rate from the errors it sees and paces requests below it, instead of retrying
+        # into the same wall.
+        #
+        # It also breaks a lockstep problem. Strands' own retry sleeps un-jittered
+        # (strands/event_loop/_retry.py), so under a burst every container backs off on an identical
+        # 4→8→16→32→64s schedule, re-converges, and re-throttles together. Adaptive's per-client
+        # pacing desynchronises them.
+        "boto_client_config": BotocoreConfig(retries={"mode": "adaptive", "max_attempts": 5}),
+    }
     if temperature is not None:
         config["temperature"] = temperature
     agent = Agent(

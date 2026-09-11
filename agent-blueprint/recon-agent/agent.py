@@ -5,6 +5,8 @@ Only invoked for items Tier-1 could not resolve. Classifies against the SKILL.md
 reasoning), builds a propose-only Proposal, and persists it as a PROPOSED case.
 """
 
+import asyncio
+import json
 import logging
 import os
 from decimal import Decimal
@@ -41,9 +43,14 @@ def flush_traces() -> None:
 
     ⚠️ Without this, most runtime-backend sessions emit exactly ONE span, and the failure is almost
     invisible. `opentelemetry-instrument` installs a `BatchSpanProcessor`, which queues spans and
-    exports on a ~5s timer or once 512 are queued. AgentCore reclaims the container as soon as the
-    entrypoint returns, so a short investigation returns with nearly everything still queued and
-    those spans die with the container.
+    exports on a ~5s timer or once 512 are queued. On the SYNCHRONOUS path AgentCore reclaims the
+    container as soon as the entrypoint returns, so a short investigation returns with nearly
+    everything still queued and those spans die with the container.
+
+    On the async path the container is not reclaimed on return — ``@app.async_task`` reports
+    ``HealthyBusy`` and the session is held open — so the flush must happen inside
+    :func:`_investigate_async` instead, after the callback. Same problem, different moment: whoever
+    finishes last has to flush, and on that path the entrypoint is not it.
 
     The symptom is not "no traces at all", which is what makes it easy to miss. A long investigation
     looks perfectly healthy because the batch timer fires several times mid-run, so sessions with
@@ -390,16 +397,183 @@ def _make_tool_caller():  # pragma: no cover - thin transport wrapper
     return _call
 
 
+def _send_task_success(*, task_token: str, result: dict) -> None:
+    """Tell Step Functions the investigation finished, so the paused execution resumes.
+
+    Called by the PLATFORM, deliberately not exposed as a gateway tool the model can invoke. The
+    Cedar policy denies the agent role the status-transition tool for the same reason: a run must not
+    be able to declare its own outcome. This function is reached only after ``persist_and_execute``
+    has actually written the case.
+
+    Never raises. A failed callback must not turn a successful investigation into a failure — the
+    proposal is already persisted, and the state's ``TimeoutSeconds`` is the backstop that stops the
+    execution waiting forever. ``TaskTimedOut`` is expected rather than exceptional: it means the
+    state already gave up, so there is nothing left to resume.
+
+    :param task_token: the Step Functions task token passed in on the invocation payload.
+    :param result: the entrypoint's return value, forwarded as the Task's output.
+    :returns: None
+    """
+    try:
+        boto3.client("stepfunctions").send_task_success(
+            taskToken=task_token, output=json.dumps(result, default=str)
+        )
+    except Exception as exc:  # noqa: BLE001 - see docstring; must not fail a persisted proposal
+        if type(exc).__name__ in ("TaskTimedOut", "TaskDoesNotExist"):
+            _LOG.warning("task token no longer waiting (%s); the state already gave up", exc)
+        else:
+            _LOG.error("send_task_success failed; the execution will wait out its timeout: %s", exc)
+
+
+def _send_task_failure(*, task_token: str, exc: BaseException) -> None:
+    """Tell Step Functions the investigation died, so the execution fails now instead of at timeout.
+
+    Paired with ``CaseStore.mark_failed`` rather than replacing it: the state machine needs the token
+    signal to stop waiting, and the analyst queue reads the case row. Dropping either leaves one of
+    the two blind.
+
+    Never raises, for the same reason as :func:`_send_task_success`.
+
+    :param task_token: the Step Functions task token passed in on the invocation payload.
+    :param exc: the exception that ended the investigation.
+    :returns: None
+    """
+    try:
+        boto3.client("stepfunctions").send_task_failure(
+            taskToken=task_token,
+            error=type(exc).__name__[:256],
+            # The API caps `cause` at 32768 characters and rejects anything longer outright.
+            cause=str(exc)[:32000],
+        )
+    except Exception as inner:  # noqa: BLE001 - see docstring
+        _LOG.error("send_task_failure failed; the execution will wait out its timeout: %s", inner)
+
+
+@app.async_task
+async def _investigate_async(payload: dict, task_token: str) -> None:
+    """Run one investigation in the background and signal its outcome by task token.
+
+    ⚠️ The ``@app.async_task`` decorator is load-bearing, not annotation. It flips the ``/ping``
+    health status to ``HealthyBusy`` for the duration, and AgentCore keeps a session alive only while
+    it reports that: a session reporting ``Healthy`` is terminated after 15 minutes idle. Without the
+    decorator the entrypoint returns, the platform sees an idle session, and the background task dies
+    with the container — the same reclamation that :func:`flush_traces` exists to work around.
+
+    The outer bound on this task is the 8-hour session lifetime, which the calling state's
+    ``TimeoutSeconds`` (1800s) is well inside, so the state always gives up first. That is deliberate:
+    one authority on when to stop waiting.
+
+    :param payload: the invocation payload, ``{"item": {...}, "taskToken": "..."}``.
+    :param task_token: the Step Functions task token to signal on completion.
+    :returns: None
+    """
+    try:
+        result = await _investigate(payload)
+    except Exception as exc:  # noqa: BLE001 - the case row is already written by `_investigate`
+        _send_task_failure(task_token=task_token, exc=exc)
+        # Flush inside the task, not in the entrypoint: by the time this runs the entrypoint has long
+        # since returned, so its own flush could not have covered these spans.
+        flush_traces()
+        return
+    _send_task_success(task_token=task_token, result=result)
+    flush_traces()
+
+
 @app.entrypoint
 async def handler(payload, context):  # pragma: no cover - wiring, pure parts tested separately
-    """Production entrypoint.
+    """Production entrypoint: a router over two invocation modes.
+
+    With a ``taskToken`` on the payload the investigation is BACKGROUNDED and this returns in about a
+    second, so the caller's compute is released for the minutes the agent then spends thinking. That
+    is the whole point: AgentCore bills memory but not CPU while the agent waits on the model, so a
+    caller blocked on an open connection is the only party paying for the wait. Completion is
+    signalled by task token instead of by the response body.
+
+    With no ``taskToken`` the old synchronous behaviour is used unchanged, and it is still reachable:
+    the frontend's single-case Retry path invokes the worker directly, with nothing to resume.
+
+    :param payload: ``{"item": {...}}``, optionally plus ``"taskToken"``.
+    :param context: the AgentCore request context (unused).
+    :returns: ``{"status": "accepted"}`` in the async mode, or the full investigation result.
+    """
+    task_token = str(payload.get("taskToken", "") or "")
+    if task_token:
+        # Fire and return. `_investigate_async` owns persistence, the callback and the span flush.
+        asyncio.create_task(_investigate_async(payload, task_token))
+        return {"status": "accepted"}
+    return await _investigate(payload)
+
+
+async def _investigate(payload):  # pragma: no cover - wiring, pure parts tested separately
+    """Investigate one item end to end, marking the case FAILED if the run dies.
 
     Reads the live SKILL.md catalog + system prompt from S3 (editable via the Config/Skills UI,
     ~60s TTL; falls back to the baked-in SKILLS_DIR), runs **Strands**-backed self-consistency
     classification (llm.classify_with_consistency) then a **Strands Agent agentic loop**
     (strands_investigator) over the gateway tools guided by the loaded SKILL.md, proposes, and
     persists the PROPOSED case. The analyst reviews it.
+
+    Only this container writes the PROPOSED row, so a run that dies leaves nothing behind. The
+    ``except`` below is what stops that being invisible: without it the case sits in IN_PROGRESS
+    forever and an analyst cannot tell "still thinking" from "died forty minutes ago". A Bedrock
+    throttle is the case that made this necessary — it is neither a timeout (nothing is still running
+    server-side) nor a handled error, so nothing else in the platform would have recorded it.
+
+    :param payload: ``{"item": {...}}``.
+    :returns: the invocation result dict.
+    :raises Exception: re-raises whatever ended the run, after recording it on the case.
     """
+    # Read off the RAW payload, before validation: a ValidationError must still name the item, and
+    # `item.item_id` does not exist yet at that point.
+    item_id = str((payload.get("item") or {}).get("item_id", ""))
+    try:
+        return await _investigate_body(payload)
+    except Exception as exc:
+        _record_failure(item_id=item_id, exc=exc)
+        raise
+
+
+def _record_failure(*, item_id: str, exc: BaseException) -> None:
+    """Escalate the case to FAILED so a dead investigation is visible and retryable.
+
+    Mirrors ``backend.tier1.agent_worker._record_failure``, including its central rule: nothing here
+    raises. The caller is about to re-raise the real error, and replacing that with a DynamoDB error
+    would throw away the diagnosis.
+
+    ``mark_failed`` is conditional on the case still being IN_PROGRESS, so a run that persisted its
+    proposal and then died on the way out is never overwritten — the proposal wins. It raises
+    ``KeyError`` when no case row exists at all, which is why that is caught rather than allowed to
+    mask the original exception.
+
+    :param item_id: the case key, or empty when the payload did not carry one.
+    :param exc: the exception that ended the investigation, stored as the failure reason.
+    :returns: None
+    """
+    if not item_id:
+        _LOG.error("cannot mark a case FAILED: the payload carried no item_id")
+        return
+    try:
+        cases = CaseStore(
+            table=os.environ.get("CASES_TABLE", "recon-cases"),
+            audit=os.environ.get("AUDIT_TABLE", "recon-audit"),
+        )
+        reason = f"{type(exc).__name__}: {exc}"
+        if cases.mark_failed(item_id, reason=reason):
+            _LOG.error("case %s marked FAILED: %s", item_id, reason)
+        else:
+            # No longer IN_PROGRESS, so the run persisted a proposal, or an analyst moved the case,
+            # before it errored on the way out. That result outranks the error.
+            _LOG.warning(
+                "case %s not marked FAILED (status no longer IN_PROGRESS); original error: %s",
+                item_id,
+                reason,
+            )
+    except Exception as inner:  # noqa: BLE001 - see docstring: must not mask the original error
+        _LOG.error("failed to mark case %s FAILED (%s); original error: %s", item_id, inner, exc)
+
+
+async def _investigate_body(payload):  # pragma: no cover - wiring, pure parts tested separately
+    """The investigation itself. See :func:`_investigate` for the failure contract around it."""
     from pathlib import Path
 
     from skills_loader import catalog, catalog_s3, load_skills, load_skills_s3
@@ -500,8 +674,10 @@ async def handler(payload, context):  # pragma: no cover - wiring, pure parts te
         threshold=threshold,
         invoker=_make_write_invoker(),
     )
-    # Last thing before returning: AgentCore freezes the container on return, taking any queued
-    # spans with it. See flush_traces().
+    # Last thing before returning on the SYNCHRONOUS path, where AgentCore freezes the container on
+    # return and takes any queued spans with it. On the async path this is not the last moment —
+    # `_investigate_async` flushes again after its callback — but flushing twice is harmless and
+    # leaving it here keeps the synchronous path correct on its own. See flush_traces().
     flush_traces()
     return {
         "item_id": item.item_id,

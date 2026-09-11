@@ -64,9 +64,15 @@ backend/                Python 3.12 Lambda handlers
                         lessons_recall, errors, skills_s3, otel_client, prompt_source
                         (shared-core + harness-contract composition), and email_policy —
                         the authority on which recipient and which wording a send may carry
-  tier1/                DynamoDB stream consumer + agent-worker. Two independent switches, not a
-                        flat three-way choice: `harness` vs `runtime` (SSM-backed), and — for
-                        `runtime` only — ingress vs direct transport to the same container
+  tier1/                DynamoDB stream consumer (opens the case PENDING; dispatches nothing) plus
+                        the BLOCKING agent-worker, still used for the harness backend and for the
+                        frontend's single-case Retry. Two independent switches, not a flat three-way
+                        choice: `harness` vs `runtime` (SSM-backed), and — for `runtime` only —
+                        ingress vs direct transport to the same container
+  tier2_dispatch/       Async dispatch for the map run: a dispatcher that hands the agent a Step
+                        Functions task token and returns in ~1s, a collector that materialises the
+                        PENDING list to S3 (a Distributed Map's ItemReader reads S3 only), and the
+                        two guarded case writes (claim / mark-failed)
   harness_agent/        Managed-Harness backend: worker, stream, intake, prompting, session, config_store
   gl_tool/              General-ledger read + set_draw_status write (status allowlist only)
   status_tool/          recon-status target: platform-only, state-machine-guarded case-status writes
@@ -637,8 +643,12 @@ escalated item.
 The frontend is one always-on ECS Fargate task (0.5 vCPU / 1 GB) behind an ALB, fronted by CloudFront,
 with a single NAT gateway, running 24×7.
 
-Bedrock runs Claude Sonnet as both the agent and the LLM-judge model: ~300 investigations at ~50K
-input and ~3K output tokens each, plus the online-eval judges (~4 evaluators over sampled sessions).
+Bedrock runs Claude Sonnet as both the agent and the LLM-judge model: ~300 investigations at
+**~190K input and ~12K output tokens each** (measured off the `token_usage` attribute on real cases —
+an earlier estimate of ~50K/~3K was low by roughly 4×, which is what kept the account's
+tokens-per-minute ceiling out of view until a burst hit it), plus the online-eval judges (~4
+evaluators over sampled sessions). Note the per-investigation figure is `k+1` model calls, not one:
+`k` self-consistency classification samples plus the multi-turn investigation loop.
 
 The guidance corpus lives in a **fully managed** Knowledge Base (`type = "MANAGED"`, in
 `infra/modules/recon-agent/main.tf`), which owns its own vector store — nothing to size, no

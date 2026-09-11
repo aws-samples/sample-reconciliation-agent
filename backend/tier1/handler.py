@@ -99,7 +99,8 @@ def handle(event, _context):
         table=os.environ.get("CASES_TABLE", "recon-cases"),
         audit=os.environ.get("AUDIT_TABLE", "recon-audit"),
     )
-    agent_arn = os.environ.get("AGENT_RUNTIME_ARN")
+    # No AGENT_RUNTIME_ARN read here any more: this consumer does not dispatch, so it has no use for
+    # the runtime's identity. The map run owns that.
     # Read the deterministic-tier toggle once for the whole batch rather than per record.
     deterministic_on = tier1_enabled()
     results = []
@@ -171,13 +172,18 @@ def handle(event, _context):
                 break_type = classify_break(break_record(item).fields)
                 if break_type:
                     item.attributes["tier1_break_type"] = break_type
+            # Open the case PENDING and STOP. Dispatch is no longer this function's job: the Tier-2
+            # map run (infra/modules/tier2-dispatch) collects PENDING cases and investigates them
+            # MaxConcurrency at a time.
+            #
+            # Dispatching from here could not be bounded. This consumer runs one invocation per stream
+            # shard, and shard count on a PAY_PER_REQUEST table is exactly what a large intake batch
+            # inflates, so a fan-out from here scales with the burst it needs to absorb. Moving the
+            # decision to a single admission point is what makes a ceiling possible at all.
+            #
+            # It also makes PENDING mean something. Until now a case flipped to IN_PROGRESS before any
+            # work started, so the queue could not distinguish "waiting" from "the model is thinking".
             created = cases.open(item, status=CaseStatus.PENDING, tier=2)
-            if created and agent_arn:
-                # Hand off to Tier-2: advance the case state, then dispatch the agent runtime
-                # asynchronously so this shard is not held open for the investigation.
-                from backend.tier1.invoke_agent import invoke_recon_agent
-
-                invoke_recon_agent(agent_arn=agent_arn, item=item, cases=cases)
             results.append(
                 {
                     "item_id": item.item_id,
