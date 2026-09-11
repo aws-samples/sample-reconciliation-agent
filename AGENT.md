@@ -22,12 +22,12 @@ hard way; none of it is inferable from reading the code.
 ```bash
 python3 -m pytest tests/ -q                  # 1851 passed, 21 skipped, ~50s
 python3 -m ruff check backend/ tests/        # lint
-cd chatbot-app/frontend && npx vitest run    # 107 files, 1395 tests
+cd chatbot-app/frontend && npx vitest run    # 120 files, 1677 tests
 cd chatbot-app/frontend && npx tsc --noEmit  # typecheck
 cd infra/environments/recon && terraform fmt -check -recursive ../..
 # Module tests: plan-only under mocked providers, no credentials. Both CIs run them, and they are
 # the only check that notices a renamed PIPELINE_* variable or a missing task-role grant.
-for m in deal-pipeline frontend-ecs lambda-package; do
+for m in deal-pipeline frontend-ecs lambda-package console-settings; do
   (cd infra/modules/$m && terraform init -backend=false && terraform test)
 done
 ```
@@ -70,6 +70,7 @@ either app's edges:
 | File                                                | Owns                                                                                                                                                                     |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `chatbot-app/frontend/src/lib/auth/apps.ts`         | The app registry: `APPS`, `Viewer`, `resolveAppAccess`, `adminGroupFor` / `accessGroupFor`, `allConfiguredGroups`, `appForApiPath` / `appForPagePath`. Adding an app is one entry here plus its route trees; the pipeline entry also names `PIPELINE_ENABLED` as its `enabledEnv` |
+| `chatbot-app/frontend/src/lib/console/types.ts`     | The console-wide configuration contract: the SSM layout under `CONSOLE_SETTINGS_PREFIX`, the stored → env → default resolution as an overlay on the names `apps.ts` reads, the `/api/console/*` route shapes, the env-only switches (`REQUIRE_ACCESS_GROUPS`, `ALLOW_ANONYMOUS_API` and its two pre-shell names, `CONSOLE_ADMIN_GROUP`) and the validation limits. §14 of the design doc is the prose |
 | `chatbot-app/frontend/src/lib/api-auth.ts`          | Token verification, the groups claim, anonymous mode — three switch names mean the same thing (`ALLOW_ANONYMOUS_API`, plus the pre-shell `RECON_ALLOW_ANONYMOUS_API` and `PIPELINE_ALLOW_ANONYMOUS_API`), narrowed by `ANONYMOUS_GROUPS` |
 | `chatbot-app/frontend/src/proxy.ts`                 | The deny-by-default gate: every `/api/recon/*` and `/api/pipeline/*` request is verified and matched against that app's access group before a handler runs; a disabled app's BFF is a 403 |
 | `src/lib/reconAdmin.ts`, `src/lib/pipelineAdmin.ts` | The admin re-check inside the write routes that carry one — every pipeline write, but only part of recon's (see the access-groups rule below). The rail hiding a button is not the gate |
@@ -102,6 +103,25 @@ Rules that follow:
   `evals/recommendations`, `idp-extractions`, bulk `cases` POST — are open to anyone the proxy
   admits, so whoever holds recon access can rewrite the Tier-2 agent's prompt and skills. Name the
   group before you widen who signs in.
+- **Per-app configuration never moves into the console layer without a decision.** The layer under
+  `CONSOLE_SETTINGS_PREFIX` (`src/lib/console/types.ts`) holds what applies to the console as a whole:
+  each app's access and admin group, app enablement, defaults an app may _inherit_, and per-user
+  preferences. Thresholds, backend, Tier-1, contacts, templates, workflow types and the parser model
+  stay in each app's Config tab and its own parameters; the recon Config tab does not change. An app
+  may COPY a console default into its own parameter (the pipeline Config tab's "Use console default"
+  is a normal PUT of `PIPELINE_AGENT_MODEL_PARAM`; the parser keeps reading that parameter alone), but
+  the console layer never writes an app's parameter and no app follows a console value live. Moving a
+  setting up is recorded in §14 of the design doc first — it is not a refactor.
+- **Stored settings overlay the env names; three names never enter the overlay.** A non-blank value
+  under the prefix replaces `RECON_ACCESS_GROUP`, `RECON_ADMIN_GROUP`, `PIPELINE_ACCESS_GROUP`,
+  `PIPELINE_ADMIN_GROUP` or `PIPELINE_ENABLED` before `resolveAppAccess` reads it, and clearing it
+  falls back to env — never to open. `REQUIRE_ACCESS_GROUPS`, `ALLOW_ANONYMOUS_API` (and its two
+  pre-shell names) and `CONSOLE_ADMIN_GROUP` are environment-only so that no UI edit can widen access
+  past the deployment or make anyone a console admin. Do not add a stored form of any of them. Know
+  the failure policy before relying on a stored-only restriction: when Parameter Store cannot be
+  read, `effectiveEnv()` resolves from the environment alone for one 30 s window (logged once), so a
+  group that exists only in the stored layer is unenforced for that window — name it in the
+  environment too when that is unacceptable.
 - **`PIPELINE_ENABLED=false` (exact string) switches the pipeline app off** in the running console:
   `resolveAppAccess` reports no access, `/api/me` hides it and the proxy 403s `/api/pipeline/*`.
   Unset or anything else is enabled, so local dev needs no extra variable; the ECS task sets it from
@@ -150,7 +170,7 @@ Delete them when you are done with them.
 
 ## What the repo cannot tell you
 
-Four controls are set outside the tracked tree (protected `RECON_TFVARS`, or SSM at runtime), so a
+Five controls are set outside the tracked tree (protected `RECON_TFVARS`, or SSM at runtime), so a
 local file is not evidence of what is live. Read them off the resource:
 
 ```bash
@@ -159,7 +179,13 @@ aws lambda get-function-configuration --function-name recon-dev-gw-interceptor \
 aws ssm get-parameter --name /recon-dev/agent-backend        # which backend you are debugging
 aws ssm get-parameter --name /recon-dev/auto-resolve-threshold  # unreadable = human review
 aws ssm get-parameter --name /recon-dev/tier1-enabled
+aws ssm get-parameters-by-path --path /recon-dev/console --recursive  # stored console settings that
+                                                             # OVERLAY the task's group names
 ```
+
+The last one is the console layer (§14 of the design doc): a group name or `PIPELINE_ENABLED` in the
+task definition is only the fallback, and a value stored under `CONSOLE_SETTINGS_PREFIX` wins. The
+Settings screen shows which is in force (`stored` / `env` / `default` chips); so does this command.
 
 The interceptor one matters most: it is the only place the provenance, evidence-quality and
 case-transition guards are enforced, and in `log` mode all three degrade to observation while every
@@ -178,6 +204,7 @@ Don't restate a rule in a second place — these are the single owners:
 | What extraction must emit                | `data/input/IDP-EXTRACTION-REQUIREMENTS.md`, asserted both ways by `tests/input_corpus/` |
 | The classification catalog               | `agent-blueprint/recon-agent/skills/*.md`                                                |
 | Which app owns a path, and who may use it | `chatbot-app/frontend/src/lib/auth/apps.ts`                                              |
+| The console-wide settings layout and resolution order | `chatbot-app/frontend/src/lib/console/types.ts`                              |
 | The OMS staging-CSV schema               | `backend/deal_pipeline/oms_fields.json` (the frontend mirror is asserted equal by a test)  |
 | The mock OMS validation rules            | `backend/deal_pipeline/oms_validator.py`, one stable `code` per rule                      |
 | The pipeline's environment names         | `chatbot-app/frontend/src/lib/pipeline/server/env.ts`                                    |

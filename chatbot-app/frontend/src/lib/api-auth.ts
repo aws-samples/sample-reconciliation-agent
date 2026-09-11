@@ -39,6 +39,7 @@
  *    sees). Withholding the groups would buy no safety: the switch has already opened the whole BFF.
  */
 
+import { effectiveEnv } from "@/lib/console/settings";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { NextResponse } from "next/server";
 
@@ -306,13 +307,14 @@ export async function authorizeRequest(
     };
   }
   if (config.mode === "anonymous") {
-    // Groups are named from the environment so a local run and the deployment agree on the strings;
-    // see `anonymousGroups` for why the default is "everything" and how to narrow it.
+    // Groups are named from the environment overlaid with the console's stored settings, so a group
+    // renamed on the Settings screen is still held by the local anonymous identity; see
+    // `anonymousGroups` for why the default is "everything" and how to narrow it.
     return {
       ok: true,
       mode: "anonymous",
       subject: "anonymous",
-      groups: anonymousGroups(),
+      groups: anonymousGroups(await effectiveEnv()),
     };
   }
 

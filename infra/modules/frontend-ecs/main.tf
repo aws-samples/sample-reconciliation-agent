@@ -537,6 +537,41 @@ locals {
   ]
 }
 
+# ---------------------------------------------------------------------------------
+# Console-wide settings (modules/console-settings; src/lib/console/types.ts): the task-role
+# statements that let the console's Settings screens read and write the parameters under
+# console_settings_prefix. Appended whenever a prefix is configured, pipeline deployed or not -- the
+# layer sits above both apps -- and kept apart from the recon and pipeline statements so a console
+# run without the layer keeps the policy it had.
+# ---------------------------------------------------------------------------------
+locals {
+  console_settings_parameter_arn = "arn:aws:ssm:${var.region}:${var.account_id}:parameter${var.console_settings_prefix}"
+
+  console_settings_statements = [
+    {
+      # Every call the console's settings store makes, on exactly this prefix. Two resources because
+      # GetParametersByPath authorizes on the PATH ("parameter<prefix>") while Get/Put/Delete
+      # authorize on the parameters under it ("parameter<prefix>/*"). Region and account are
+      # literal, unlike the recon statement's "arn:aws:ssm:*:*:parameter/<name_prefix>/*" above,
+      # because DeleteParameter is in this list: a UI "clear" is a delete (SSM has no empty value),
+      # and a delete grant should reach no further than the parameters this console owns.
+      # PutParameter with Overwrite needs no further action.
+      Effect = "Allow"
+      Action = [
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:GetParametersByPath",
+        "ssm:PutParameter",
+        "ssm:DeleteParameter",
+      ]
+      Resource = [
+        local.console_settings_parameter_arn,
+        "${local.console_settings_parameter_arn}/*",
+      ]
+    },
+  ]
+}
+
 resource "aws_iam_role_policy" "ecs_task" {
   name = "task-policy"
   role = aws_iam_role.ecs_task.id
@@ -904,7 +939,10 @@ resource "aws_iam_role_policy" "ecs_task" {
       # Deal-pipeline grants, only when that app is deployed in this console (local above). A
       # filtered for-expression rather than `? : []`: the statements are objects of differing
       # shapes (some carry a Condition), and a conditional insists both branches share one type.
-    ], [for s in local.pipeline_task_statements : s if var.pipeline_enabled])
+      # The console-settings grants follow, on the same pattern, whenever a prefix is configured
+      # (local.console_settings_statements above).
+      ], [for s in local.pipeline_task_statements : s if var.pipeline_enabled],
+    [for s in local.console_settings_statements : s if var.console_settings_prefix != ""])
   })
 }
 
@@ -1045,6 +1083,16 @@ resource "aws_ecs_task_definition" "frontend" {
       # write routes are gated by the access check alone. The validation on pipeline_enabled already
       # refuses a blank group at plan; this is the runtime backstop for the same invariant.
       { name = "REQUIRE_ACCESS_GROUPS", value = var.pipeline_enabled ? "true" : "false" },
+      # --- Console-wide settings (src/lib/console/types.ts) ---
+      # Always present, pipeline deployed or not. CONSOLE_SETTINGS_PREFIX names the SSM path whose
+      # parameters OVERLAY the group and switch variables above (stored -> env -> default); blank
+      # disables the layer and the Settings screens render read-only. CONSOLE_ADMIN_GROUP is the one
+      # group that may edit those parameters and is deliberately environment-only -- a stored value
+      # cannot make someone a console admin -- so, like the two admin groups above, it fails closed
+      # when blank. The label is shown under the console mark until a stored value exists.
+      { name = "CONSOLE_SETTINGS_PREFIX", value = var.console_settings_prefix },
+      { name = "CONSOLE_ADMIN_GROUP", value = var.console_admin_group },
+      { name = "CONSOLE_ORGANIZATION_LABEL", value = var.console_organization_label },
       # Deal-pipeline BFF variables, only when that app is deployed here (local.pipeline_task_environment).
     ], [for e in local.pipeline_task_environment : e if var.pipeline_enabled])
     logConfiguration = {

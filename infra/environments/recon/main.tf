@@ -124,6 +124,30 @@ module "foundation" {
   # post-hoc pattern the reference repo uses for its OAuth callback registration. One apply.
 }
 
+# Console-wide settings: one SSM String parameter per setting under /<name_prefix>/console, seeded
+# from the same variables that feed the task's environment below and then owned by the console's
+# Settings screen (the module ignores value changes, so an apply never reverts an operator's edit).
+# Always on, unlike the pipeline: the layer sits above both apps, and a recon-only console uses it
+# to store its own access groups. The pipeline's model id doubles as the console default an app may
+# inherit; the pipeline's own parameter (/<name_prefix>-pipeline/agent-model-id) is untouched and
+# still owned by its Config tab. A parameter whose seed is blank is NOT created -- the UI creates it
+# on first save -- so a fresh recon-only deployment with no groups named creates the enablement
+# flag and the two defaults only. The task role's grant on the prefix is built by the frontend
+# module from the same string, which is why the prefix is passed as this module's output.
+module "console_settings" {
+  source = "../../modules/console-settings"
+
+  prefix = "/${var.name_prefix}/console"
+
+  recon_access_group    = var.recon_access_group
+  recon_admin_group     = var.recon_admin_group
+  pipeline_access_group = var.pipeline_access_group
+  pipeline_admin_group  = var.pipeline_admin_group
+  pipeline_enabled      = var.enable_deal_pipeline
+  default_model_id      = var.pipeline_agent_model_id
+  organization_label    = var.console_organization_label
+}
+
 module "frontend" {
   source = "../../modules/frontend-ecs"
 
@@ -157,6 +181,14 @@ module "frontend" {
   recon_access_group    = var.recon_access_group
   pipeline_access_group = var.pipeline_access_group
   pipeline_admin_group  = var.pipeline_admin_group
+
+  # Console-wide settings layer (module.console_settings above). The prefix is the module's output
+  # rather than the same string spelled twice, so the parameters Terraform seeds and the path the
+  # console reads (and the task role's grant) cannot drift apart. The admin group is environment-only
+  # by contract; the label is the default shown until an operator stores one.
+  console_settings_prefix    = module.console_settings.prefix
+  console_admin_group        = var.console_admin_group
+  console_organization_label = var.console_organization_label
 
   # Deal-pipeline app wiring. try(..., "") because module.deal_pipeline is count-gated: with the
   # app off there is no instance to index, and the frontend module's pipeline_* inputs default to ""

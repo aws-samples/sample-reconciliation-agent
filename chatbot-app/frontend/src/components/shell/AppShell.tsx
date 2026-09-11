@@ -7,6 +7,8 @@ import { AlertTriangle, Lock, RefreshCw } from "lucide-react";
 
 import { AppRail } from "@/components/shell/AppRail";
 import { appForPagePath, type AppDefinition } from "@/lib/auth/apps";
+import { isConsolePath } from "@/lib/shell/consolePaths";
+import { useThemePreference } from "@/lib/shell/useThemePreference";
 import { isShellHidden, reloadViewer, useViewer } from "@/lib/shell/viewer";
 
 // The console frame: rail on the left, the current application on the right.
@@ -98,7 +100,13 @@ function ViewerErrorBanner({ message, onRetry }: { message: string; onRetry: () 
 /** The frame proper. Split from `AppShell` so hidden paths never start the `/api/me` request. */
 function ShellFrame({ pathname, children }: { pathname: string; children: ReactNode }) {
   const { viewer, loading, error } = useViewer();
+  // The stored theme is applied here, in the one component mounted for the whole session, so it
+  // happens once per `/api/me` answer whichever page the session started on.
+  useThemePreference(viewer);
+  // `/console/*` owns no app: it renders for every authenticated viewer, with the rail and without the
+  // access panel, and the rail marks its Settings entry instead of an application.
   const currentApp = appForPagePath(pathname);
+  const settingsActive = isConsolePath(pathname);
   const denied = Boolean(viewer && currentApp && !viewer.apps[currentApp.id]?.access);
 
   let body: ReactNode;
@@ -125,7 +133,7 @@ function ShellFrame({ pathname, children }: { pathname: string; children: ReactN
       >
         Skip to content
       </a>
-      <AppRail viewer={viewer} loading={loading} currentApp={currentApp} />
+      <AppRail viewer={viewer} loading={loading} currentApp={currentApp} settingsActive={settingsActive} />
       {/* `min-w-0` lets wide tables inside the apps shrink instead of pushing the rail off-screen; the
           apps' own sticky headers keep working because nothing here scrolls but the document. */}
       {/* Plain div, not <main>: each app layout renders its own <main>, and a page must have exactly one

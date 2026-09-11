@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { authorizeRequest } from "@/lib/api-auth";
+import { effectiveEnv } from "@/lib/console/settings";
 import { isReconAdmin } from "@/lib/reconAdmin";
 
 // Who the browser is talking to the BFF as.
@@ -27,7 +28,8 @@ export async function GET(req: Request) {
   return NextResponse.json({
     subject: auth.subject,
     groups: auth.groups,
-    isAdmin: isReconAdmin(auth.groups),
+    // Against the overlaid env, like `requireReconAdmin`, so the Config tab and the write routes agree.
+    isAdmin: isReconAdmin(auth.groups, await effectiveEnv()),
     mode: auth.mode,
   });
 }

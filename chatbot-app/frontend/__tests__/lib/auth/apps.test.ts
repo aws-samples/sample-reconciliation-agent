@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   APPS,
+  CONSOLE_ADMIN_GROUP_ENV,
   accessGroupFor,
   accessGroupsRequired,
   adminGroupFor,
@@ -249,6 +250,20 @@ describe("allConfiguredGroups", () => {
   it("skips blank values and is empty when nothing is configured", () => {
     expect(allConfiguredGroups({ RECON_ADMIN_GROUP: "  " })).toEqual([]);
     expect(allConfiguredGroups({})).toEqual([]);
+  });
+
+  it("includes the console admin group, trimmed, so anonymous local mode is a console admin", () => {
+    // Same reason the app groups are included: a laptop run without an identity provider must be able
+    // to reach every admin surface, and the Settings screens are one.
+    expect(CONSOLE_ADMIN_GROUP_ENV).toBe("CONSOLE_ADMIN_GROUP");
+    expect(allConfiguredGroups({ CONSOLE_ADMIN_GROUP: " console-admins " })).toEqual(["console-admins"]);
+    expect([...allConfiguredGroups({ ...RESTRICTED, CONSOLE_ADMIN_GROUP: "console-admins" })].sort()).toEqual(
+      ["console-admins", "deal-desk", "deal-desk-admins", "recon-admin", "recon-users"].sort(),
+    );
+    // Blank reads as unset here too.
+    expect(allConfiguredGroups({ CONSOLE_ADMIN_GROUP: "   " })).toEqual([]);
+    // A group serving as both an app admin and the console admin is listed once.
+    expect(allConfiguredGroups({ RECON_ADMIN_GROUP: "ops", CONSOLE_ADMIN_GROUP: "ops" })).toEqual(["ops"]);
   });
 });
 

@@ -9,6 +9,11 @@ or locally with `npm run dev`.
 ```
 frontend/src/app/page.tsx         the landing chooser; /api/me reports the viewer's per-app access
 frontend/src/lib/auth/apps.ts     the app registry: paths, BFF prefixes, access + admin group names
+frontend/src/lib/console/        the console-wide settings layer: types.ts (the contract: SSM layout,
+                                  resolution order, /api/console/* shapes), settings.ts (the SSM
+                                  overlay + 30 s cache), validation, admin gate
+frontend/src/app/console/settings the Settings screen; frontend/src/components/console/ its tabs
+frontend/src/app/api/console/     settings, access-check, preferences routes
 frontend/src/proxy.ts             the gate in front of both BFFs
 
 frontend/src/app/recon/           screens: dashboard, queue, case/[id], skills, lessons, evals,
@@ -59,11 +64,26 @@ write route re-checks `PIPELINE_ADMIN_GROUP`. On the recon side only `config/*`,
 open to anyone the proxy admits, so `RECON_ACCESS_GROUP` is the real boundary on the recon agent's
 behaviour.
 
-Because the pipeline BFF shares the process with recon's, it reads only `PIPELINE_ASSETS_BUCKET`,
-`PIPELINE_AGENT_MODEL_PARAM` and `PIPELINE_SKILLS_PREFIX` — never the bare names, which in the
-container are recon's and all exist, so a fallback would silently read recon's bucket. Its sample
-emails come from `data/deal-emails` when that directory exists and from S3 under
-`PIPELINE_SAMPLES_PREFIX` when it does not (`src/lib/pipeline/server/samples.ts`).
+The shell also has a **Settings** screen (`/console/settings`, from the Settings entry in the rail's
+footer) for what belongs to the console rather than to one app, in five `?tab=` sections: **Access**
+(each app's access and admin group), **Applications** (whether the Deal Pipeline is switched on),
+**Defaults** (a model id an app may copy, and the organization label under the console mark in the
+rail), **Users** (who the console takes you for, plus a check-access tool for admins) and
+**Preferences** (your own default app, rail state and theme). Its contract is
+`src/lib/console/types.ts`. Values are stored one SSM parameter each under `CONSOLE_SETTINGS_PREFIX`
+and _overlay_ the environment names above — stored → env → default, with a `stored` / `env` /
+`default` chip beside every field — so `apps.ts`, the proxy and the admin helpers read them through
+`effectiveEnv()` unchanged; each process caches the layer for 30 s, so an edit reaches the proxy and
+every other task within that window (and resolves from the environment alone for one window when
+Parameter Store cannot be read). Editing needs membership of `CONSOLE_ADMIN_GROUP`, which, like
+`REQUIRE_ACCESS_GROUPS` and the anonymous switch, is environment-only and cannot be changed from the
+screen, so no UI edit can widen access past the deployment or make someone a console admin; unset
+means nobody, and the three admin sections show their structure without values. With
+`CONSOLE_SETTINGS_PREFIX` unset the layer is off: settings read from the environment as before and
+preferences stay in the browser. Per-app configuration (both Config tabs) stays where it is; the one
+link between the two is the pipeline Config tab's "Use console default", which copies the console's
+default model id into the pipeline's own parameter through its normal PUT. §14 of
+`docs/deal-pipeline-design.md` is the design.
 
 ## The BFF exists because the browser must not hold credentials
 

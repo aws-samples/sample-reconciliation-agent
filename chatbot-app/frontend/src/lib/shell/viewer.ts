@@ -4,7 +4,9 @@ import { useEffect, useSyncExternalStore } from "react";
 
 import { authHeaders } from "@/lib/auth/client-token";
 import { APPS, type AppAccess, type AppId, type Viewer } from "@/lib/auth/apps";
+import type { UserPreferences, ViewerConsoleFields } from "@/lib/console/types";
 import { reauthenticate } from "@/lib/reauth";
+import { normalizePreferences } from "@/lib/shell/preferences";
 
 // The console viewer: who is signed in and which applications they may open, as `/api/me` reports it.
 //
@@ -41,13 +43,42 @@ export function isShellHidden(pathname: string | null | undefined): boolean {
 const DENIED: AppAccess = { access: false, admin: false };
 
 /**
- * Shape a `/api/me` body into a `Viewer` field by field rather than trusting it whole.
+ * The viewer as the shell sees it: the registry's `Viewer` plus the console-level fields `/api/me`
+ * added with the configuration layer (`ViewerConsoleFields`).
+ */
+export type ConsoleViewer = Viewer & ViewerConsoleFields;
+
+/**
+ * What the console fields read as when `/api/me` did not send them (an older image).
+ *
+ * Not an admin, not configured, no label: the Settings screens then render read-only and the
+ * preferences fall back to the browser, which is exactly what a deployment without the layer does.
+ */
+export const DEFAULT_CONSOLE_FIELDS: ViewerConsoleFields["console"] = {
+  admin: false,
+  configured: false,
+  organizationLabel: "",
+};
+
+/** The `console` block of a `/api/me` body, each flag read strictly so a stray truthy value grants nothing. */
+function normalizeConsole(raw: unknown): ViewerConsoleFields["console"] {
+  const body = (raw ?? {}) as Record<string, unknown>;
+  return {
+    admin: body.admin === true,
+    configured: body.configured === true,
+    organizationLabel: typeof body.organizationLabel === "string" ? body.organizationLabel.trim() : "",
+  };
+}
+
+/**
+ * Shape a `/api/me` body into a `ConsoleViewer` field by field rather than trusting it whole.
  *
  * A route that answers with a partial body (an older deployment, a proxy that rewrote it) must still yield
  * something the rail can render — and the safe reading of a missing app entry is "no access", never "open".
+ * The console fields default the same way: absent means read-only Settings and browser-only preferences.
  */
-export function normalizeViewer(raw: unknown): Viewer {
-  const body = (raw ?? {}) as Partial<Record<keyof Viewer, unknown>>;
+export function normalizeViewer(raw: unknown): ConsoleViewer {
+  const body = (raw ?? {}) as Partial<Record<keyof ConsoleViewer, unknown>>;
   const rawApps = (body.apps ?? {}) as Partial<Record<AppId, Partial<AppAccess>>>;
   const apps = {} as Record<AppId, AppAccess>;
   for (const app of APPS) {
@@ -62,6 +93,8 @@ export function normalizeViewer(raw: unknown): Viewer {
     // Informational only; passed through so a provider added later does not break the shell.
     mode: (typeof body.mode === "string" ? body.mode : "anonymous") as Viewer["mode"],
     apps,
+    console: normalizeConsole(body.console),
+    preferences: normalizePreferences(body.preferences),
   };
 }
 
@@ -84,7 +117,7 @@ async function readFailure(res: Response): Promise<string> {
  *   message — that string is what the shell's banner shows, so a 503 "AUTH_PROVIDER is unset" reads as
  *   itself rather than as a blank rail.
  */
-export async function fetchViewer(): Promise<Viewer> {
+export async function fetchViewer(): Promise<ConsoleViewer> {
   const headers = await authHeaders();
   const res = await fetch("/api/me", { headers, cache: "no-store" });
   if (res.status === 401) {
@@ -105,7 +138,7 @@ export async function fetchViewer(): Promise<Viewer> {
 
 export interface ViewerState {
   /** The viewer once known; `null` while loading or after a failure. */
-  viewer: Viewer | null;
+  viewer: ConsoleViewer | null;
   loading: boolean;
   /** Why there is no viewer, for the banner. `null` while loading or on success. */
   error: string | null;
@@ -199,6 +232,23 @@ export function loadViewer(): Promise<ViewerState> {
 export function reloadViewer(): Promise<ViewerState> {
   if (inflight) return inflight;
   return start();
+}
+
+/**
+ * Replace the known viewer's preferences without asking `/api/me` again.
+ *
+ * The Preferences screen and the rail's collapse button both change a preference the rest of the shell
+ * reacts to (the theme, the rail width, the landing default), and the store is the one channel they all
+ * read. A new viewer OBJECT is published on purpose: the shell applies a viewer's preferences once per
+ * object, so this is what makes a change on the Preferences screen reach the rail without a reload.
+ * A no-op while no viewer is known — there is nothing to attach the preferences to, and the next
+ * `/api/me` answer carries the stored row anyway.
+ *
+ * @param preferences the complete new row, as sent to (or confirmed by) `PUT /api/console/preferences`.
+ */
+export function updateViewerPreferences(preferences: UserPreferences): void {
+  if (!snapshot.viewer) return;
+  publish({ ...snapshot, viewer: { ...snapshot.viewer, preferences: normalizePreferences(preferences) } });
 }
 
 /** Forget the cached viewer. For tests. Subscribers are told so none keeps rendering a stale answer. */

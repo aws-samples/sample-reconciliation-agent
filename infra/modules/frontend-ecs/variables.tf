@@ -643,3 +643,37 @@ variable "pipeline_parser_prompt_key" {
   type        = string
   default     = "prompts/parser-system.md"
 }
+
+# ---------------------------------------------------------------------------------
+# Console-wide settings (modules/console-settings; chatbot-app/frontend/src/lib/console/types.ts).
+#
+# The layer ABOVE the two apps: stored values under an SSM prefix overlay the group and switch
+# variables above (stored -> env -> default), so an operator changes who may reach which app from the
+# console's Settings screen instead of through a tfvars edit and a redeploy. All three are rendered
+# into the task environment unconditionally, pipeline deployed or not; only the task-role grant is
+# gated on a non-blank prefix, because an empty prefix would make it "parameter/*" -- every parameter
+# in the account, with DeleteParameter among the actions.
+# ---------------------------------------------------------------------------------
+
+variable "console_settings_prefix" {
+  description = "SSM path the console-wide settings live under (CONSOLE_SETTINGS_PREFIX), e.g. \"/recon-dev/console\"; pass modules/console-settings' prefix output so the seeder and the reader agree. Blank disables the stored layer: every setting resolves from the environment and the Settings screens render read-only."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.console_settings_prefix == "" || can(regex("^/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$", var.console_settings_prefix))
+    error_message = "console_settings_prefix must be blank or an absolute SSM hierarchy such as \"/recon-dev/console\" with no trailing slash: the task-role grant is built as parameter<prefix> and parameter<prefix>/*, and either mistake applies cleanly and then denies every Settings request."
+  }
+}
+
+variable "console_admin_group" {
+  description = "OIDC group whose members may edit console-wide settings (CONSOLE_ADMIN_GROUP). Environment-only by contract: no stored value can grant it, so a UI edit can never make someone a console admin. Empty means nobody can, and the Settings screens stay read-only until it is set."
+  type        = string
+  default     = ""
+}
+
+variable "console_organization_label" {
+  description = "Label shown under the console mark in the rail (CONSOLE_ORGANIZATION_LABEL) until an operator stores a different one in the Settings screen."
+  type        = string
+  default     = ""
+}

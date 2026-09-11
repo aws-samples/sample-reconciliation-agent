@@ -1,8 +1,10 @@
 # `infra/environments/deal-pipeline/` — the deal-pipeline demo root
 
 Terraform root for the deal-pipeline demo described in `docs/deal-pipeline-design.md`. It creates
-one S3 bucket, three DynamoDB tables, two AgentCore Memories, one SSM parameter and two Lambdas,
-using `infra/modules/deal-pipeline` and the shared `infra/modules/lambda-package`.
+one S3 bucket, three DynamoDB tables, two AgentCore Memories, the pipeline's model parameter and two
+Lambdas, using `infra/modules/deal-pipeline` and the shared `infra/modules/lambda-package`, plus the
+console-wide settings parameters from `infra/modules/console-settings` (see
+[Console-wide settings](#console-wide-settings)).
 
 State is **local** (no `backend` block): this is a single-developer demo that is applied and torn
 down from one machine. Everything carries `Project = deal-pipeline-demo` and `ManagedBy = terraform`
@@ -78,11 +80,69 @@ What the rendered file says about access, and why:
   `samples/` (output `samples_prefix`), which is what the deployed console reads; set
   `PIPELINE_SAMPLES_PREFIX=samples/` to exercise that path locally.
 
+## Console-wide settings
+
+The console has a configuration layer **above** the two apps: who may reach which app, whether the
+opt-in app is deployed, and defaults an app may inherit. Per-app configuration (the pipeline's model,
+recon's thresholds) is not part of it and stays in each app's Config tab. The layer is stored in SSM
+Parameter Store, one `String` parameter per setting under `CONSOLE_SETTINGS_PREFIX`, which this root
+sets to `/<name_prefix>/console` (`/deal-pipeline-dev/console` by default) through
+`infra/modules/console-settings`. The keys are fixed by the frontend contract
+(`chatbot-app/frontend/src/lib/console/types.ts`):
+
+| Parameter                                    | Seeded from                                        | Created by this root                         |
+| -------------------------------------------- | -------------------------------------------------- | -------------------------------------------- |
+| `<prefix>/access/recon/access-group`         | blank -- the recon stack is another root's         | no: the UI creates it on first save          |
+| `<prefix>/access/recon/admin-group`          | blank                                              | no                                           |
+| `<prefix>/access/pipeline/access-group`      | blank (`PIPELINE_ACCESS_GROUP=` in `env_local`: open) | no                                        |
+| `<prefix>/access/pipeline/admin-group`       | `deal-desk-admins`, the `env_local` value          | yes                                          |
+| `<prefix>/apps/pipeline/enabled`             | `"true"`                                           | yes                                          |
+| `<prefix>/defaults/model-id`                 | `agent_model_id`                                   | yes                                          |
+| `<prefix>/defaults/organization-label`       | `console_organization_label`                       | yes                                          |
+
+Also under the prefix, and never created by Terraform: `<prefix>/prefs/<hash>`, one JSON document
+per user with their rail state, theme and default app. The frontend writes those. `terraform output
+console_settings_parameters` lists exactly what an apply creates.
+
+**Precedence.** For every setting the console resolves _stored (non-blank) -> environment ->
+default_. The stored layer overlays the same variable names `.env.local` carries
+(`PIPELINE_ADMIN_GROUP`, `PIPELINE_ENABLED`, ...), so on the day of the first apply the two agree; once
+an operator edits in the Settings screen the stored value wins and `.env.local` becomes the fallback.
+Three switches are environment-only and can never be changed from the UI: `REQUIRE_ACCESS_GROUPS`,
+`ALLOW_ANONYMOUS_API` (and its legacy names) and `CONSOLE_ADMIN_GROUP` itself. Comment
+`CONSOLE_SETTINGS_PREFIX` out of `.env.local` and the layer is off: everything resolves from the
+environment, the Settings screens render read-only, and preferences fall back to the browser.
+
+**The UI owns the values; Terraform owns only their existence.** Every parameter carries
+`ignore_changes` on its value: Terraform seeds it once and no later apply reverts what an operator
+saved. Changing `agent_model_id` or `console_organization_label` in tfvars after the first apply
+therefore changes `.env.local` (the fallback) and nothing stored -- change a stored value in the
+Settings screen. Two corollaries of "existence, not value":
+
+- A blank seed creates **no** parameter (SSM refuses an empty value, and any placeholder would read
+  as a stored value that outranks the environment). The UI creates it on first save. Giving that seed
+  a value in tfvars _afterwards_ fails at apply with `ParameterAlreadyExists` rather than overwriting
+  the UI's value: `terraform import 'module.console_settings.aws_ssm_parameter.setting["access/pipeline/access-group"]' /deal-pipeline-dev/console/access/pipeline/access-group`,
+  or leave the seed blank -- the stored value stands either way.
+- Clearing a value in the UI **deletes** the parameter. The next apply re-creates it from the seed
+  unless the seed is blank too, so clearing for good is a two-step: clear in the UI, blank the seed.
+
+**Who may edit.** `CONSOLE_ADMIN_GROUP` (`console-admins` here, from `console_admin_group`). In
+anonymous mode you are a console admin regardless, so the Settings screen is editable out of the
+box; `ANONYMOUS_GROUPS=deal-desk` previews a user who is not. This root creates no IAM for the layer:
+the BFF runs with your credentials. The deployed console's task role gets a grant scoped to its own
+prefix from `infra/modules/frontend-ecs`.
+
 ## Destroy
 
 ```bash
 terraform destroy
 ```
+
+Removes the console-wide parameters Terraform seeded and leaves the UI-created ones behind (any
+blank-seeded setting saved from the UI, every `prefs/` document) -- they carry no `Project` tag
+either, since Terraform never saw them. `aws ssm get-parameters-by-path --path
+/deal-pipeline-dev/console --recursive --query 'Parameters[].Name'` lists what is left to delete.
 
 The bucket has `force_destroy = true`, so emails, staging CSVs and OMS-staging copies go with it.
 The DynamoDB tables have no deletion protection and no point-in-time recovery — they hold synthetic
@@ -104,7 +164,9 @@ demo data only.
   The assistant prompt, the security-master CSVs and the `samples/` corpus have no UI editor and
   *do* track the repo: editing `data/deal-emails/*.json` re-uploads on the next apply.
 - **The Config tab owns the model parameter.** `/deal-pipeline-dev/agent-model-id` is seeded from
-  `agent_model_id` and then ignored; change the model in the UI, not in tfvars.
+  `agent_model_id` and then ignored; change the model in the UI, not in tfvars. The console-wide
+  parameters under `/deal-pipeline-dev/console` follow the same rule, with the blank-seed and
+  re-seed corollaries in [Console-wide settings](#console-wide-settings).
 - **Per-root staging directory.** `lambda-package` stages into `.build/<name>/staging` under its own
   module path, keyed by the `name` each root passes (`deal-pipeline-backend` here, the default
   `backend` in the recon root), so the two roots keep separate staging trees and separate zips in

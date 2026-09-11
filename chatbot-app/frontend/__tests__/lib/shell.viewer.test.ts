@@ -11,25 +11,26 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { Viewer } from "@/lib/auth/apps";
-
 const authHeaders = vi.fn();
 vi.mock("@/lib/auth/client-token", () => ({ authHeaders: () => authHeaders() }));
 const reauthenticate = vi.fn();
 vi.mock("@/lib/reauth", () => ({ reauthenticate: (...a: unknown[]) => reauthenticate(...a) }));
 
 import {
+  DEFAULT_CONSOLE_FIELDS,
   fetchViewer,
   isShellHidden,
   loadViewer,
   normalizeViewer,
   reloadViewer,
   resetViewerCache,
+  updateViewerPreferences,
   useViewer,
+  type ConsoleViewer,
 } from "@/lib/shell/viewer";
 
-/** A viewer as `/api/me` returns it. */
-function viewer(over: Partial<Viewer> = {}): Viewer {
+/** A viewer as `/api/me` returns it, console fields included. */
+function viewer(over: Partial<ConsoleViewer> = {}): ConsoleViewer {
   return {
     subject: "sub-1",
     groups: ["desk-users"],
@@ -38,6 +39,8 @@ function viewer(over: Partial<Viewer> = {}): Viewer {
       recon: { access: true, admin: false },
       pipeline: { access: false, admin: false },
     },
+    console: { ...DEFAULT_CONSOLE_FIELDS },
+    preferences: {},
     ...over,
   };
 }
@@ -107,6 +110,69 @@ describe("normalizeViewer", () => {
     expect(normalizeViewer(null).subject).toBe("");
     expect(normalizeViewer({ groups: "admins" }).groups).toEqual([]);
     expect(normalizeViewer({ groups: ["a", 1, null] }).groups).toEqual(["a"]);
+  });
+
+  it("defaults the console fields when an older /api/me omits them", () => {
+    // An image from before the configuration layer: the Settings screens must read as read-only and the
+    // preferences as browser-only, not crash on a missing block.
+    const { console: fields, preferences } = normalizeViewer({
+      subject: "s",
+      groups: [],
+      mode: "okta",
+      apps: {},
+    });
+    expect(fields).toEqual({ admin: false, configured: false, organizationLabel: "" });
+    expect(preferences).toEqual({});
+  });
+
+  it("reads the console flags strictly and trims the label", () => {
+    const v = normalizeViewer({
+      console: { admin: "yes", configured: true, organizationLabel: "  Meridian Ops " },
+    });
+    // A truthy non-boolean must not make anyone a console admin.
+    expect(v.console).toEqual({ admin: false, configured: true, organizationLabel: "Meridian Ops" });
+    expect(normalizeViewer({ console: { admin: true } }).console.admin).toBe(true);
+  });
+
+  it("keeps only well-typed preferences", () => {
+    const v = normalizeViewer({
+      preferences: { defaultApp: "pipeline", railCollapsed: true, theme: "dark" },
+    });
+    expect(v.preferences).toEqual({ defaultApp: "pipeline", railCollapsed: true, theme: "dark" });
+
+    // An unknown app would redirect `/` nowhere; an unknown theme would set an unstyled class; a string
+    // "true" is not a boolean. Each is dropped rather than coerced.
+    const junk = normalizeViewer({
+      preferences: { defaultApp: "billing", railCollapsed: "true", theme: "neon" },
+    });
+    expect(junk.preferences).toEqual({});
+  });
+});
+
+describe("updateViewerPreferences", () => {
+  it("publishes a new viewer with the preferences replaced, to every subscriber", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(viewer())));
+    const a = renderHook(() => useViewer());
+    const b = renderHook(() => useViewer());
+    await waitFor(() => expect(a.result.current.viewer).toEqual(viewer()));
+    const before = a.result.current.viewer;
+
+    act(() => updateViewerPreferences({ theme: "dark", railCollapsed: true }));
+    expect(a.result.current.viewer?.preferences).toEqual({ theme: "dark", railCollapsed: true });
+    expect(b.result.current.viewer?.preferences).toEqual({ theme: "dark", railCollapsed: true });
+    // A new object: the shell applies a viewer's preferences once per object, so a changed preference
+    // must arrive as one the shell has not seen.
+    expect(a.result.current.viewer).not.toBe(before);
+    expect(a.result.current.viewer?.subject).toBe("sub-1");
+    // Replaced, not merged: a field absent from the new row is gone.
+    act(() => updateViewerPreferences({ theme: "light" }));
+    expect(a.result.current.viewer?.preferences).toEqual({ theme: "light" });
+  });
+
+  it("sanitises what it is handed and is a no-op while no viewer is known", () => {
+    updateViewerPreferences({ theme: "dark" });
+    const { result } = renderHook(() => useViewer());
+    expect(result.current).toEqual({ viewer: null, loading: true, error: null });
   });
 });
 

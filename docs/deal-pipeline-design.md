@@ -258,7 +258,7 @@ per-app access; this app's `/me` keeps answering for its own hooks.
 | `/skills/system-prompt` | GET, PUT | `prompts/parser-system.md`; PUT **admin-gated** |
 | `/skills/proposals` | GET, POST | list / manual proposal |
 | `/skills/proposals/[id]` | POST | `{decision: "approve"|"reject"}`; **admin-gated**; approve writes S3, or 409 when the live skill no longer matches the proposal's `current_content` |
-| `/config` | GET, PUT | `{modelId}` via SSM; PUT **admin-gated** |
+| `/config` | GET, PUT | GET `{modelId, modelIds, consoleDefaultModelId}` — the app's own parameter via SSM plus the console-wide default an admin may copy (§14), raw and null when none is set; PUT `{modelId}` from the allowlist, **admin-gated** |
 
 Authorization: `ALLOW_ANONYMOUS_API=true` admits everything (local dev; `ANONYMOUS_GROUPS`
 narrows the anonymous subject to named groups to preview a restricted user). The older
@@ -267,7 +267,10 @@ being exactly `true` opens both BFFs, and none may be set in a deployment. `PIPE
 decides who may call any of these routes at all — unset, every authenticated user may, unless
 `REQUIRE_ACCESS_GROUPS=true`, in which case a blank group denies everyone but admins (§13).
 `PIPELINE_ENABLED=false` takes the whole app away: `/api/me` reports no access and the proxy answers
-403 here regardless of groups.
+403 here regardless of groups. All three names — the two groups and the switch — may also be
+supplied by the console's stored layer (§14), which overlays the same environment names before
+`resolveAppAccess` reads them; nothing in this app's BFF reads that layer directly, and the
+console's own `/api/console/*` routes sit outside this prefix and belong to the shell.
 `PIPELINE_ADMIN_GROUP` gates every route that changes what the next parse does or what reaches
 the OMS: approve/reject, field edits (PATCH `/deals/[id]`), skill and parser-prompt writes,
 proposal decisions, memory add and delete (the REST routes and the assistant's `save_memory` /
@@ -281,9 +284,13 @@ Routes under `/pipeline`: `inbox`, `inbox/[id]`, `deals`, `deals/[id]`, `assista
 `skills`, `skills/[name]`, `skills/system-prompt`, `skills/proposals`, `config`. `/` is the
 console's landing chooser (§13), which sends a viewer with access to exactly one app straight
 into it — for a pipeline-only viewer that is `/pipeline/inbox`. Beside this tree the console
-serves the reconciliation app (`/recon/*`, `/api/recon/*`), the shell's `/api/me`,
-`/login/callback` (the OIDC redirect target), the liveness endpoints `/health` and `/api/health`,
-and the BFF in §9. This app's own primitives live in `src/components/pipeline/` (`ui.tsx`,
+serves the reconciliation app (`/recon/*`, `/api/recon/*`), the shell's `/api/me`, its Settings
+screen at `/console/settings` with `/api/console/*` behind it (§14), `/login/callback` (the OIDC
+redirect target), the liveness endpoints `/health` and `/api/health`, and the BFF in §9. `config`
+carries the one console-aware control in this app: **Use console default** beside the parser-model
+presets, which copies the console-wide default model id into this app's own parameter through the
+same admin-gated PUT (§14); every other setting on that screen is this app's own. This app's own
+primitives live in `src/components/pipeline/` (`ui.tsx`,
 `DataTable.tsx`, `nav.tsx`, `UserMenu.tsx`, `EmailViewer.tsx`); nothing in them is imported by
 the recon app or imports from it. Theme CSS: `src/app/pipeline/pipeline-theme.css`.
 
@@ -296,6 +303,10 @@ PIPELINE_ACCESS_GROUP=
 PIPELINE_ADMIN_GROUP=deal-desk-admins
 # REQUIRE_ACCESS_GROUPS=true   (console: blank access group denies instead of opens)
 # PIPELINE_ENABLED=false       (console: switch this app off; unset = enabled)
+CONSOLE_SETTINGS_PREFIX=/deal-pipeline-dev/console
+CONSOLE_ADMIN_GROUP=console-admins
+# CONSOLE_ORGANIZATION_LABEL=Agentic Operations Console
+# CONSOLE_DEFAULT_MODEL_ID=
 NEXT_PUBLIC_AUTH_PROVIDER=entra
 AWS_REGION=us-east-1
 PIPELINE_ASSETS_BUCKET=
@@ -334,6 +345,18 @@ to every authenticated user, or denied when `REQUIRE_ACCESS_GROUPS=true`) and
 `PIPELINE_ADMIN_GROUP` (unset = nobody) are read through `accessGroupFor` / `adminGroupFor` in
 `src/lib/auth/apps.ts` and by `src/lib/pipelineAdmin.ts`; `PIPELINE_ENABLED` (exact `false` =
 app off) is the pipeline entry's `enabledEnv` in the same registry.
+
+Four more console names are read by the shell's `src/lib/console/`, not by this app's BFF (§14):
+`CONSOLE_SETTINGS_PREFIX` (the SSM prefix of the stored settings layer; unset = the layer is off and
+every setting reads from the environment), `CONSOLE_ADMIN_GROUP` (who may edit console-wide settings;
+environment-only, unset = nobody), `CONSOLE_ORGANIZATION_LABEL` (environment fallback for the rail's
+organization label, default `Agentic Operations Console`) and `CONSOLE_DEFAULT_MODEL_ID` (environment
+fallback for the console default model id; Terraform seeds the parameter instead of setting this). The
+standalone root renders the first three into `env_local` beside this app's names, with a prefix of
+`/<name_prefix>/console`. A value stored under the prefix for `PIPELINE_ACCESS_GROUP`,
+`PIPELINE_ADMIN_GROUP` or `PIPELINE_ENABLED` overlays the environment value; `env.ts` is unaffected,
+because none of the names it reads is console-wide, and the only console value this app ever sees is
+the default model id its `/config` GET reports.
 
 Two further groups are read from `.env.local` and only matter with a real identity provider.
 Server-side token verification — `AUTH_PROVIDER`, `OKTA_ISSUER`, `OKTA_CLIENT_ID`,
@@ -375,13 +398,15 @@ two group variable names per app and, for this app only, `enabledEnv: "PIPELINE_
 value `false` (exact) makes `resolveAppAccess` report `{access: false, admin: false}`, so `/api/me`
 hides the app and the proxy 403s `/api/pipeline/*`; unset or anything else is enabled, and recon
 has no such switch. `/api/me` returns the `Viewer` — subject, groups, auth mode and
-`apps.<id>.{access, admin}` — and the shell renders from that alone.
+`apps.<id>.{access, admin}` — and, since the console layer (§14), `console.{admin, configured,
+organizationLabel}` and the caller's own `preferences`; the shell renders from that alone.
 
 **Access groups.** Permissions come from the identity-provider group claim the BFF already verifies
 (`AUTH_GROUPS_CLAIM`). Each app has an access group and an admin group; admins implicitly have
 access. For this app: `PIPELINE_ACCESS_GROUP` and `PIPELINE_ADMIN_GROUP`; for recon,
 `RECON_ACCESS_GROUP` and `RECON_ADMIN_GROUP`, read through `accessGroupFor` / `adminGroupFor`
-(trimmed, `""` when unset). An unset access group leaves that app open to every authenticated user —
+(trimmed, `""` when unset) from the environment as overlaid by the console's stored layer (§14). An
+unset access group leaves that app open to every authenticated user —
 the behaviour a recon-only deployment had before the shell — and an unset admin group fails closed,
 as before. That open default is only safe while one population signs in, so the console has
 `REQUIRE_ACCESS_GROUPS`: exactly `true` makes a blank access group **deny** the app to everyone but
@@ -438,3 +463,182 @@ shows up on the next open, and a new sample in S3 after the apply that seeded it
 `src/lib/reauth.ts`), the `src/components/ui/` primitives and a few app-agnostic helpers, and
 nothing else: no import crosses from `src/{app,components,lib,hooks}/*pipeline*` into `*recon*` or
 back. Adding a third app is one entry in `APPS` plus its own route trees.
+
+## 14. Console-wide configuration
+
+Decided 2026-09-11, with the console. The contract is `src/lib/console/types.ts`; the store is
+`src/lib/console/settings.ts`; the registry it overlays is `src/lib/auth/apps.ts`.
+
+**Scope.** Everything that applies to the console as a whole, and nothing that applies to one app:
+which identity-provider group may use or administer each app, which apps are deployed, defaults an
+app may copy, and each user's own preferences. Per-app configuration stays exactly where §9 and §11
+put it — this app's parser model in `PIPELINE_AGENT_MODEL_PARAM`, the recon app's threshold, backend,
+Tier-1, model, contacts, templates and workflow types in its own parameters and Config tab — and the
+console layer never writes an app's parameter. The recon Config tab does not change. A setting moves
+up into this layer only by decision, recorded here; it is not a refactor.
+
+**Storage.** AWS Systems Manager Parameter Store, one String parameter per setting under
+`CONSOLE_SETTINGS_PREFIX`. Both roots set `/<name_prefix>/console` — `/recon-dev/console` for the
+composed console, `/deal-pipeline-dev/console` for the standalone root a laptop runs against:
+
+| parameter | value | environment name it overlays |
+| --- | --- | --- |
+| `<prefix>/access/<appId>/access-group` | IdP group that may use the app; absent = see env / default | `RECON_ACCESS_GROUP`, `PIPELINE_ACCESS_GROUP` |
+| `<prefix>/access/<appId>/admin-group` | IdP group that administers the app | `RECON_ADMIN_GROUP`, `PIPELINE_ADMIN_GROUP` |
+| `<prefix>/apps/<appId>/enabled` | `"true"` or `"false"`; only for apps with an `enabledEnv` | `PIPELINE_ENABLED` (recon has none and is always enabled) |
+| `<prefix>/defaults/model-id` | Bedrock model or inference-profile id an app may copy | `CONSOLE_DEFAULT_MODEL_ID` |
+| `<prefix>/defaults/organization-label` | label shown under the console mark in the rail | `CONSOLE_ORGANIZATION_LABEL` (default `Agentic Operations Console`) |
+| `<prefix>/prefs/<sha256(subject) hex, first 32 chars>` | one user's `UserPreferences`, as JSON | none |
+| `<prefix>/meta/updated` | `{"at": ISO time, "by": subject}` of the last save through the API | none |
+
+`appId` is `recon` or `pipeline`, the ids in `APPS`. A settings read fetches the `access`, `apps`,
+`defaults` and `meta` subtrees; `prefs/` is never listed (one row per user, unbounded). Blank values
+are dropped on read, so a blank parameter behaves like an absent one.
+
+**Resolution.** For every setting: stored (non-blank) → environment variable → default.
+
+1. Read the four subtrees in one pass (paginated). Each process caches the result for **30 seconds**
+   (`OVERLAY_TTL_MS`), sharing one in-flight read so a burst after expiry costs one SSM call.
+2. Build an overlaid copy of the environment: for each parameter with an environment name in the
+   table, the stored value replaces the environment value; an absent parameter leaves the
+   environment value as it is.
+3. Hand that overlaid environment (`effectiveEnv()`) to the readers the registry already has —
+   `resolveAppAccess`, `isAppEnabled`, `accessGroupFor` / `adminGroupFor`, `decideApiAccess` in the
+   proxy, and the two admin helpers `reconAdmin.ts` / `pipelineAdmin.ts`. None of them changes; the
+   `env` parameter they already accept for tests is the seam. When the layer is off,
+   `effectiveEnv()` returns `process.env` itself.
+4. Report each resolved value with its `SettingSource` — `stored`, `env` or `default` — and the
+   environment name that would supply it when nothing is stored, so the UI can show the chip and the
+   fallback.
+5. Three names never enter the overlay: `REQUIRE_ACCESS_GROUPS`, `ALLOW_ANONYMOUS_API` (with
+   `RECON_ALLOW_ANONYMOUS_API` and `PIPELINE_ALLOW_ANONYMOUS_API`) and `CONSOLE_ADMIN_GROUP`. They are
+   read from the process environment only and reported in `envOnly` for transparency.
+6. **Failure policy.** The proxy asks the layer on every BFF request, so a Parameter Store failure
+   (throttling, a NAT blip in `private_vpc` mode, a missing grant after a deploy) must not become a
+   console-wide outage: when the read fails, the layer resolves from the environment alone for one
+   cache window and logs it once. For that window a restriction that exists only in the stored layer
+   is not enforced; a deployment that cannot accept that names the group in the environment too, and
+   the stored value merely overrides it. The Settings screen's own read does not fail open — an admin
+   sees the error, never a screen claiming every value comes from the environment.
+7. **Propagation.** A save drops the cache of the process that wrote, so the admin sees the result
+   at once. The proxy is a separate Next bundle with its own cache, so even on the same task the
+   access gate learns of the change within 30 seconds, as does every other task. There is no
+   cross-instance signal by design: settings change rarely, and a 30-second lag on an access-group
+   edit is acceptable where a message bus would not be worth its own failure modes.
+8. `CONSOLE_SETTINGS_PREFIX` unset: the layer is off. Every setting resolves from the environment as
+   before the layer existed, `/api/console/settings` reports `configured: false` with every field from
+   env/default, the Settings screen renders read-only with a note saying why, and preferences fall
+   back to the browser.
+
+**Routes.** All verify the token themselves, like `/api/me` (defence in depth: a matcher change must
+not turn them into an unauthenticated settings oracle). `src/proxy.ts` matches `/api/console/:path*`
+and admits these routes on authentication alone; the console-admin check is inside each route. Every
+response carries `Cache-Control: no-store`.
+
+| route | verbs | who | notes |
+| --- | --- | --- | --- |
+| `/api/me` | GET | any authenticated user | the §13 `Viewer` (its `apps` resolved on the overlaid environment) plus `console.{admin, configured, organizationLabel}` and the caller's `preferences` (`ViewerConsoleFields`); a preferences read failure yields `{}` rather than failing the route |
+| `/api/console/settings` | GET, PUT | console admins | GET → `ConsoleSettings`: `configured`, `prefix`, `access.<appId>.{accessGroup, adminGroup}`, `apps.<appId>.enabled`, `defaults.{modelId, organizationLabel}`, `envOnly`, `updatedAt` / `updatedBy`; reads Parameter Store fresh; 403 for a non-admin (the body names every group that gates every app), 500 when the read fails. PUT → `ConsoleSettingsUpdate`: every field optional, only the fields present are written, `""` deletes the stored parameter so the setting falls back to env; the whole body is validated before anything is written; records `meta/updated`; answers with the refreshed settings; 400 naming the bad field, 409 when the layer is not configured |
+| `/api/console/access-check?groups=a,b` | GET | console admins | `AccessCheckResult`: what a hypothetical user holding exactly those groups would see — `apps.<appId>.{access, admin}` through `resolveAppAccess` on the overlaid environment, and `consoleAdmin` from the environment. An empty list is a legitimate question ("a user in no groups") |
+| `/api/console/preferences` | GET, PUT | any authenticated user | the caller's own row only, keyed by the hashed subject from the verified token; `UserPreferences` = `defaultApp?`, `railCollapsed?`, `theme?` (`system` / `light` / `dark`); GET answers `{}` when nothing is stored or the layer is off; PUT replaces the whole row, 400 on a bad field, 409 when the layer is off |
+
+Validation limits, shared by the API and the UI (`types.ts`): group names at most `GROUP_NAME_MAX`
+(128) characters matching `GROUP_NAME_PATTERN` (`^[A-Za-z0-9 _.:@/-]+$`); the organization label at
+most `ORGANIZATION_LABEL_MAX` (60) characters; a model id matching `MODEL_ID_PATTERN`
+(`^[A-Za-z0-9._:/-]+$`); `enabled` a boolean. Group names are trimmed on write, so what is stored is
+what `accessGroupFor` will compare against. The Terraform seeds (below) are validated to the same
+limits at plan, so a seed the UI could not have written is refused instead of rendering as a value
+the operator cannot re-save.
+
+**The Settings screen.** `/console/settings` (`/console` redirects there), reached from the Settings
+entry in the rail's footer, which every authenticated viewer sees. `/console/*` is not an app: it has
+no `APPS` entry, no access group and no BFF prefix, so the shell recognises it separately
+(`src/lib/shell/consolePaths.ts`) and renders it without the per-app access panel. Five sections,
+addressed by `?tab=` so each is linkable: **Access** (each app's access and admin group), **Applications**
+(the enablement switch of each app that has one), **Defaults** (model id, organization label), **Users**
+(who the console takes the viewer for, and the access checker) and **Preferences** (the viewer's own).
+The first three hold admin data: a console admin sees resolved values with a source chip beside each
+and a "Last saved" line from `meta/updated`; anyone else sees the structure — which environment name
+supplies each value, per app — without the values, and never triggers the GET that would 403. A
+console admin lands on Access, everyone else on Preferences. Editable means both a console admin and a
+configured layer; the note at the top of an admin section says which is missing. Saving sends only
+the fields the operator changed, so an environment value that was merely displayed never becomes a
+stored one, and the screen adopts the server's response rather than its own request so the chips say
+where each value now comes from.
+
+**Security boundary.** What an edit from the Settings screen can and cannot do:
+
+- A console admin **may** rename the access or admin group of either app, switch the pipeline on or
+  off, and set the two defaults. Renaming a group changes who may enter; that is the power the role
+  is trusted with, and it is bounded by the identity provider, which is the only place membership
+  exists.
+- A console admin **may not** flip `REQUIRE_ACCESS_GROUPS`, switch on anonymous mode, or change
+  `CONSOLE_ADMIN_GROUP`. Because those three never enter the overlay, no sequence of UI edits can
+  widen access past what the deployment allows — a cleared group falls back to the environment, and
+  a blank environment group under `REQUIRE_ACCESS_GROUPS=true` is still admins-only — and no UI edit
+  can grant console admin to anyone. The group that gates the Settings screen is not editable from
+  the Settings screen.
+- `CONSOLE_ADMIN_GROUP` fails closed like the two app admin groups: unset means nobody, and the three
+  admin sections show their structure without values for everyone. Anonymous local mode holds every
+  configured group (`allConfiguredGroups` includes this one), so it is a console admin exactly when
+  the variable is set; no anonymous switch may be set in a deployment (§9).
+- Non-admins get 403 from `/api/console/settings` and `/api/console/access-check`. Preferences are per
+  caller: a user can read and write their own row and no other, and the subject never appears in a
+  parameter name — an OIDC subject can contain characters Parameter Store refuses, and a listing that
+  spelled out every identifier would be a roster — which is why the key is a hash.
+- The layer decides only what `/api/me`, the proxy and the admin helpers read; every one of them
+  still runs on every request. The rail not showing an app remains a courtesy on top of the gate.
+- The failure policy above is part of the boundary: a stored-only restriction is unenforced for one
+  cache window after a Parameter Store failure. Name the group in the environment as well when that
+  is unacceptable.
+
+**Per-user preferences.** Stored under `<prefix>/prefs/` once the layer is configured; in the browser
+(`localStorage`, the `shell:rail:collapsed` key from `src/lib/shell/railState.ts`) when it is not,
+which is what the shell did before. Even when configured the browser value is used first, so the rail
+never pops between states on the first paint; the stored value then wins once per `/api/me` load. The
+rail's own collapse button writes the choice back to the stored row (when configured), so a click
+outlives the browser instead of being undone by the stored value on the next load. The stored theme is
+applied once per load through the theme switch the apps already use, and the user may change it
+afterwards. `defaultApp` is where `/` sends a viewer who may use several apps and still has access to
+it; a default that lost its access group falls back to the chooser, and a viewer with exactly one app
+still goes straight into it.
+
+**Inheritance: "Use console default".** The one place an app takes a value from this layer, and it is
+a copy, not a link. This app's `/config` GET reports `consoleDefaultModelId` — the resolved
+`defaults/model-id`, raw and null when none is set — beside the pipeline's own selection, so the
+Config tab can offer **Use console default** next to its family/endpoint presets. Choosing it is the
+same admin-gated PUT of `PIPELINE_AGENT_MODEL_PARAM` with that id; the parser Lambda keeps reading that
+parameter alone, nothing outside this BFF learns the console default exists, the panel says when the
+console default is not an id the pipeline offers, and a later change to the console default does not
+move the pipeline until someone chooses it again. The recon Config tab is unchanged. No console-wide
+value is ever written into an app's parameter by the console.
+
+**Terraform.** `infra/modules/console-settings` creates the parameters at exactly the contract's keys;
+both roots instantiate it with `prefix = "/<name_prefix>/console"`. It seeds all seven settings from
+variables the root already has — `recon_access_group`, `recon_admin_group`, `pipeline_access_group`,
+`pipeline_admin_group`, `enable_deal_pipeline` (rendered `"true"` / `"false"`), `pipeline_agent_model_id`
+as the default model id — plus the new `console_organization_label` (default
+`Agentic Operations Console`), so on day one the stored layer and the task environment agree and every
+seeded field reads `stored`. A blank seed creates **no** parameter: SSM rejects an empty value, and any
+placeholder would be read back as a stored value that outranks the environment, so skipping is the only
+representation of "nothing stored" and the UI creates the parameter on first save. Every parameter
+carries `ignore_changes = [value]`: Terraform seeds, the UI owns, and an apply never reverts an
+operator's edit. Two consequences follow from Terraform managing existence and nothing else: clearing a
+value in the UI deletes the parameter, and the next apply re-creates it from the seed unless the seed
+is blanked as well (clearing for good is a two-step); and a parameter the UI created first cannot later
+be adopted by giving its seed a value — the create fails with `ParameterAlreadyExists` rather than
+overwrite the UI's value; import it, or leave the seed blank. `infra/environments/recon` gains
+`console_admin_group` (default `""`, fail closed) and `console_organization_label`; the frontend module
+receives the seeder's `prefix` output as `CONSOLE_SETTINGS_PREFIX`, `console_admin_group` as
+`CONSOLE_ADMIN_GROUP` and `console_organization_label` as `CONSOLE_ORGANIZATION_LABEL`, always present
+whether or not the pipeline is deployed, and its task role gets `ssm:GetParameter`, `GetParameters`,
+`GetParametersByPath`, `PutParameter` and `DeleteParameter` on `parameter<prefix>` and
+`parameter<prefix>/*` (region and account literal, because a delete grant should reach no further than
+the parameters this console owns), plus `DescribeParameters`, which has no resource scope. The
+standalone root does the same for `/deal-pipeline-dev/console`, renders the three `CONSOLE_*` names
+into `env_local`, and gives `console_admin_group` a real default so a laptop run edits in anonymous
+mode. Plan-only tests: `infra/modules/console-settings/tests/parameters.tftest.hcl` (every seed lands
+at its contract key, a blank seed creates nothing, the two prefix shapes that break the grant are
+refused) and `infra/modules/frontend-ecs/tests/console_settings.tftest.hcl`. Nothing here creates a
+group; `console-admins` in the examples is an identity-provider group an operator maintains, like the
+four app groups.

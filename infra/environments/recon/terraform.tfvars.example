@@ -109,6 +109,18 @@ otel_layer_account = "<12-digit-account-id>"
 # pipeline_access_group = "deal-desk"
 # pipeline_admin_group  = "deal-desk-admins"
 
+# CONSOLE-WIDE SETTINGS. The groups above are ALSO seeded into SSM under /<name_prefix>/console, where
+# members of console_admin_group change them from the console's Settings screen at runtime; a stored
+# value outranks the environment, and an apply never reverts it (the module ignores value changes).
+# A blank seed creates no parameter -- the UI creates one on first save -- and a seed given a value
+# AFTER the UI created its parameter fails with ParameterAlreadyExists rather than overwriting the
+# operator's value (import it, or leave the seed blank). console_admin_group is environment-only by
+# design (no stored value can grant it) and fails CLOSED like the admin groups above: empty means
+# nobody can edit console settings, and the Settings screens render read-only until it is set. The
+# label is what the rail shows under the console mark until an operator stores a different one.
+# console_admin_group        = "console-admins"
+# console_organization_label = "Agentic Operations Console"
+
 # DEAL-PIPELINE APP. Off by default; true composes infra/modules/deal-pipeline into this root under
 # the "<name_prefix>-pipeline" prefix (so it cannot collide with a standalone deal-pipeline-dev
 # deployment in the same account) and wires the console to it. REQUIRES recon_access_group and

@@ -96,7 +96,17 @@ export interface Viewer {
 }
 
 /** The environment shape every reader here accepts, so tests can inject one instead of mutating `process.env`. */
-type Env = Record<string, string | undefined>;
+export type Env = Record<string, string | undefined>;
+
+/**
+ * Env var naming the IdP group that administers the CONSOLE: who may change the stored access
+ * groups, app enablement and console defaults through the Settings screens (`lib/console`).
+ *
+ * Environment-only by design. The console layer overlays stored values onto the per-app names above,
+ * but never onto this one: a UI edit must not be able to make someone a console admin, so the group
+ * that gates the UI can only come from the deployment.
+ */
+export const CONSOLE_ADMIN_GROUP_ENV = "CONSOLE_ADMIN_GROUP";
 
 const APP_BY_ID = Object.fromEntries(APPS.map((a) => [a.id, a])) as Record<AppId, AppDefinition>;
 
@@ -216,7 +226,9 @@ export function resolveAppAccess(
  * Every group name the registry knows about, used by anonymous local mode to grant everything.
  *
  * Read through the same trimming accessors as every other consumer, so the anonymous caller holds the
- * exact strings `resolveAppAccess` and the admin helpers compare against.
+ * exact strings `resolveAppAccess` and the admin helpers compare against. Includes the console admin
+ * group for the same reason: a laptop run with `CONSOLE_ADMIN_GROUP` set must see the Settings screens
+ * in edit mode without an identity provider, exactly as it sees both apps' Config tabs.
  *
  * @param env process environment to read the group names from.
  */
@@ -227,5 +239,7 @@ export function allConfiguredGroups(env: Env = process.env): string[] {
       if (v) names.add(v);
     }
   }
+  const consoleAdmin = trimmedGroup(CONSOLE_ADMIN_GROUP_ENV, env);
+  if (consoleAdmin) names.add(consoleAdmin);
   return [...names];
 }

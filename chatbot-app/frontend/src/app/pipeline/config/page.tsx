@@ -87,6 +87,10 @@ export default function ConfigPage() {
   // data-residency change the operator should see spelled out first.
   const [modelId, setModelId] = useState<string | null>(null);
   const [allowed, setAllowed] = useState<readonly string[]>([]);
+  // The console-wide default model, when the console has one (`/console/settings`, Defaults). Offered as
+  // a one-click fill for the controls; Apply still writes THIS app's parameter, because the parser reads
+  // that parameter and nothing else.
+  const [consoleDefault, setConsoleDefault] = useState<string | null>(null);
   const [family, setFamily] = useState(splitModelId(null).family);
   const [endpoint, setEndpoint] = useState(splitModelId(null).endpoint);
   const [busy, setBusy] = useState(false);
@@ -98,6 +102,8 @@ export default function ConfigPage() {
       .then((c) => {
         setModelId(c.modelId);
         setAllowed(c.modelIds ?? []);
+        // Absent or null when the console layer is off, in which case there is nothing to offer.
+        setConsoleDefault(c.consoleDefaultModelId || null);
         const { endpoint: ep, family: fam } = splitModelId(c.modelId);
         setEndpoint(ep);
         setFamily(fam);
@@ -105,6 +111,14 @@ export default function ConfigPage() {
       })
       .catch((e) => setError(String(e)));
   }, []);
+
+  /** Fill the two controls from the console default; the composed id then equals it exactly. */
+  const useConsoleDefault = () => {
+    if (!consoleDefault) return;
+    const { endpoint: ep, family: fam } = splitModelId(consoleDefault);
+    setEndpoint(ep);
+    setFamily(fam);
+  };
 
   // Composed from the two controls; deliberately NOT saved as it changes.
   const pending = `${endpoint}.${family}`;
@@ -200,6 +214,26 @@ export default function ConfigPage() {
           <p className="dp-mono mt-3 text-[11px] text-[var(--dp-amber)]">
             The stored id, {modelId}, is not one of the presets above; applying a preset replaces it.
           </p>
+        )}
+        {loaded && consoleDefault && (
+          <div
+            className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-[var(--dp-ink-faint)]"
+            data-testid="console-default-model"
+          >
+            <span className="dp-mono">
+              Console default: <span className="text-[var(--dp-ink-dim)]">{consoleDefault}</span>
+            </span>
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={useConsoleDefault}
+                disabled={busy || pending === consoleDefault}
+                className="dp-mono rounded border border-[var(--dp-line)] px-3 py-1.5 text-[11px] uppercase tracking-[0.08em] text-[var(--dp-ink-dim)] hover:text-[var(--dp-ink)] disabled:opacity-40"
+              >
+                Use console default
+              </button>
+            )}
+          </div>
         )}
         {msg && (
           <Notice tone={msg.tone} className="mt-4 text-[12px]">

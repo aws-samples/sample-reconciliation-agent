@@ -6,7 +6,7 @@ import { useEffect, type ReactNode } from "react";
 import { AlertTriangle, ArrowRight, Lock, LogIn } from "lucide-react";
 
 import { APP_ICONS } from "@/components/shell/AppRail";
-import { APPS, type AppDefinition } from "@/lib/auth/apps";
+import { APPS, appById, type AppDefinition } from "@/lib/auth/apps";
 import { reauthenticate } from "@/lib/reauth";
 import { useSignOut } from "@/lib/shell/signOut";
 import { useViewer } from "@/lib/shell/viewer";
@@ -115,8 +115,16 @@ export default function Home() {
   const { viewer, loading, error } = useViewer();
   const accessible = viewer ? APPS.filter((a) => viewer.apps[a.id]?.access) : [];
   const anonymous = viewer?.mode === "anonymous";
+  // A viewer with several apps who named a default on the Preferences screen goes straight there too,
+  // provided they may still open it: a default that lost its access group must fall back to the chooser,
+  // not to the no-access panel. The rail still lists the other apps, so nothing becomes unreachable.
+  const preferred = viewer?.preferences.defaultApp;
+  const preferredHref =
+    viewer && preferred && accessible.length > 1 && viewer.apps[preferred]?.access
+      ? (appById(preferred)?.href ?? null)
+      : null;
   // A primitive dependency: the effect must re-run only when the answer changes, not on every render.
-  const soleHref = accessible.length === 1 ? accessible[0].href : null;
+  const soleHref = accessible.length === 1 ? accessible[0].href : preferredHref;
 
   useEffect(() => {
     // `replace`, not `push`: the chooser was never a page the viewer chose, so Back should not return here.

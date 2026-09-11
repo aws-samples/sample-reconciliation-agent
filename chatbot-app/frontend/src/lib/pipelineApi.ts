@@ -448,6 +448,8 @@ export interface PipelineConfig {
   modelId: string | null;
   /** The ids the PUT accepts, when the route publishes them; the Config page checks against these. */
   modelIds?: readonly string[];
+  /** The console-wide default model (Settings → Defaults), offered as "Use console default"; null when none. */
+  consoleDefaultModelId?: string | null;
 }
 
 export async function getConfig(): Promise<PipelineConfig> {

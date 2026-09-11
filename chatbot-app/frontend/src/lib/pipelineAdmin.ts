@@ -33,6 +33,7 @@ import { NextResponse } from "next/server";
 
 import { authorizeRequest } from "@/lib/api-auth";
 import { adminGroupFor } from "@/lib/auth/apps";
+import { effectiveEnv } from "@/lib/console/settings";
 
 /**
  * Whether a caller's groups include the configured admin group.
@@ -79,7 +80,11 @@ export async function requirePipelineActor(
       ),
     };
   }
-  return { actor: auth.subject, isAdmin: isPipelineAdmin(auth.groups) };
+  // The overlaid environment (`lib/console/settings.ts`): the process env with the console's stored
+  // admin group on top, the same view `/api/me` resolves the rail's admin chip from. Reading
+  // `process.env` here instead would let a group changed from the Settings screen show the chip while
+  // every write route still answered 403 against the old name.
+  return { actor: auth.subject, isAdmin: isPipelineAdmin(auth.groups, await effectiveEnv()) };
 }
 
 /**
@@ -97,8 +102,9 @@ export async function requirePipelineAdmin(
   if ("error" in who) return who;
   if (!who.isAdmin) {
     // The message names the group and the variable. A 403 that says only "forbidden" sends an operator
-    // to read this source to find out which group they are missing.
-    const required = adminGroupFor("pipeline");
+    // to read this source to find out which group they are missing. Same overlaid env as the check
+    // above (cached, so the second call is free) so the name in the message is the one that refused.
+    const required = adminGroupFor("pipeline", await effectiveEnv());
     return {
       error: NextResponse.json(
         {

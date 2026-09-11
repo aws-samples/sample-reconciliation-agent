@@ -523,6 +523,11 @@ div[style*="position: fixed"][style*="top: 0"][style*="right: 0"][style*="z-inde
   --shell-accent-soft: rgba(122, 162, 247, 0.14);
   --shell-danger: #e5484d;
   --shell-danger-soft: rgba(229, 72, 77, 0.16);
+  /* Two more tones for the console's own screens (Settings): a saved confirmation and a standing
+     warning ("disabling hides this app for everyone"). Shell palette, not an app's, for the same
+     reason as everything above. */
+  --shell-ok: #4cc38a;
+  --shell-warn: #e0a83a;
   /* --shell-danger-soft composited over --shell-bg, as a solid colour. For the one shell surface (the
      /api/me failure banner) that sits directly on body rather than on a shell background: body is
      white in the light scheme, and the translucent tint over white left --shell-ink unreadable. */

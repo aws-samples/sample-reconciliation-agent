@@ -13,3 +13,9 @@ name_prefix = "deal-pipeline-dev"
 
 # Lambda log retention in days.
 # log_retention_days = 14
+
+# Console-wide settings layer: SSM parameters under /<name_prefix>/console that the console's Settings
+# screen owns after the first apply (see the README). The admin group only matters with a real IdP --
+# anonymous mode makes the local user a console admin regardless.
+# console_admin_group        = "console-admins"
+# console_organization_label = "Agentic Operations Console"

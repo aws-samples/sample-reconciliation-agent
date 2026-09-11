@@ -140,6 +140,25 @@ output "parser_prompt_key" {
   value = module.deal_pipeline.parser_prompt_key
 }
 
+output "console_settings_prefix" {
+  description = "SSM path of the console-wide settings this root seeds (CONSOLE_SETTINGS_PREFIX). The Settings screen owns the values after the first apply; Terraform never reverts them."
+  value       = module.console_settings.prefix
+}
+
+output "console_settings_parameters" {
+  description = "The console-wide parameters this apply creates. The settings whose seed is blank here (both recon groups, the pipeline access group) get their parameter from the UI on first save."
+  value       = module.console_settings.parameter_names
+}
+
+output "console_admin_group" {
+  description = "Environment-only: who may edit console-wide settings once an IdP is wired up. Anonymous mode grants it regardless."
+  value       = var.console_admin_group
+}
+
+output "console_organization_label" {
+  value = var.console_organization_label
+}
+
 # The RECON_* lines are commented out, not omitted: the shell resolves BOTH apps from the
 # environment, and a reader of the rendered file should see that the recon app's groups are a
 # deliberate blank here (the recon stack is a separate root, infra/environments/recon, and is not
@@ -174,5 +193,13 @@ output "env_local" {
     SAMPLE_EMAILS_DIR=${local.sample_emails_dir}
     PIPELINE_SKILLS_PREFIX=${module.deal_pipeline.skills_prefix}
     PARSER_PROMPT_KEY=${module.deal_pipeline.parser_prompt_key}
+    # Console-wide settings: the SSM layer under this prefix OVERLAYS the group variables above
+    # (stored -> env -> default) and is edited from the console's Settings screen; this root seeds it
+    # from the same values, so the two agree until you edit in the UI. Comment the prefix out to run
+    # env-only (the Settings screens then render read-only). CONSOLE_ADMIN_GROUP is environment-only
+    # by design -- no stored value can grant it -- and anonymous mode makes you a console admin anyway.
+    CONSOLE_SETTINGS_PREFIX=${module.console_settings.prefix}
+    CONSOLE_ADMIN_GROUP=${var.console_admin_group}
+    CONSOLE_ORGANIZATION_LABEL="${var.console_organization_label}"
   EOT
 }

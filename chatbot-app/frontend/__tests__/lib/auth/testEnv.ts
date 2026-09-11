@@ -10,7 +10,12 @@
  * Not a test file (no `.test.` in the name), so vitest does not collect it.
  */
 
-import { APPS } from "@/lib/auth/apps";
+import { APPS, CONSOLE_ADMIN_GROUP_ENV } from "@/lib/auth/apps";
+import {
+  CONSOLE_DEFAULT_MODEL_ID_ENV,
+  CONSOLE_ORGANIZATION_LABEL_ENV,
+  CONSOLE_SETTINGS_PREFIX_ENV,
+} from "@/lib/console/types";
 
 /** Every environment variable the auth stack reads. Group names come from the registry so the list cannot drift. */
 export const AUTH_ENV_NAMES: readonly string[] = [
@@ -21,6 +26,12 @@ export const AUTH_ENV_NAMES: readonly string[] = [
   "REQUIRE_ACCESS_GROUPS",
   ...APPS.flatMap((app) => [app.accessGroupEnv, app.adminGroupEnv]),
   ...APPS.flatMap((app) => (app.enabledEnv ? [app.enabledEnv] : [])),
+  // The console layer: cleared too, so a developer's shell with a real prefix set never makes these
+  // tests reach for Parameter Store.
+  CONSOLE_ADMIN_GROUP_ENV,
+  CONSOLE_SETTINGS_PREFIX_ENV,
+  CONSOLE_ORGANIZATION_LABEL_ENV,
+  CONSOLE_DEFAULT_MODEL_ID_ENV,
   "AUTH_GROUPS_CLAIM",
   "AUTH_PROVIDER",
   "NEXT_PUBLIC_AUTH_PROVIDER",

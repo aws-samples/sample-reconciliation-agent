@@ -194,6 +194,29 @@ variable "pipeline_admin_group" {
 }
 
 # ---------------------------------------------------------------------------------
+# Console-wide settings: the layer ABOVE the two apps (infra/modules/console-settings; the contract
+# is chatbot-app/frontend/src/lib/console/types.ts).
+#
+# Every group variable above is ALSO seeded into SSM under /<name_prefix>/console, where members of
+# console_admin_group can change it from the console's Settings screen without a redeploy. A stored
+# value outranks the environment (stored -> env -> default), and Terraform never reverts one: the
+# module ignores value changes after creation. Who may use that screen is the one thing that stays
+# environment-only, so a UI edit can never make someone a console admin.
+# ---------------------------------------------------------------------------------
+
+variable "console_admin_group" {
+  description = "OIDC group whose members may edit console-wide settings (access groups, app enablement, defaults) from the console's Settings screen. Environment-only: nothing stored can grant it. Empty (the default) FAILS CLOSED: nobody can edit console settings until it is set, and the screens render read-only."
+  type        = string
+  default     = ""
+}
+
+variable "console_organization_label" {
+  description = "Label shown under the console mark in the app rail, and the seed for the stored organization-label setting an operator may change in the Settings screen afterwards."
+  type        = string
+  default     = "Agentic Operations Console"
+}
+
+# ---------------------------------------------------------------------------------
 # Deal-pipeline app, composed into this root from infra/modules/deal-pipeline.
 # ---------------------------------------------------------------------------------
 

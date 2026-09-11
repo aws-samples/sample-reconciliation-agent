@@ -1,5 +1,6 @@
 /**
- * Deny-by-default gate in front of the shell's BFF: `/api/recon/*`, `/api/pipeline/*` and `/api/me`.
+ * Deny-by-default gate in front of the shell's BFF: `/api/recon/*`, `/api/pipeline/*`,
+ * `/api/console/*` and `/api/me`.
  *
  * Every matched request is checked here BEFORE the route handler runs, so a new route added under
  * either app's prefix is protected without anyone remembering to protect it. Two checks, in order:
@@ -13,9 +14,19 @@
  *     group, which implies access). An app whose access group is unset stays open to every
  *     authenticated user, so a deployment that predates the shell behaves exactly as it did — unless
  *     `REQUIRE_ACCESS_GROUPS=true`, which the composed deployment sets because "every authenticated
- *     user" then includes the other app's desk; an unset group is admins-only there. `/api/me` is not
- *     app-prefixed and stops at step 1: the shell calls it to learn WHICH apps to show, so it must
- *     answer for a caller who may use none of them. The rules live in `lib/auth/apps.ts`.
+ *     user" then includes the other app's desk; an unset group is admins-only there. `/api/me` and
+ *     `/api/console/*` are not app-prefixed and stop at step 1: the shell calls `/api/me` to learn
+ *     WHICH apps to show, so it must answer for a caller who may use none of them, and the console
+ *     routes gate their own admin-only operations against `CONSOLE_ADMIN_GROUP` themselves. The
+ *     rules live in `lib/auth/apps.ts`.
+ *
+ * The group names and the enablement flag come from `effectiveEnv()` (`lib/console/settings.ts`):
+ * the process environment with the console's stored settings overlaid, so an access group changed
+ * from the Settings screen applies here without a redeploy. The overlay is cached in-process for 30
+ * seconds and Next bundles this file separately from the route handlers, so a change saved through
+ * `PUT /api/console/settings` reaches this gate within that window rather than immediately. When the
+ * stored layer is unset or unreadable the environment alone is used, exactly as before the layer
+ * existed.
  *
  * This is the fix for live-QA finding P0-2 (the recon BFF was reachable anonymously, including the
  * system-prompt PUT and the case-approval POST, both of which act with the ECS task role), widened
@@ -41,6 +52,7 @@ import type { NextRequest } from "next/server";
 
 import { authorizeRequest } from "@/lib/api-auth";
 import { decideApiAccess } from "@/lib/auth/access";
+import { effectiveEnv } from "@/lib/console/settings";
 
 export async function proxy(request: NextRequest): Promise<NextResponse> {
   const result = await authorizeRequest(request);
@@ -58,7 +70,7 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  const access = decideApiAccess(request.nextUrl.pathname, result.groups);
+  const access = decideApiAccess(request.nextUrl.pathname, result.groups, await effectiveEnv());
   if (!access.allowed) {
     // 403 rather than 401: the token is fine and signing in again will not help. The body names the
     // app and the group so the shell (and a support ticket) can say what to request.
@@ -70,9 +82,9 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
 
 export const config = {
   // No `runtime` key: Next rejects one in a proxy file because a proxy is always Node.js.
-  // Scoped to the two app BFFs and the shell's identity route. The chatbot app's own /api routes
-  // are a separate ingress with its own auth story; widening this matcher to them would change
-  // behaviour the QA did not assess. Matchers must be literal so Next can read them at build time,
-  // which is why this list is not derived from the APPS registry.
-  matcher: ["/api/recon/:path*", "/api/pipeline/:path*", "/api/me"],
+  // Scoped to the two app BFFs, the console's settings routes and the shell's identity route. The
+  // chatbot app's own /api routes are a separate ingress with its own auth story; widening this
+  // matcher to them would change behaviour the QA did not assess. Matchers must be literal so Next
+  // can read them at build time, which is why this list is not derived from the APPS registry.
+  matcher: ["/api/recon/:path*", "/api/pipeline/:path*", "/api/console/:path*", "/api/me"],
 };

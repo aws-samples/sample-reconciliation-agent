@@ -144,7 +144,7 @@ jobs:
         # providers in a versions.tf so `init` resolves the same majors the roots do; the mocks
         # still need the provider binaries for their schemas.
         run: |
-          for module in deal-pipeline frontend-ecs lambda-package; do
+          for module in console-settings deal-pipeline frontend-ecs lambda-package; do
             echo "== infra/modules/$module"
             (cd "infra/modules/$module" && terraform init -backend=false -input=false && terraform test)
           done

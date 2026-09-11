@@ -189,7 +189,7 @@ frontend:
     - cd chatbot-app/frontend
     - npm ci
     - npx tsc --noEmit
-    # The whole suite: 107 files, 1395 tests.
+    # The whole suite: 120 files, 1677 tests.
     - npx vitest run
     # The real gate — it compiles every route, catching breakage both the unit tests and tsc
     # miss. `npm run lint` is deliberately absent (ESLint is broken repo-wide), and
@@ -223,6 +223,9 @@ terraform:validate:
     # Module tests, all plan-only under mocked providers (no credentials, nothing created). Each
     # module pins its providers in a versions.tf, which is what lets `init` here resolve the same
     # majors the roots do. The mock providers still need the binaries for their schemas.
+    - cd "$CI_PROJECT_DIR/infra/modules/console-settings"
+    - terraform init -backend=false -input=false
+    - terraform test
     - cd "$CI_PROJECT_DIR/infra/modules/deal-pipeline"
     - terraform init -backend=false -input=false
     - terraform test

@@ -32,3 +32,22 @@ variable "log_retention_days" {
   type        = number
   default     = 14
 }
+
+# Console-wide settings for the local demo (design §13; contract in
+# chatbot-app/frontend/src/lib/console/types.ts). The admin group has a REAL default here, unlike the
+# recon root's fail-closed blank: this root exists to run the console on a laptop, and the rendered
+# .env.local should let a developer open the Settings screen and edit without first inventing a
+# group name. It is environment-only by contract (rendered into .env.local, never stored), and in
+# anonymous mode the anonymous subject is a console admin regardless; ANONYMOUS_GROUPS previews a
+# user who is not.
+variable "console_admin_group" {
+  description = "OIDC group whose members may edit console-wide settings (CONSOLE_ADMIN_GROUP in .env.local). Only matters with a real identity provider; anonymous mode grants it."
+  type        = string
+  default     = "console-admins"
+}
+
+variable "console_organization_label" {
+  description = "Label shown under the console mark in the rail (CONSOLE_ORGANIZATION_LABEL); also seeds /<name_prefix>/console/defaults/organization-label, which the Settings screen owns afterwards."
+  type        = string
+  default     = "Agentic Operations Console"
+}

@@ -155,3 +155,44 @@ describe("landing page", () => {
     expect(screen.queryByRole("button", { name: "Sign in again" })).toBeNull();
   });
 });
+
+describe("landing page default application", () => {
+  /** A viewer body with the console layer's fields, as the current `/api/me` sends them. */
+  function consoleViewer(apps: Viewer["apps"], preferences: Record<string, unknown>) {
+    return {
+      ...viewer(apps),
+      console: { admin: false, configured: true, organizationLabel: "" },
+      preferences,
+    };
+  }
+
+  it("opens the preferred application when the viewer may open several and may open that one", async () => {
+    serveMe(consoleViewer(BOTH, { defaultApp: "pipeline" }));
+    render(<Home />);
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/pipeline/inbox"));
+    // Straight through, like the single-app case: no chooser flashes first.
+    expect(screen.queryByRole("heading", { name: "Agentic Operations Console" })).toBeNull();
+    expect(screen.getByTestId("landing-skeleton")).toBeInTheDocument();
+  });
+
+  it("falls back to the chooser when the preference names nothing the viewer may open", async () => {
+    // The preference is validated on the way in: an unknown app id is dropped, so this reads as no default.
+    serveMe(consoleViewer(BOTH, { defaultApp: "billing" }));
+    render(<Home />);
+    expect(await screen.findByRole("heading", { name: "Agentic Operations Console" })).toBeInTheDocument();
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("lets the single accessible app win over a preference for one the viewer lost", async () => {
+    serveMe(
+      consoleViewer(
+        { recon: { access: true, admin: false }, pipeline: { access: false, admin: false } },
+        { defaultApp: "pipeline" },
+      ),
+    );
+    render(<Home />);
+    // The sole-app redirect is the existing behaviour and must not be displaced by a stale preference.
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/recon/dashboard"));
+    expect(replace).not.toHaveBeenCalledWith("/pipeline/inbox");
+  });
+});

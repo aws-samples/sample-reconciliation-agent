@@ -30,6 +30,7 @@ import { NextResponse } from "next/server";
 
 import { authorizeRequest } from "@/lib/api-auth";
 import { adminGroupFor } from "@/lib/auth/apps";
+import { effectiveEnv } from "@/lib/console/settings";
 
 /**
  * Whether a caller's groups include the configured admin group.
@@ -71,10 +72,15 @@ export async function requireReconAdmin(
       ),
     };
   }
-  if (!isReconAdmin(auth.groups)) {
+  // The overlaid environment (`lib/console/settings.ts`): the process env with the console's stored
+  // admin group on top, the same view `/api/me` resolves the rail's admin chip from. Reading
+  // `process.env` here instead would let a group changed from the Settings screen show the chip while
+  // every write route still answered 403 against the old name.
+  const env = await effectiveEnv();
+  if (!isReconAdmin(auth.groups, env)) {
     // The message names the group and the variable. A 403 that says only "forbidden" sends an operator
     // to read this source to find out which group they are missing.
-    const required = adminGroupFor("recon");
+    const required = adminGroupFor("recon", env);
     return {
       error: NextResponse.json(
         {

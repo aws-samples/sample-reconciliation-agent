@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { authorizeRequest } from "@/lib/api-auth";
+import { effectiveEnv } from "@/lib/console/settings";
 import { isPipelineAdmin } from "@/lib/pipelineAdmin";
 
 // Who the browser is talking to the BFF as.
@@ -27,7 +28,8 @@ export async function GET(req: Request) {
   return NextResponse.json({
     subject: auth.subject,
     groups: auth.groups,
-    isAdmin: isPipelineAdmin(auth.groups),
+    // Against the overlaid env, like `requirePipelineAdmin`, so the UI and the write routes agree.
+    isAdmin: isPipelineAdmin(auth.groups, await effectiveEnv()),
     mode: auth.mode,
   });
 }

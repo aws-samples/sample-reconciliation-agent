@@ -10,11 +10,14 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Scale,
+  Settings,
   ShieldCheck,
   type LucideIcon,
 } from "lucide-react";
 
-import { APPS, type AppDefinition, type AppId, type Viewer } from "@/lib/auth/apps";
+import { APPS, type AppDefinition, type AppId } from "@/lib/auth/apps";
+import { putPreferences } from "@/lib/consoleApi";
+import { CONSOLE_SETTINGS_PATH } from "@/lib/shell/consolePaths";
 import {
   isViewportWide,
   readRailPreference,
@@ -22,6 +25,7 @@ import {
   writeRailCollapsed,
 } from "@/lib/shell/railState";
 import { useSignOut } from "@/lib/shell/signOut";
+import { updateViewerPreferences, type ConsoleViewer } from "@/lib/shell/viewer";
 import { cn } from "@/lib/utils";
 
 // The vertical app rail: the one piece of navigation that belongs to the console rather than to an
@@ -47,10 +51,12 @@ export const RAIL_ID = "console-rail";
 
 export interface AppRailProps {
   /** The viewer once known; `null` while loading or after `/api/me` failed. */
-  viewer: Viewer | null;
+  viewer: ConsoleViewer | null;
   loading: boolean;
   /** The app whose page tree the current path belongs to, for highlighting and the admin chip. */
   currentApp: AppDefinition | undefined;
+  /** Whether the current path is one of the console's own screens (`/console/*`), for the Settings entry. */
+  settingsActive?: boolean;
 }
 
 interface RailCollapse {
@@ -69,8 +75,16 @@ interface RailCollapse {
  * is switched on only once a change happens AFTER that correction (a click, a resize). Adding the
  * transition in the same commit as a width change would animate it (the after-change style decides), so
  * "off until the first user-visible change" is what guarantees nothing slides on load.
+ *
+ * The browser's localStorage value is the FIRST answer, because it is there before `/api/me` is; the
+ * preference stored on the server (`stored`) wins once it arrives, and again whenever it changes (the
+ * Preferences screen), but never re-asserts itself over a click made after that — a click is the newest
+ * information, and `stored` only fires this effect when its value changes.
+ *
+ * @param stored `preferences.railCollapsed` from the viewer; `undefined` until known or when never set.
+ * @param persist called with each explicit choice so the caller can write it wherever it keeps it.
  */
-function useRailCollapsed(): RailCollapse {
+function useRailCollapsed(stored: boolean | undefined, persist: (collapsed: boolean) => void): RailCollapse {
   // `null` = no explicit preference: follow the viewport. Below the `lg` breakpoint a 220px rail pushes
   // the apps' single-row headers into horizontal overflow, so narrow viewports start collapsed.
   const [preference, setPreference] = useState<boolean | null>(null);
@@ -86,16 +100,45 @@ function useRailCollapsed(): RailCollapse {
     });
   }, []);
 
+  useEffect(() => {
+    if (stored === undefined) return;
+    // Declared after the browser read so that, when both run in the mount commit, this one wins. A
+    // width change here happens after first paint, so it may animate like any other later change.
+    setAnimate(true);
+    setPreference(stored);
+  }, [stored]);
+
   const collapsed = preference ?? !wide;
   const toggle = () => {
     const next = !collapsed;
     // An explicit choice sticks at every width from now on; the viewport only decides for viewers who
     // never said what they want.
     writeRailCollapsed(next);
+    persist(next);
     setAnimate(true);
     setPreference(next);
   };
   return { collapsed, animate, toggle };
+}
+
+/**
+ * Keep a rail toggle beyond this browser when the console has somewhere to keep it.
+ *
+ * Without this, a user who set "collapsed" on the Preferences screen and later expanded the rail with
+ * the button would find it collapsed again on the next load: the stored value wins once per load, so
+ * the button's choice has to become the stored value. Fire-and-forget: a failed write costs the
+ * preference, not the rail, and the browser copy was already written.
+ */
+function persistRailCollapsed(viewer: ConsoleViewer | null, collapsed: boolean): void {
+  if (!viewer) return;
+  const next = { ...viewer.preferences, railCollapsed: collapsed };
+  // The store is updated in both modes so a Preferences screen open elsewhere in the session shows the
+  // toggle's new state; the server only when there is a server-side row to write.
+  updateViewerPreferences(next);
+  if (!viewer.console.configured) return;
+  void putPreferences(next).catch((error: unknown) =>
+    console.error("[Shell] could not store the rail preference:", error),
+  );
 }
 
 /** Placeholder rows while the viewer loads: the rail keeps its width and never pops in from empty. */
@@ -188,14 +231,18 @@ const FOOTER_BUTTON_CLASS =
   "flex h-9 items-center gap-3 rounded-md px-2.5 text-label text-[var(--shell-ink-dim)] outline-none transition-colors " +
   "hover:bg-[var(--shell-panel)] hover:text-[var(--shell-ink)] focus-visible:ring-2 focus-visible:ring-[var(--shell-accent)]";
 
-export function AppRail({ viewer, loading, currentApp }: AppRailProps) {
-  const { collapsed, animate, toggle } = useRailCollapsed();
+export function AppRail({ viewer, loading, currentApp, settingsActive = false }: AppRailProps) {
+  const { collapsed, animate, toggle } = useRailCollapsed(viewer?.preferences.railCollapsed, (next) =>
+    persistRailCollapsed(viewer, next),
+  );
   const { signOut, error: signOutError } = useSignOut();
   const accessible = viewer ? APPS.filter((a) => viewer.apps[a.id]?.access) : [];
   const isAdminHere = Boolean(viewer && currentApp && viewer.apps[currentApp.id]?.admin);
   // No identity provider is configured, so there is no session to end: signing out would only reject.
   const anonymous = viewer?.mode === "anonymous";
   const subject = viewer?.subject || "";
+  // The deployment's own name under the mark, when an admin set one; the generic word otherwise.
+  const organizationLabel = viewer?.console.organizationLabel || "Console";
 
   return (
     <aside
@@ -228,7 +275,13 @@ export function AppRail({ viewer, loading, currentApp }: AppRailProps) {
           {!collapsed && (
             <span className="flex flex-col leading-tight">
               <span className="text-label font-semibold">Agentic Ops</span>
-              <span className="text-caption text-[var(--shell-ink-dim)]">Console</span>
+              <span
+                className="max-w-[150px] truncate text-caption text-[var(--shell-ink-dim)]"
+                data-testid="rail-organization-label"
+                title={organizationLabel}
+              >
+                {organizationLabel}
+              </span>
             </span>
           )}
         </Link>
@@ -256,8 +309,34 @@ export function AppRail({ viewer, loading, currentApp }: AppRailProps) {
         )}
       </nav>
 
-      {/* Footer: collapse toggle, identity, sign out */}
+      {/* Footer: settings, collapse toggle, identity, sign out */}
       <div className="flex flex-col gap-1 border-t border-[var(--shell-line)] p-2">
+        {/* Console settings belong to every authenticated viewer (Preferences, at least), so the entry
+            is not gated on the viewer having loaded; the screen itself says what the viewer may change. */}
+        <Link
+          href={CONSOLE_SETTINGS_PATH}
+          title="Settings"
+          aria-label={collapsed ? "Settings" : undefined}
+          aria-current={settingsActive ? "page" : undefined}
+          data-testid="rail-settings"
+          className={cn(
+            "relative flex h-9 items-center gap-3 rounded-md px-2.5 text-label outline-none transition-colors",
+            "focus-visible:ring-2 focus-visible:ring-[var(--shell-accent)]",
+            settingsActive
+              ? "bg-[var(--shell-accent-soft)] text-[var(--shell-ink)]"
+              : "text-[var(--shell-ink-dim)] hover:bg-[var(--shell-panel)] hover:text-[var(--shell-ink)]",
+            collapsed && "justify-center px-0",
+          )}
+        >
+          {settingsActive && (
+            <span
+              aria-hidden="true"
+              className="absolute inset-y-1.5 left-0 w-[2px] rounded-r bg-[var(--shell-accent)]"
+            />
+          )}
+          <Settings className="h-4 w-4 shrink-0" aria-hidden="true" />
+          {!collapsed && <span>Settings</span>}
+        </Link>
         <button
           type="button"
           onClick={toggle}

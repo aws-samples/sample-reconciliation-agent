@@ -31,22 +31,30 @@ app against real AWS resources from a laptop; the same module is composed into t
 
 ## Module tests
 
-Three modules carry `terraform test` suites, all plan-only under mocked providers (no credentials,
+Four modules carry `terraform test` suites, all plan-only under mocked providers (no credentials,
 nothing created), and CI runs them beside the two validates:
 
 ```bash
-for m in deal-pipeline frontend-ecs lambda-package; do
+for m in console-settings deal-pipeline frontend-ecs lambda-package; do
   (cd infra/modules/$m && terraform init -backend=false && terraform test)
 done
 ```
 
+- **`console-settings/`** — every console-wide setting lands at exactly the key the frontend reads
+  under the prefix, a blank seed creates no parameter (never a placeholder the console would read as
+  stored), seeds are trimmed and obey the Settings screen's own limits, and a prefix without a
+  leading slash or with a trailing one fails at plan.
 - **`deal-pipeline/`** — each Lambda's role grants exactly what its handler calls, and every S3
   location a Lambda is given is one its role can read; the sample corpus seeds under the prefix the
   module outputs.
 - **`frontend-ecs/`** — the deal-pipeline wiring: a recon-only console gets none of the pipeline
   environment or grants and is told `PIPELINE_ENABLED=false`, an enabled one gets exactly the
   documented variables and verb-per-resource grants that match what the BFF calls, and
-  `pipeline_enabled` without the ARNs -- or with a blank access group -- fails at plan.
+  `pipeline_enabled` without the ARNs -- or with a blank access group -- fails at plan. Also the
+  console-settings wiring: the three `CONSOLE_*` variables are in the task environment whether or
+  not the pipeline is deployed, the task role's SSM grant names exactly `parameter<prefix>` and
+  `parameter<prefix>/*` with a literal region and account (`DeleteParameter` is in it), and a blank
+  prefix grants nothing.
 - **`lambda-package/`** — what changes the staging hash (every staged file, renames, the instance
   name) and what does not (bytecode caches, virtualenvs, OS and tool droppings such as `.DS_Store`),
   and that two instance names stage into two directories.
@@ -63,6 +71,16 @@ deployment had before the rail); with `enable_deal_pipeline = true` both access 
 so a blank group fails closed at runtime too — because two populations then sign in through one
 OIDC client and several recon write routes are gated by the access check alone. Admins have access
 implicitly.
+
+**Console-wide settings.** The same groups are also seeded into SSM under `/<name_prefix>/console`
+by `modules/console-settings` (contract: `chatbot-app/frontend/src/lib/console/types.ts`), where
+members of `console_admin_group` change them from the console's Settings screen without a redeploy.
+A stored value outranks the environment (stored -> env -> default); Terraform ignores value changes
+after creation, so an apply never reverts one; a blank seed creates no parameter, and the UI creates
+it on first save. `console_admin_group` itself is environment-only and fails closed when blank, as
+are `REQUIRE_ACCESS_GROUPS` and the anonymous switches -- a UI edit cannot widen access past what the
+deployment allows or make someone a console admin. The task role's grant is scoped to the prefix by
+`modules/frontend-ecs`.
 
 ## ⚠️ CI owns the apply
 
@@ -100,6 +118,12 @@ planned for destruction. **Check that variable before approving anything.**
   secret _name_ rather than ARN: an ARN reference would close a module cycle.
 - **`observability/`** — delivers runtime traces into `aws/spans`, which is what lets the online
   evaluation config score runtime-backend sessions at all.
+- **`console-settings/`** — Terraform manages the parameters' _existence_, the UI their _values_.
+  Three consequences: a UI "clear" (a delete -- SSM has no empty value) is re-seeded by the next
+  apply unless the tfvars seed is blanked too; a seed given a value _after_ the UI created that
+  parameter fails with `ParameterAlreadyExists` (import it rather than let Terraform overwrite the
+  operator's value); and blanking a seed plans a **delete** of that parameter, which the destroy
+  guard above refuses in the plain apply job.
 
 ## Seeds
 
