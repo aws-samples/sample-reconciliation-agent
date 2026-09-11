@@ -1,3 +1,0 @@
-name: workspace
-description: "Read and write files in the shared session workspace. Use this to access files created by any skill — code-agent outputs, office documents, images, and more. All within the same isolated session."
-skill_md_path: workspace/SKILL.md

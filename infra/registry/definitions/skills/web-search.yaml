@@ -1,8 +1,0 @@
-name: web-search
-description: "Search the web and fetch content from URLs for current information, news, and research topics."
-skill_md_path: web-search/SKILL.md
-source: gateway
-sourceRecord: web-search
-tools:
-  - web_search
-  - fetch
