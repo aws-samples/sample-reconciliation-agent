@@ -182,19 +182,6 @@ def _read_sections(
     return enriched_sections, pages, page_count
 
 
-def _opt(fields: dict, key: str) -> str | None:
-    """Read an extracted field, preserving the absent/blank distinction.
-
-    :param fields: the section's extracted field values.
-    :param key: the field name.
-    :returns: the string value, ``""`` when extracted but blank, or None when this document's class
-        never extracted it at all.
-    """
-    if key not in fields:
-        return None
-    return str(fields[key])
-
-
 def idp_event_to_notice(
     document: dict,
     *,
@@ -236,17 +223,6 @@ def idp_event_to_notice(
     if idp_tracking is not None and page_count is not None:
         idp_tracking = {**idp_tracking, "page_count": page_count}
     first = sections[0] if sections else {}
-    fields = first.get("fields", {}) or {}
-
-    # None, not "", when the document printed no date of any kind: absence is what `search_notices`
-    # reports as `fields_unavailable`, whereas a blank string is a value and reads as a date the
-    # extractor resolved to nothing.
-    #
-    # ⚠️ Do NOT reach for `idp_tracking["initial_event_time"]` here. It is a PROCESSING timestamp and
-    # this field is an ISSUE date; the substitution makes a stale notice appear to fall inside a recent
-    # date window, and `_matches` compares a present date as a real one, so nothing reports it. Ingest
-    # time is stored under its own name for readers that want it.
-    notice_date = str(fields.get("notice_date") or fields.get("value_date") or "") or None
 
     # None when the per-section counts could not be read AND IDP's own field is NULL. Propagated as
     # None on purpose: the interceptor refuses a write it cannot evaluate, and a defaulted number
@@ -286,14 +262,12 @@ def idp_event_to_notice(
         notice_class=first.get("classification") or "unclassified",
         # A GSI hash key cannot be blank. "unknown" keeps an unattributable notice retrievable by
         # notice_id and by reference-index rather than failing the whole extraction over a name.
-        counterparty=str(fields.get("counterparty") or fields.get("borrower") or "unknown"),
-        notice_date=notice_date,
-        reference=_opt(fields, "reference"),
-        # ⚠️ The three extracted fields above are the complete set this mapper reads by name, and they
-        # are read only because they are DynamoDB index key attributes. Do not add a fourth: every
-        # extracted field is carried verbatim in `idp_sections` below, `search_notices` resolves filters
-        # against it, and a name added here is one recon must keep in step with a configuration in
-        # another repository. See PROMOTED_EXTRACTED_FIELDS in backend/recon_core/notices.py.
+        # ⚠️ THIS MAPPER READS NO EXTRACTED FIELD BY NAME, and must not start. `notice_class` above is
+        # the pipeline's own classification of the document, not extracted content. Everything the
+        # extractor read goes into `idp_sections` verbatim, and `search_notices` resolves filters against
+        # it -- so a field the pipeline adds or renames needs no change here. A name added back is one
+        # recon must keep in step with a configuration in another repository, and when it drifts the value
+        # lands under a key nothing reads while extraction still scores well.
         #
         # Derived from THIS writer's own context, never extracted and never caller-supplied. Constant
         # on the document path: the source is not the structured feed, and extraction did the parse.

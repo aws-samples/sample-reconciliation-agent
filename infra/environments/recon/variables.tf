@@ -254,3 +254,14 @@ variable "online_evals_enabled" {
   type        = bool
   default     = true
 }
+
+variable "max_concurrent_investigations" {
+  description = <<-EOT
+    Ceiling on simultaneous Tier-2 agent investigations, applied as reserved concurrency on the
+    agent-worker Lambda. This is the Bedrock TPM budget expressed as Lambda concurrency, not a
+    performance knob — see the tier1 module variable for the derivation and for both bounds (upper
+    ~28 from the token quota, lower 14 from the async queue's 6h retention).
+  EOT
+  type        = number
+  default     = 14
+}

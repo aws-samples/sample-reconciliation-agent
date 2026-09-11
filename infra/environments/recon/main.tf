@@ -287,6 +287,11 @@ module "tier1" {
   agent_backend_param          = module.foundation.agent_backend_param
   agent_model_id_param         = module.foundation.agent_model_id_param
 
+  # Ceiling on simultaneous Tier-2 investigations — the Bedrock TPM budget as Lambda concurrency.
+  # Bounded on both sides (see the module variable): too high throttles the model, too low lets a
+  # burst outlive the async queue's retention.
+  max_concurrent_investigations = var.max_concurrent_investigations
+
   # Deterministic Tier-1 toggle read at runtime.
   tier1_enabled_param     = module.foundation.tier1_enabled_param
   tier1_enabled_param_arn = module.foundation.tier1_enabled_param_arn
@@ -534,8 +539,59 @@ module "lambda_logs" {
     "${var.name_prefix}-tier1",
     "${var.name_prefix}-agent-worker",
     "${var.name_prefix}-recon-status",
+    module.tier2_dispatch.dispatch_function_name,
+    module.tier2_dispatch.collect_function_name,
+    module.tier2_dispatch.case_step_function_name,
     module.api.skills_function_name,
   ]
+}
+
+# Tier-2 async dispatch: the map run that decides WHEN and HOW MANY investigations happen.
+# The Tier-1 stream consumer only opens the case PENDING; this bounds the rest.
+module "tier2_dispatch" {
+  source = "../../modules/tier2-dispatch"
+
+  name_prefix        = var.name_prefix
+  lambda_zip         = module.lambda_package.zip_path
+  lambda_source_hash = module.lambda_package.source_code_hash
+
+  agent_runtime_arn         = module.recon_agent.runtime_arn
+  agent_worker_function_arn = module.tier1.worker_function_arn
+
+  cases_table     = module.foundation.cases_table
+  cases_table_arn = module.foundation.cases_table_arn
+  audit_table     = module.foundation.audit_table
+  audit_table_arn = module.foundation.audit_table_arn
+
+  # The run's collected PENDING list. Reuses the assets bucket rather than adding one: it is already
+  # the platform's own private object store, and these objects are transient run inputs.
+  runs_bucket     = module.foundation.assets_bucket
+  runs_bucket_arn = module.foundation.assets_bucket_arn
+
+  # Read ONCE per run by the collect step, so a run cannot straddle a mid-run backend switch.
+  agent_backend_param = module.foundation.agent_backend_param
+
+  # Same ingress-gateway posture as the blocking worker, so agent traffic keeps one audited entry point.
+  use_ingress_gateway = true
+  ingress_gateway_url = module.recon_agent.ingress_gateway_url
+  ingress_gateway_arn = module.recon_agent.ingress_gateway_arn
+
+  # THE concurrency bound for the runtime backend. Kept equal to the worker's reserved concurrency:
+  # same Bedrock quota, two mechanisms, and they must not disagree.
+  max_concurrent_investigations = var.max_concurrent_investigations
+
+  # Poll every 5 minutes rather than running on the customer's 12:00/14:00 batch windows, so an
+  # escalation is picked up promptly and the platform still behaves roughly as it did when Tier-1
+  # dispatched directly. 5 minutes is the added latency that buys the concurrency bound.
+  #
+  # Overlap is expected and is handled INSIDE the run, not by the cadence: MaxConcurrency is enforced
+  # per Map Run, so the collect step refuses to collect while another execution is in flight. Without
+  # that guard a 5-minute schedule against longer runs would stack runs and multiply the token budget.
+  schedule_enabled    = true
+  schedule_expression = "rate(5 minutes)"
+
+  vpc_subnet_ids         = local.vpc_subnets
+  vpc_security_group_ids = local.vpc_sgs
 }
 
 # AgentCore runtime observability: OTEL application logs -> CloudWatch + traces -> X-Ray.

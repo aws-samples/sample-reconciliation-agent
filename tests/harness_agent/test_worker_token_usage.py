@@ -12,6 +12,8 @@ Uses the same injected invoke transport as ``test_worker_loop.py`` plus moto for
 import inspect
 from decimal import Decimal
 
+import time
+
 import boto3
 from moto import mock_aws
 
@@ -160,6 +162,7 @@ def _run(turns, *, model_id=BLUEPRINT_DEFAULT_MODEL, threshold=0.6):
         threshold=threshold,
         write_transport=lambda _t, _a: {"content": []},
         model_id=model_id,
+        deadline=time.monotonic() + 900.0,
     )
 
 
