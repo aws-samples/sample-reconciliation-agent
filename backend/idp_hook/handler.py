@@ -26,7 +26,7 @@ from backend.idp_hook.idp_output import IdpOutputReader
 from backend.idp_hook.mapper import idp_event_to_notice
 from backend.idp_hook.tracking import build_tracking_snapshot
 from backend.recon_core.notice_derive import PARSE_METHOD_IDP
-from backend.recon_core.notice_index import NoticeSearchIndex, flatten_sections
+from backend.recon_core.notice_index import NoticeSearchIndex, indexable_fields
 from backend.recon_core.notices import NoticeStore
 
 logger = logging.getLogger()
@@ -234,7 +234,7 @@ def handle(event, _context) -> dict:
     # Documents tab.
     indexed = NoticeSearchIndex(table_name=os.environ["NOTICE_SEARCH_TABLE"]).reindex(
         notice_id=notice.notice_id,
-        fields=flatten_sections(notice.idp_sections),
+        fields=indexable_fields(notice.model_dump()),
     )
     logger.info(
         "idp-hook wrote notice_id=%s class=%s postings=%d",
