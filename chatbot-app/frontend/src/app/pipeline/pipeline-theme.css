@@ -1,0 +1,241 @@
+/* ============================================================================
+   Deal Pipeline console — scoped "instrument" theme.
+   A precision operations terminal: near-black surfaces, hairline rules,
+   monospaced numerics, signal-color status pills and confidence chips.
+   All rules are scoped under .pipeline-root so the rest of the app is untouched.
+   ============================================================================ */
+
+.pipeline-root {
+  --dp-bg: #0a0b0d;
+  --dp-panel: #101216;
+  --dp-panel-2: #15181d;
+  --dp-line: #22262e;
+  --dp-line-soft: #1a1d23;
+  --dp-ink: #e7ebf0;
+  --dp-ink-dim: #8b93a1;
+  --dp-ink-faint: #5b626f;
+
+  /* signal palette */
+  --dp-cyan: #3ad6c5;
+  --dp-amber: #f2b45c;
+  --dp-red: #f2624f;
+  --dp-green: #57d08a;
+  --dp-violet: #9a8cf5;
+
+  --dp-font-display: var(--font-chivo), "Arial Narrow", sans-serif;
+  --dp-font-mono: var(--font-plex-mono), ui-monospace, monospace;
+
+  background: var(--dp-bg);
+  color: var(--dp-ink);
+  min-height: 100vh;
+  /* faint grid texture for atmosphere */
+  background-image:
+    linear-gradient(var(--dp-line-soft) 1px, transparent 1px),
+    linear-gradient(90deg, var(--dp-line-soft) 1px, transparent 1px);
+  background-size: 44px 44px;
+  background-position: -1px -1px;
+}
+
+.pipeline-root ::selection {
+  background: var(--dp-cyan);
+  color: #04120f;
+}
+
+/* --- typographic helpers --- */
+.dp-mono {
+  font-family: var(--dp-font-mono);
+  font-feature-settings:
+    "tnum" 1,
+    "zero" 1;
+}
+.dp-display {
+  font-family: var(--dp-font-display);
+  letter-spacing: -0.02em;
+  text-transform: uppercase;
+}
+.dp-eyebrow {
+  font-family: var(--dp-font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--dp-ink-faint);
+}
+.dp-tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- surfaces --- */
+.dp-panel {
+  background: linear-gradient(180deg, var(--dp-panel) 0%, var(--dp-bg) 140%);
+  border: 1px solid var(--dp-line);
+  border-radius: 4px;
+}
+.dp-hairline {
+  border-color: var(--dp-line);
+}
+
+/* --- status pill --- */
+.dp-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--dp-font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+}
+.dp-pill::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 6px 0 currentColor;
+}
+
+/* --- row hover for tables --- */
+.dp-row {
+  transition:
+    background 140ms ease,
+    border-color 140ms ease;
+}
+.dp-row:hover {
+  background: var(--dp-panel-2);
+}
+
+/* --- entrance animation (staggered) --- */
+@keyframes dp-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.dp-rise {
+  animation: dp-rise 480ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* --- scan line accent on panels --- */
+.dp-scan {
+  position: relative;
+  overflow: hidden;
+}
+.dp-scan::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: linear-gradient(180deg, transparent, var(--dp-cyan), transparent);
+  opacity: 0.5;
+}
+
+/* --- live status pill: the dot breathes while a record is still moving --- */
+@keyframes dp-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 6px 0 currentColor;
+  }
+  50% {
+    opacity: 0.35;
+    box-shadow: 0 0 1px 0 currentColor;
+  }
+}
+.dp-pill.live::before {
+  animation: dp-pulse 1.2s ease-in-out infinite;
+}
+
+/* --- confidence chip (high / medium / low), coloured by currentColor like the pill --- */
+.dp-chip {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--dp-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+  line-height: 1.5;
+}
+
+/* --- line diff (skill proposals) --- */
+.dp-diff-line {
+  display: grid;
+  grid-template-columns: 1.25rem 1fr;
+  gap: 0.5rem;
+  padding: 0 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.dp-diff-line.add {
+  background: color-mix(in srgb, var(--dp-green) 14%, transparent);
+  color: var(--dp-green);
+}
+.dp-diff-line.del {
+  background: color-mix(in srgb, var(--dp-red) 14%, transparent);
+  color: var(--dp-red);
+}
+.dp-diff-line.same {
+  color: var(--dp-ink-dim);
+}
+
+/* --- chat bubbles --- */
+.dp-bubble {
+  border: 1px solid var(--dp-line);
+  border-radius: 4px;
+  padding: 10px 14px;
+  max-width: 85%;
+}
+.dp-bubble.user {
+  margin-left: auto;
+  background: var(--dp-panel-2);
+  border-color: var(--dp-cyan);
+}
+.dp-bubble.assistant {
+  margin-right: auto;
+  background: var(--dp-panel);
+}
+.dp-prose p + p,
+.dp-prose ul + p,
+.dp-prose p + ul,
+.dp-prose pre + p,
+.dp-prose p + pre {
+  margin-top: 0.6em;
+}
+.dp-prose ul {
+  list-style: disc;
+  padding-left: 1.25em;
+}
+.dp-prose ol {
+  list-style: decimal;
+  padding-left: 1.25em;
+}
+.dp-prose code {
+  font-family: var(--dp-font-mono);
+  font-size: 0.92em;
+  background: var(--dp-panel-2);
+  border: 1px solid var(--dp-line);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.dp-prose pre {
+  font-family: var(--dp-font-mono);
+  font-size: 12px;
+  background: var(--dp-panel-2);
+  border: 1px solid var(--dp-line);
+  border-radius: 3px;
+  padding: 8px 10px;
+  overflow-x: auto;
+}
+.dp-prose pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+}

@@ -1,0 +1,15 @@
+# Copy to terraform.tfvars and adjust. terraform.tfvars is gitignored.
+#
+# Every variable has a default, so an empty terraform.tfvars (or none at all) deploys the demo
+# exactly as docs/deal-pipeline-design.md describes it. Override only what you need.
+region      = "us-east-1"
+name_prefix = "deal-pipeline-dev"
+
+# Seed for the parser model (the Config tab changes it at runtime) and the assistant's model.
+# agent_model_id  = "us.anthropic.claude-sonnet-5"
+
+# Model AgentCore Memory uses to extract edge-case rules. Pinned separately on purpose.
+# memory_model_id = "us.anthropic.claude-sonnet-5"
+
+# Lambda log retention in days.
+# log_retention_days = 14

@@ -1,10 +1,10 @@
-// Parse/validate a SKILL.md's `--- key: value --- body` frontmatter. Mirrors the Python
-// skills_loader._parse so the UI catalog matches what the agent reads from S3.
+// Parse/validate a SKILL.md's `--- key: value --- body` frontmatter. Mirrors the parsing
+// agent's Python skills loader so the Skills tab catalog matches what the agent reads from S3.
 
 export interface SkillMeta {
   name: string;
   description: string;
-  // Gateway tools the skill uses (frontmatter `tools: [a, b]`).
+  // Tools the skill expects the agent to have (frontmatter `tools: [a, b]`).
   tools: string[];
   // Optional per-skill model override (frontmatter `model:`), else null.
   model: string | null;

@@ -1,5 +1,5 @@
 variable "backend_dir" {
-  description = "Absolute path to the backend/ source directory to package."
+  description = "Path to the backend/ source directory to package (absolute, or relative to the directory terraform runs in)."
   type        = string
 }
 
@@ -12,36 +12,23 @@ variable "name" {
 variable "runtime_dependencies" {
   description = "Third-party pip deps to vendor into the zip. boto3/botocore are provided by the Lambda runtime and must NOT be listed here."
   type        = list(string)
-  # One list for every backend Lambda, because local.staging_dir is "${path.module}/.build/staging"
-  # and path.module is the module SOURCE directory — shared by every instance. A second instance
-  # of this module with its own dependency set would stage into the same directory and rm -rf the
-  # first one's work. So a Lambda that needs a dependency adds it here, and every zip grows.
+  # Empty by default because the two deal-pipeline Lambdas use boto3 (supplied by the runtime)
+  # and the standard library only; with an empty list stage.sh never calls pip. A Lambda that
+  # grows a real dependency adds it here, and stage.sh installs it as a wheel for var.lambda_platform.
   #
-  # PyYAML: backend/recon_core/skill_meta.py parses SKILL.md frontmatter as real YAML.
-  # extract-msg, reportlab: backend/email_preprocess reads Outlook .msg containers and renders
-  # email bodies to PDF, because neither upload destination can read an email.
+  # One list for every Lambda, because local.staging_dir is "${path.module}/.build/staging" and
+  # path.module is the module SOURCE directory — shared by every instance. A second instance of
+  # this module with its own dependency set would stage into the same directory and rm -rf the
+  # first one's work.
   #
-  # Changing this list alters local.stage_hash, so the shared zip is rebuilt and every backend
-  # Lambda gets a new source_code_hash on the next apply — in-place updates, no deletes.
+  # Changing this list alters local.stage_hash, so the zip is rebuilt and both Lambdas get a new
+  # source_code_hash on the next apply — in-place updates, no deletes.
   #
-  # This list is duplicated in .gitlab-ci.yml's pre-plan staging call, which passes it as
-  # arguments to stage.sh. The two MUST agree: archive_file reads the staging directory at PLAN
-  # time, so whatever CI staged is what ships, and terraform_data.stage's hash will already match
-  # at apply time and not re-stage to correct it. They drifted once already — CI was missing
-  # PyYAML — and nothing caught it because the zip only rebuilds when the sources change.
-  # red-black-tree-mod is listed although nothing imports it. extract-msg depends on it, and it
-  # is published as a source distribution only -- which the platform-pinned pip install in
-  # stage.sh cannot install, because --platform forces --only-binary=:all:. stage.sh builds a
-  # wheel for any listed requirement that lacks one, and it can only see requirements that are
-  # listed, so a transitive sdist-only package has to be named here to be reachable. Pinned
-  # inside extract-msg 0.56.1's own >=1.20,<=1.23 range.
-  default = [
-    "pydantic==2.13.0",
-    "PyYAML==6.0.3",
-    "extract-msg==0.56.1",
-    "reportlab==5.0.1",
-    "red-black-tree-mod==1.22",
-  ]
+  # A dependency that is published as a source distribution only cannot be installed by the
+  # platform-pinned pip in stage.sh (--platform forces --only-binary=:all:). stage.sh builds a
+  # wheel for any LISTED requirement that lacks one, and it can only see requirements that are
+  # listed, so a transitive sdist-only package has to be named here as well to be reachable.
+  default = []
 }
 
 variable "lambda_platform" {
