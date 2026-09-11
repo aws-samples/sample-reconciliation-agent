@@ -23,7 +23,9 @@ import pytest
 from moto import mock_aws
 
 from backend.recon_core.notice_index import (
+    ALL_FIELD,
     NoticeSearchIndex,
+    RESERVED_PREFIX,
     SEP,
     flatten_sections,
     indexable_fields,
@@ -128,7 +130,11 @@ def test_a_number_too_large_to_encode_falls_back_to_text() -> None:
 
 def test_postings_carry_the_unencoded_value() -> None:
     """A reader must be able to show what the document said without inverting a lossy encoding."""
-    items = list(postings_for(notice_id="n1", fields={"counterparty": "CINDERMOOR Ltd"}))
+    items = [
+        i
+        for i in postings_for(notice_id="n1", fields={"counterparty": "CINDERMOOR Ltd"})
+        if i["search_field"] != ALL_FIELD
+    ]
     assert len(items) == 1
     assert items[0]["raw_value"] == "CINDERMOOR Ltd"
     assert items[0]["notice_id"] == "n1"
@@ -300,9 +306,10 @@ def test_reindexing_is_idempotent() -> None:
     index = NoticeSearchIndex(table_name=TABLE)
     fields = {"counterparty": "CINDERMOOR LTD", "amount": "100.00", "cusip": "12345AB6"}
 
-    assert index.reindex(notice_id="n1", fields=fields) == 3
+    # 3 field postings + the all-notices posting.
+    assert index.reindex(notice_id="n1", fields=fields) == 4
     first = table.scan()["Count"]
-    assert index.reindex(notice_id="n1", fields=fields) == 3
+    assert index.reindex(notice_id="n1", fields=fields) == 4
     assert table.scan()["Count"] == first
 
 
@@ -324,7 +331,7 @@ def test_a_batch_larger_than_dynamodbs_limit_is_written_whole() -> None:
     index = NoticeSearchIndex(table_name=TABLE)
     fields = {f"field_{i:02d}": f"value_{i:02d}" for i in range(60)}
 
-    assert index.reindex(notice_id="n1", fields=fields) == 60
+    assert index.reindex(notice_id="n1", fields=fields) == 61  # 60 fields + all-notices
     assert index.notice_ids_for(field="field_42", equals="value_42") == {"n1"}
 
 
@@ -359,3 +366,74 @@ def test_a_decimal_value_indexes_the_same_as_its_string(monkeypatch: pytest.Monk
     index.reindex(notice_id="n-dec", fields={"amount": Decimal("150800000.0")})
 
     assert index.notice_ids_for(field="amount", equals="150800000.0") == {"n-str", "n-dec"}
+
+
+# --- absence, which is what makes a generic soft filter possible ------------------------------------
+
+
+@mock_aws
+def test_the_notices_lacking_a_field_are_computable() -> None:
+    """The construction the whole generic reader rests on, asserted directly.
+
+    A posting list holds only the notices that DO carry a field, so absence is not expressible in it.
+    `all_notice_ids() - notice_ids_with_field(X)` is its complement, and that is what lets a filter stay
+    SOFT -- a notice missing the field annotated rather than excluded -- without naming any extracted
+    field in code.
+    """
+    _make_table()
+    index = NoticeSearchIndex(table_name=TABLE)
+    index.reindex(notice_id="n-full", fields={"counterparty": "A LTD", "cusip": "X1"})
+    index.reindex(notice_id="n-bare", fields={"counterparty": "B LTD"})
+
+    assert index.all_notice_ids() == {"n-full", "n-bare"}
+    assert index.notice_ids_with_field(field="cusip") == {"n-full"}
+    assert index.all_notice_ids() - index.notice_ids_with_field(field="cusip") == {"n-bare"}
+
+
+@mock_aws
+def test_a_notice_that_extracted_nothing_still_joins_the_all_partition() -> None:
+    """Otherwise `all - present(X)` under-reports, and a soft filter EXCLUDES a row it must annotate.
+
+    A fieldless notice is real: the corpus fax cover carries a counterparty and an agent bank and nothing
+    a filter is likely to name. It has to be in `all` or it silently disappears from every filtered search
+    rather than coming back annotated.
+    """
+    _make_table()
+    index = NoticeSearchIndex(table_name=TABLE)
+    assert index.reindex(notice_id="n-empty", fields={}) == 1  # the all-notices posting alone
+
+    assert index.all_notice_ids() == {"n-empty"}
+    assert index.notice_ids_with_field(field="cusip") == set()
+
+
+@mock_aws
+def test_the_soft_filter_construction_reproduces_annotate_dont_exclude() -> None:
+    """End to end: the set algebra `search_notices` will use, on notices with mixed field coverage.
+
+    `n-other` carries a DIFFERENT activity_type and must be excluded -- a real mismatch. `n-none` carries
+    none and must be kept. Getting this backwards is the fail-quiet outcome: the consolidated-wire case
+    disappears from exactly the query meant to find it.
+    """
+    _make_table()
+    index = NoticeSearchIndex(table_name=TABLE)
+    index.reindex(notice_id="n-match", fields={"activity_type": "Rollover"})
+    index.reindex(notice_id="n-other", fields={"activity_type": "Interest"})
+    index.reindex(notice_id="n-none", fields={"amount": "1.00"})
+
+    matched = index.notice_ids_for(field="activity_type", equals="Rollover")
+    lacking = index.all_notice_ids() - index.notice_ids_with_field(field="activity_type")
+
+    assert matched == {"n-match"}
+    assert lacking == {"n-none"}
+    assert (matched | lacking) == {"n-match", "n-none"}
+
+
+def test_a_field_using_recons_reserved_prefix_is_rejected() -> None:
+    """Silent collision would make every notice look like it matched everything.
+
+    A field literally named `#all` would merge its postings into the all-notices partition, so
+    `all_notice_ids()` would return notices keyed by that field's VALUES. Raising is the only safe
+    response -- recon cannot store the field, and pretending otherwise corrupts every soft filter.
+    """
+    with pytest.raises(ValueError, match="reserved prefix"):
+        list(postings_for(notice_id="n1", fields={f"{RESERVED_PREFIX}all": "v"}))

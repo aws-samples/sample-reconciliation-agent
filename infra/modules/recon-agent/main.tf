@@ -1326,6 +1326,11 @@ resource "aws_bedrockagentcore_gateway_target" "notices" {
                 description = "What the notice REPORTS: Interest, Rateset, Rollover, Commitment Fee, Paydown. A different axis from notice_class. A notice carrying none is still returned, with activity_type in fields_unavailable."
               }
               property {
+                name        = "require"
+                type        = "string"
+                description = "Comma-separated field names to match EXACTLY, e.g. \"reference\". A notice not carrying a required field is EXCLUDED. Omit it for corroboration: by default a notice whose class never extracts the field is returned with that field named in fields_unavailable, which is NOT a non-match. Use it for identity lookups (a wire reference, a CUSIP), where returning every notice that merely lacks the field would bury the one that matched."
+              }
+              property {
                 name        = "limit"
                 type        = "integer"
                 description = "Max rows (default 25, cap 100)."

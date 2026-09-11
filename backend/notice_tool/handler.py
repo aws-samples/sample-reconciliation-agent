@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 
 import boto3
-from boto3.dynamodb.conditions import Key
+
+from backend.recon_core.notice_index import NoticeSearchIndex
 
 # DynamoDB page/result cap. Matches backend/gl_tool/handler.py so the two tools agree.
 MAX_LIMIT = 100
@@ -24,7 +25,7 @@ MAX_LIMIT = 100
 # silently unfilterable. The rule this module follows: recon may hardcode names IT owns; it may never
 # hardcode names the extraction configuration owns.
 CONTROL_PARAMS = frozenset(
-    {"amount", "amount_tolerance", "date_from", "date_to", "limit", "notice_date"}
+    {"amount", "amount_tolerance", "date_from", "date_to", "limit", "notice_date", "require"}
 )
 
 # Recon's own structural attributes on a notice row. Everything else a row carries is extracted
@@ -150,17 +151,14 @@ def _as_decimal(value: object) -> Decimal | None:
 class QueryPlan:
     """How a search_notices call will be executed against recon-notices."""
 
-    index_name: str | None
-    key_field: str | None
-    key_value: str
-    is_scan: bool
-    has_date_range: bool
+    # Fields the caller wants matched EXACTLY. Everything else stays soft -- see `plan_query`.
+    required_fields: frozenset[str]
     date_from: str
     date_to: str
     amount_low: Decimal | None
     amount_high: Decimal | None
     limit: int
-    # Hints that could not become key conditions and are applied as filter expressions instead.
+    # Equality filters `plan_query` normalised; `handle` collects the rest straight off the event.
     filtered_fields: dict[str, str] = field(default_factory=dict)
 
 
@@ -190,12 +188,13 @@ def plan_query(
     date_to: str = "",
     notice_class: str = "",
     activity_type: str = "",
+    require: str = "",
     limit: int = 25,
 ) -> QueryPlan:
-    """Choose the access path and filters for a search_notices call.
+    """Normalise a search_notices call into bounds, filters and a row cap.
 
-    Priority: ``reference`` (most selective) -> ``counterparty`` -> a marked full Scan. Any hint
-    that does not become a key condition is applied as a filter instead, never dropped.
+    No access path is chosen here any more. Every filter is resolved through the notice search index by
+    `_candidate_ids`, uniformly and by no particular field name.
 
     :param counterparty: exact counterparty name as extracted from the notice.
     :param fund: fund label; always a filter, because alias resolution is not an equality match.
@@ -208,6 +207,10 @@ def plan_query(
     :param activity_type: the business activity (Interest / Rateset / Rollover / Commitment Fee /
         Paydown); always a filter, never a key condition, and class-dependent — an aggregated advice
         legitimately carries none, so filtering on it annotates such a row rather than excluding it.
+    :param require: comma-separated field names to match EXACTLY -- a notice not carrying one is
+        excluded rather than annotated. Empty (the default) leaves every filter soft, which is the
+        contract: a field a notice's class does not extract is reported, not treated as a non-match.
+        The caller names the fields, so no field name is hardcoded by honouring this.
     :param limit: caller's requested row cap, clamped to [1, MAX_LIMIT].
     :returns: the plan describing index, key condition, filters and amount band.
     :raises ValueError: when a tolerance is given without an amount, or a numeric field will not
@@ -233,28 +236,13 @@ def plan_query(
         if value:
             filtered[name] = value
 
-    if reference:
-        index_name, key_field, key_value = "reference-index", "reference", reference
-        if counterparty:
-            filtered["counterparty"] = counterparty
-        has_date_range = False
-    elif counterparty:
-        index_name, key_field, key_value = "counterparty-index", "counterparty", counterparty
-        has_date_range = bool(date_from or date_to)
-    else:
-        index_name, key_field, key_value = None, None, ""
-        has_date_range = False
-
-    # Dates that cannot be a range key condition must still constrain the result set.
-    if (date_from or date_to) and not has_date_range:
-        filtered["notice_date"] = f"{date_from or '*'}..{date_to or '*'}"
+    # Ordinary equality filters. They were singled out only because they were the two GSI key candidates.
+    for name, value in (("counterparty", counterparty), ("reference", reference)):
+        if value:
+            filtered[name] = value
 
     return QueryPlan(
-        index_name=index_name,
-        key_field=key_field,
-        key_value=key_value,
-        is_scan=index_name is None,
-        has_date_range=has_date_range,
+        required_fields=frozenset(f.strip() for f in require.split(",") if f.strip()),
         date_from=date_from,
         date_to=date_to,
         amount_low=amount_low,
@@ -264,6 +252,121 @@ def plan_query(
         limit=max(1, min(int(25 if limit is None else limit), MAX_LIMIT)),
         filtered_fields=filtered,
     )
+
+
+def _search_index(*, ddb=None) -> NoticeSearchIndex:
+    """Bind to the notice search index.
+
+    :param ddb: injectable Table stand-in; the real table is resolved when None.
+    :returns: the index.
+    :raises KeyError: when NOTICE_SEARCH_TABLE is unset. No default: searching a table that does not
+        exist reports "found nothing", which is indistinguishable from a real empty result.
+    """
+    name = os.environ["NOTICE_SEARCH_TABLE"]
+    return (
+        NoticeSearchIndex(table_name=name, ddb=ddb) if ddb else NoticeSearchIndex(table_name=name)
+    )
+
+
+def _candidate_ids(
+    *, index: NoticeSearchIndex, hints: dict[str, str], plan: QueryPlan, table
+) -> set[str]:
+    """The notices satisfying every filter, where "satisfying" includes NOT CARRYING the field.
+
+    This is the whole reason the reader needs no extracted field name. Each filter contributes::
+
+        ids(field == value)  UNION  ( all_notices - notices_carrying(field) )
+
+    and the contributions are INTERSECTED. The union arm is what keeps a filter soft: a notice missing the
+    field is kept and annotated by `_unavailable`, while one carrying a DIFFERENT value is excluded, which
+    is exactly `_matches`' rule applied through the index instead of in memory.
+
+    ⚠️ Uniformly soft, deliberately. The GSI access path made `counterparty`/`reference` HARD, but that
+    was an artifact of them being key conditions, not intended semantics -- `_matches` has always treated
+    every hint softly. Making them soft here is more faithful to the contract, not less, and it is what
+    removes the last field names from this module.
+
+    An earlier attempt picked the single smallest posting list instead. It silently dropped every notice
+    lacking a filtered field, because a posting list cannot express absence; do not reintroduce it.
+
+    :param index: the search index.
+    :param hints: the caller's equality filters, field name to value.
+    :param plan: the query plan, for the date window and amount band.
+    :param table: the notices table, read ONLY to tell an empty index from an empty corpus.
+    :returns: the candidate notice ids. With no filters at all, every notice.
+    :raises RuntimeError: when the index is empty but notices exist. The index is the only access path,
+        so an un-built index makes EVERY search return nothing -- a total blackout that is
+        indistinguishable from "no notice matches" and would be read as fact by the agent. One extra
+        read, taken only on the empty-index path, converts that into a loud failure.
+    """
+    everything = index.all_notice_ids()
+    if not everything and table.scan(Limit=1).get("Items"):
+        raise RuntimeError(
+            "the notice search index is empty but recon-notices is not; every search would return "
+            "nothing. Run scripts/backfill_notice_search_index.py before trusting any result."
+        )
+    result = everything
+    probes: list[tuple[str, set[str]]] = []
+    for name, value in hints.items():
+        probes.append((name, index.notice_ids_for(field=name, equals=value)))
+    if plan.date_from or plan.date_to:
+        probes.append(
+            (
+                "notice_date",
+                index.notice_ids_for(
+                    field="notice_date", low=plan.date_from or None, high=plan.date_to or None
+                ),
+            )
+        )
+    if plan.amount_low is not None:
+        probes.append(
+            (
+                "amount",
+                index.notice_ids_for(
+                    field="amount", low=str(plan.amount_low), high=str(plan.amount_high)
+                ),
+            )
+        )
+    for probe_field, matched in probes:
+        if probe_field in plan.required_fields:
+            # Exact match: an identity lookup (a wire reference, an asset id) is not corroboration, and
+            # returning every notice that merely LACKS the field would bury the one that matched.
+            result &= matched
+            continue
+        lacking = everything - index.notice_ids_with_field(field=probe_field)
+        result &= matched | lacking
+    return result
+
+
+# BatchGetItem's hard ceiling on keys per request.
+_BATCH_GET_LIMIT = 100
+
+
+def _fetch(*, table, notice_ids: list[str]) -> list[dict]:
+    """Read the notices the index selected, in as few round trips as DynamoDB allows.
+
+    :param table: the notices Table resource.
+    :param notice_ids: the ids to read.
+    :returns: the raw rows. An id with no row is skipped: the index can outlive a deleted notice, which
+        is a stale posting rather than a reason to fail the whole search.
+    :raises RuntimeError: when keys remain unread after the retries. Reported rather than dropped -- a
+        silently missing row reads as a notice that did not match.
+    """
+    out: list[dict] = []
+    for start in range(0, len(notice_ids), _BATCH_GET_LIMIT):
+        keys = [{"notice_id": nid} for nid in notice_ids[start : start + _BATCH_GET_LIMIT]]
+        for _attempt in range(3):
+            if not keys:
+                break
+            resp = table.meta.client.batch_get_item(RequestItems={table.name: {"Keys": keys}})
+            out.extend(resp.get("Responses", {}).get(table.name, []))
+            keys = resp.get("UnprocessedKeys", {}).get(table.name, {}).get("Keys", [])
+        if keys:
+            raise RuntimeError(
+                f"{len(keys)} notice(s) still unread after 3 attempts; returning them would be a "
+                "silent partial answer"
+            )
+    return out
 
 
 def _unavailable(row: dict, *, referenced: set[str], plan: QueryPlan) -> list[str]:
@@ -320,6 +423,8 @@ def _matches(row: dict[str, object], *, plan: QueryPlan, hints: dict[str, str]) 
     extracted = _extracted_fields(row)
     for name, value in hints.items():
         stored = _resolve(name, row=row, extracted=extracted)
+        if stored is None and name in plan.required_fields:
+            return False
         if stored is None:
             # Absent here OR in the embedded extraction: annotate, do not exclude. A STRUCTURAL field
             # is the one case where absence is a real mismatch, and none of those is ever absent -- so
@@ -349,13 +454,14 @@ def _matches(row: dict[str, object], *, plan: QueryPlan, hints: dict[str, str]) 
     return True
 
 
-def handle(event: dict, _context, *, ddb=None) -> dict[str, object]:
+def handle(event: dict, _context, *, ddb=None, search_ddb=None) -> dict[str, object]:
     """Search extracted counterparty notices and return the matching rows.
 
     :param event: tool input — {counterparty?, fund?, reference?, amount?, amount_tolerance?,
         date_from?, date_to?, notice_class?, limit?}.
     :param _context: Lambda context, unused.
-    :param ddb: injectable DynamoDB Table stand-in (tests); the real table by default.
+    :param ddb: injectable notices Table stand-in (tests); the real table by default.
+    :param search_ddb: injectable search-index Table stand-in (tests); the real table by default.
     :returns: ``{"rows": [...], "matched_on": [...], "fields_unavailable": [...],
         "truncated": bool}``. Each row also carries its own ``fields_unavailable``.
     :raises RuntimeError: on any read failure. An empty ``rows`` list means "searched, found
@@ -371,55 +477,43 @@ def handle(event: dict, _context, *, ddb=None) -> dict[str, object]:
         date_to=event.get("date_to") or "",
         notice_class=event.get("notice_class") or "",
         activity_type=event.get("activity_type") or "",
+        require=event.get("require") or "",
         limit=event.get("limit") or 25,
     )
     table = ddb or boto3.resource("dynamodb").Table(os.environ["NOTICES_TABLE"])
-    try:
-        if plan.is_scan:
-            # No selective hint. Capped, and reported as truncated — never a silent partial answer.
-            resp = table.scan(Limit=plan.limit + 1)
-        else:
-            key_condition = Key(plan.key_field).eq(plan.key_value)
-            if plan.has_date_range and plan.date_from and plan.date_to:
-                key_condition = key_condition & Key("notice_date").between(
-                    plan.date_from, plan.date_to
-                )
-            resp = table.query(
-                IndexName=plan.index_name,
-                KeyConditionExpression=key_condition,
-                Limit=plan.limit + 1,
-            )
-    except Exception as exc:
-        # Fail loudly: the caller must be able to tell a failed read from an empty result.
-        raise RuntimeError(f"search_notices read failed: {exc}") from exc
 
     hints = {k: v for k, v in plan.filtered_fields.items() if k != "notice_date"}
-    # Every remaining input the caller sent is an equality filter on a field of that name, whatever it is
-    # called -- so a field the pipeline starts extracting is filterable with no change here, because
-    # `_matches` resolves the name through the row's embedded extraction. `filtered_fields` wins where it
-    # has an entry, since `plan_query` has already normalised those, and the key field is excluded
-    # because it became a key condition rather than a filter.
+    # Every remaining input is an equality filter on a field of that name, whatever it is called, so a
+    # field the pipeline starts extracting is filterable with no change here.
     for name, value in event.items():
-        if name in CONTROL_PARAMS or name in hints or name == plan.key_field:
+        if name in CONTROL_PARAMS or name in hints:
             continue
         if value not in (None, ""):
             hints[name] = str(value)
 
-    # Every field the caller leaned on, whether by equality or by band. This is what gets annotated per
-    # row; `hints` alone would omit the band-matched amount.
+    # Every field the caller leaned on, for per-row annotation. `hints` alone would omit the band and the
+    # window, which are bounds rather than equalities.
     referenced = set(hints)
     if plan.amount_low is not None:
         referenced.add("amount")
-    # A date bound the caller asked for, whether it became the index range key or a `_matches` bound.
-    # `hints` cannot supply this: `notice_date` is stripped from it a few lines above, and on the
-    # counterparty-index path the bound never enters `filtered_fields` at all. So without this the
-    # dateless notice `_matches` now keeps would come back with an empty `fields_unavailable` -- the
-    # agent would see a row that satisfied a date window it was never checked against.
     if plan.date_from or plan.date_to:
         referenced.add("notice_date")
 
+    try:
+        candidates = sorted(
+            _candidate_ids(index=_search_index(ddb=search_ddb), hints=hints, plan=plan, table=table)
+        )
+        # Capped BEFORE the fetch: reading every candidate to then discard all but `limit` would spend
+        # the caller's read budget on rows nobody sees. One extra so `truncated` can be honest.
+        raw_rows = _fetch(table=table, notice_ids=candidates[: plan.limit + 1])
+    except Exception as exc:
+        # Fail loudly: the caller must be able to tell a failed read from an empty result.
+        raise RuntimeError(f"search_notices read failed: {exc}") from exc
+
+    truncated_by_index = len(candidates) > plan.limit
+
     rows: list[dict[str, object]] = []
-    for raw in resp.get("Items", []):
+    for raw in raw_rows:
         if not _matches(raw, plan=plan, hints=hints):
             continue
         row = {k: v for k, v in raw.items() if k not in WITHHELD_FIELDS}
@@ -431,9 +525,8 @@ def handle(event: dict, _context, *, ddb=None) -> dict[str, object]:
         row["fields_unavailable"] = _unavailable(raw, referenced=referenced, plan=plan)
         rows.append(row)
 
-    truncated = len(rows) > plan.limit
-    key_fields = {plan.key_field} if plan.key_field else set()
-    matched_on = sorted(set(hints) | referenced | key_fields)
+    truncated = truncated_by_index or len(rows) > plan.limit
+    matched_on = sorted(set(hints) | referenced)
     return {
         "rows": rows[: plan.limit],
         "matched_on": matched_on,

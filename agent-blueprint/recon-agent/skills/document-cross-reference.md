@@ -64,10 +64,25 @@ The notice row is.
 
 1. **Find the notice row.** `search_notices` takes **no id parameter** — its only inputs are
    `counterparty`, `fund`, `reference`, `amount` with `amount_tolerance`, `date_from` / `date_to`,
-   `notice_class`, `activity_type` and `limit`. So query with the most selective hint the item gives
-   you (`reference` first, then `counterparty` narrowed by a `date_from` / `date_to` window,
+   `notice_class`, `activity_type`, `require` and `limit`. So query with the most selective hint the item
+   gives you (`reference` first, then `counterparty` narrowed by a `date_from` / `date_to` window,
    optionally `amount` with a tolerance). **Nothing on the item names a specific notice**, so no
    returned row arrives pre-confirmed: say which candidate you picked and on what.
+
+   **Use `require` when you are IDENTIFYING a notice, and omit it when you are CORROBORATING one.** A
+   filter is soft by default: a notice whose class never extracts the field comes back with that field in
+   `fields_unavailable`, which is deliberate and is not a non-match. That is what you want when checking
+   whether a candidate agrees with you. It is the wrong default for a lookup by a unique identifier — a
+   bare `reference` query also returns every notice that carries no reference at all, burying the one that
+   matched. So an identity lookup passes the field name in `require`:
+
+   ```
+   search_notices(reference="WIRE-20260302-EVG", require="reference")   # exact: 1 row or none
+   search_notices(counterparty="…", activity_type="Rollover")           # soft: absences annotated
+   ```
+
+   Never put a field in `require` that the notice class may legitimately not carry — that turns an
+   absence you were meant to report into a silent non-match.
    Read the response honestly: an empty `rows` list means searched-and-found-nothing, and
    `truncated: true` means your query was too broad to have seen every candidate — widen or re-narrow
    before concluding anything. A field this notice's class never extracts comes back in
