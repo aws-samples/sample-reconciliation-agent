@@ -7,6 +7,7 @@ import pytest
 from moto import mock_aws
 
 from backend.notice_tool.handler import handle
+from backend.recon_core.notice_index import NoticeSearchIndex, indexable_fields
 from backend.recon_core.notices import Notice, NoticeStore
 from tests.recon_core.test_notices import _document_record, _make_notices_table, _tracking_snapshot
 
@@ -22,6 +23,24 @@ def _notices_table_env(monkeypatch: pytest.MonkeyPatch) -> None:
     :returns: None.
     """
     monkeypatch.setenv("NOTICES_TABLE", "recon-notices")
+    monkeypatch.setenv("NOTICE_SEARCH_TABLE", "recon-notice-search")
+
+
+def _put(notice: Notice) -> None:
+    """Write a notice AND index it, exactly as the IDP hook does in one invocation.
+
+    ⚠️ Seeding the notices table alone is no longer enough for `search_notices` to see a row: candidates
+    come from the search index, so an unindexed notice is invisible to every search. That is the real
+    behaviour -- the hook writes both or raises -- so these fixtures mirror it rather than working around
+    it.
+
+    :param notice: the notice to write.
+    :returns: None.
+    """
+    NoticeStore(table_name="recon-notices").put(notice=notice)
+    NoticeSearchIndex(table_name="recon-notice-search").reindex(
+        notice_id=notice.notice_id, fields=indexable_fields(notice.model_dump())
+    )
 
 
 def _embedded(**fields: str) -> list[dict]:
@@ -52,8 +71,7 @@ def _seed() -> None:
 
     :returns: None.
     """
-    store = NoticeStore(table_name="recon-notices")
-    store.put(
+    _put(
         notice=Notice(
             notice_id="NTC-1",
             notice_class="wire_confirmation",
@@ -65,7 +83,7 @@ def _seed() -> None:
             confidence_alert_count=0,
         )
     )
-    store.put(
+    _put(
         notice=Notice(
             notice_id="NTC-2",
             notice_class="capital_call",  # this class extracts no facility at all
@@ -104,12 +122,44 @@ def test_amount_tolerance_matches_within_the_band() -> None:
 
 @mock_aws
 def test_searched_and_found_nothing_is_an_empty_list_not_an_error() -> None:
-    """An empty result is a successful search with no hits."""
+    """An empty result is a successful search with no hits.
+
+    `require` is what makes this an IDENTITY lookup. Without it the filter is soft by default -- the
+    contract -- so every notice merely LACKING a reference comes back annotated, which is the right
+    answer for corroboration and the wrong one for "find the notice with this wire ref".
+    """
+    _make_notices_table()
+    _seed()
+    out = handle({"reference": "WIRE-DOES-NOT-EXIST", "require": "reference"}, None)
+    assert out["rows"] == []
+    assert out["truncated"] is False
+
+
+@mock_aws
+def test_without_require_a_missing_field_is_annotated_rather_than_excluded() -> None:
+    """The other half of the pair, and the default, so the two intents cannot be confused.
+
+    Same query as above minus `require`: the notice whose class extracts no reference comes back with
+    `reference` named in `fields_unavailable`. Excluding it instead is what would hide a consolidated
+    advice from exactly the corroborating query meant to find it.
+    """
     _make_notices_table()
     _seed()
     out = handle({"reference": "WIRE-DOES-NOT-EXIST"}, None)
-    assert out["rows"] == []
-    assert out["truncated"] is False
+    ids = {r["notice_id"] for r in out["rows"]}
+    assert "NTC-2" in ids, "a notice lacking the field must be annotated, not dropped"
+    assert out["rows"][0]["fields_unavailable"] == ["reference"]
+
+
+@mock_aws
+def test_require_narrows_an_identity_lookup_to_the_carrier() -> None:
+    """`require` must keep an exact lookup exact -- the precision the GSI key condition used to give."""
+    _make_notices_table()
+    _seed()
+    soft = handle({"reference": "WIRE-20260302-EVG"}, None)
+    hard = handle({"reference": "WIRE-20260302-EVG", "require": "reference"}, None)
+    assert {r["notice_id"] for r in hard["rows"]} == {"NTC-1"}
+    assert len(soft["rows"]) > len(hard["rows"])
 
 
 @mock_aws
@@ -171,15 +221,14 @@ def test_a_row_without_an_activity_type_is_annotated_not_excluded() -> None:
     activity is excluded, because that is a real mismatch rather than an absence.
     """
     _make_notices_table()
-    store = NoticeStore(table_name="recon-notices")
     common = {
         "counterparty": "CINDERMOOR LOGISTICS HOLDINGS INC.",
         "notice_date": "2026-03-02",
         "extraction_confidence": Decimal("0.9"),
         "confidence_alert_count": 0,
     }
-    store.put(notice=Notice(notice_id="NTC-AGG", notice_class="remittance_advice", **common))
-    store.put(
+    _put(notice=Notice(notice_id="NTC-AGG", notice_class="remittance_advice", **common))
+    _put(
         notice=Notice(
             notice_id="NTC-INT",
             notice_class="wire_confirmation",
@@ -210,7 +259,6 @@ def test_a_dateless_notice_is_annotated_not_silently_excluded() -> None:
     was never actually checked against this row.
     """
     _make_notices_table()
-    store = NoticeStore(table_name="recon-notices")
     common = {
         "counterparty": "CINDERMOOR LOGISTICS HOLDINGS INC.",
         "extraction_confidence": Decimal("0.9"),
@@ -218,8 +266,8 @@ def test_a_dateless_notice_is_annotated_not_silently_excluded() -> None:
     }
     # Dateless: reachable only by the scan path while counterparty-index still keys on notice_date,
     # because DynamoDB drops an item with no range key from that index. Asserted via the scan path.
-    store.put(notice=Notice(notice_id="NTC-NODATE", notice_class="incomplete_notice", **common))
-    store.put(
+    _put(notice=Notice(notice_id="NTC-NODATE", notice_class="incomplete_notice", **common))
+    _put(
         notice=Notice(
             notice_id="NTC-DATED",
             notice_class="wire_confirmation",
@@ -247,8 +295,7 @@ def test_a_dated_notice_outside_the_window_is_still_excluded() -> None:
     the window is a real mismatch, not an absence, and must not come back.
     """
     _make_notices_table()
-    store = NoticeStore(table_name="recon-notices")
-    store.put(
+    _put(
         notice=Notice(
             notice_id="NTC-OLD",
             notice_class="wire_confirmation",
@@ -273,7 +320,6 @@ def test_a_field_only_in_idp_sections_is_filterable() -> None:
     pipeline starts extracting tomorrow is searchable tomorrow with no edit here.
     """
     _make_notices_table()
-    store = NoticeStore(table_name="recon-notices")
     common = {
         "notice_class": "wire_confirmation",
         "counterparty": "CINDERMOOR LOGISTICS HOLDINGS INC.",
@@ -281,8 +327,8 @@ def test_a_field_only_in_idp_sections_is_filterable() -> None:
         "extraction_confidence": Decimal("0.9"),
         "confidence_alert_count": 0,
     }
-    store.put(notice=Notice(notice_id="NTC-A", idp_sections=_embedded(cusip="12345AB6"), **common))
-    store.put(notice=Notice(notice_id="NTC-B", idp_sections=_embedded(cusip="99999ZZ9"), **common))
+    _put(notice=Notice(notice_id="NTC-A", idp_sections=_embedded(cusip="12345AB6"), **common))
+    _put(notice=Notice(notice_id="NTC-B", idp_sections=_embedded(cusip="99999ZZ9"), **common))
 
     out = handle({"counterparty": common["counterparty"], "cusip": "12345AB6"}, None)
 
@@ -301,7 +347,6 @@ def test_the_amount_band_resolves_from_idp_sections() -> None:
     in `_as_decimal`.
     """
     _make_notices_table()
-    store = NoticeStore(table_name="recon-notices")
     common = {
         "notice_class": "wire_confirmation",
         "counterparty": "MISTFELL FOODS CORP.",
@@ -309,10 +354,8 @@ def test_the_amount_band_resolves_from_idp_sections() -> None:
         "extraction_confidence": Decimal("0.9"),
         "confidence_alert_count": 0,
     }
-    store.put(notice=Notice(notice_id="NTC-IN", idp_sections=_embedded(amount="1000.25"), **common))
-    store.put(
-        notice=Notice(notice_id="NTC-OUT", idp_sections=_embedded(amount="8500.00"), **common)
-    )
+    _put(notice=Notice(notice_id="NTC-IN", idp_sections=_embedded(amount="1000.25"), **common))
+    _put(notice=Notice(notice_id="NTC-OUT", idp_sections=_embedded(amount="8500.00"), **common))
 
     out = handle(
         {
@@ -335,7 +378,7 @@ def test_a_field_carried_nowhere_is_still_annotated_not_excluded() -> None:
     every field name instead of six.
     """
     _make_notices_table()
-    NoticeStore(table_name="recon-notices").put(
+    _put(
         notice=Notice(
             notice_id="NTC-BARE",
             notice_class="incomplete_notice",
@@ -361,7 +404,7 @@ def test_a_promoted_attribute_wins_over_the_embedded_copy() -> None:
     the query happened to take.
     """
     _make_notices_table()
-    NoticeStore(table_name="recon-notices").put(
+    _put(
         notice=Notice(
             notice_id="NTC-BOTH",
             notice_class="wire_confirmation",
@@ -403,7 +446,7 @@ def test_per_field_confidences_are_not_returned_to_the_model() -> None:
         "mean_confidence": Decimal("0.95"),
         "alert_count": 0,
     }
-    NoticeStore(table_name="recon-notices").put(
+    _put(
         notice=Notice(
             notice_id="NTC-TRIM",
             notice_class="wire_confirmation",
@@ -434,7 +477,6 @@ def test_trimming_sections_does_not_change_what_matches() -> None:
     annotated as not carried, on a row that carries it.
     """
     _make_notices_table()
-    store = NoticeStore(table_name="recon-notices")
     common = {
         "notice_class": "wire_confirmation",
         "counterparty": "MISTFELL FOODS CORP.",
@@ -442,12 +484,8 @@ def test_trimming_sections_does_not_change_what_matches() -> None:
         "extraction_confidence": Decimal("0.9"),
         "confidence_alert_count": 0,
     }
-    store.put(
-        notice=Notice(notice_id="NTC-HIT", idp_sections=_embedded(cusip="12345AB6"), **common)
-    )
-    store.put(
-        notice=Notice(notice_id="NTC-MISS", idp_sections=_embedded(cusip="99999ZZ9"), **common)
-    )
+    _put(notice=Notice(notice_id="NTC-HIT", idp_sections=_embedded(cusip="12345AB6"), **common))
+    _put(notice=Notice(notice_id="NTC-MISS", idp_sections=_embedded(cusip="99999ZZ9"), **common))
 
     out = handle({"counterparty": "MISTFELL FOODS CORP.", "cusip": "12345AB6"}, None)
 
@@ -464,8 +502,7 @@ def test_page_images_are_never_returned_to_the_model() -> None:
     notice, not the stored row — asserted here because the withholding is invisible from the model side.
     """
     _make_notices_table()
-    store = NoticeStore(table_name="recon-notices")
-    store.put(
+    _put(
         notice=Notice(
             notice_id="NTC-PAGES",
             notice_class="wire_confirmation",
@@ -481,7 +518,7 @@ def test_page_images_are_never_returned_to_the_model() -> None:
     assert out["rows"], "the row itself must still be returned"
     assert "idp_pages" not in out["rows"][0]
     # And it IS on the stored item — otherwise this test would pass on a notice that never had one.
-    assert "idp_pages" in store.raw(notice_id="NTC-PAGES")
+    assert "idp_pages" in NoticeStore(table_name="recon-notices").raw(notice_id="NTC-PAGES")
 
 
 @mock_aws
@@ -493,8 +530,7 @@ def test_tracking_row_is_excluded_from_the_scan_path() -> None:
     """
     _make_notices_table()
     _seed()
-    store = NoticeStore(table_name="recon-notices")
-    store.put_document_record(record=_document_record())
+    NoticeStore(table_name="recon-notices").put_document_record(record=_document_record())
 
     out = handle({}, None)
     returned = {r["notice_id"] for r in out["rows"]}
@@ -514,8 +550,7 @@ def test_tracking_row_is_excluded_from_the_indexed_query_path() -> None:
     """
     _make_notices_table()
     _seed()
-    store = NoticeStore(table_name="recon-notices")
-    store.put_document_record(
+    NoticeStore(table_name="recon-notices").put_document_record(
         record=_document_record(
             notice_id="idp-inbox/2026/03/09/tracking-only.pdf",
             counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.",
@@ -549,6 +584,12 @@ def test_a_row_with_no_record_kind_attribute_is_still_returned() -> None:
             "confidence_alert_count": 0,
         }
     )
+    # Indexed separately, because `put_item` bypasses the hook. ⚠️ Not incidental: the index is now the
+    # ONLY access path, so a row missing from it is invisible to every search with no Scan fallback to
+    # catch it. Any future direct writer has to index too, or its rows silently do not exist.
+    NoticeSearchIndex(table_name="recon-notice-search").reindex(
+        notice_id="NTC-LEGACY", fields={"counterparty": "CINDERMOOR LOGISTICS HOLDINGS INC."}
+    )
 
     out = handle({"counterparty": "CINDERMOOR LOGISTICS HOLDINGS INC."}, None)
     assert {r["notice_id"] for r in out["rows"]} == {"NTC-LEGACY"}
@@ -558,13 +599,12 @@ def test_a_row_with_no_record_kind_attribute_is_still_returned() -> None:
 def test_idp_bookkeeping_fields_are_withheld_but_still_stored() -> None:
     """`record_kind`, `idp_record`, `idp_started_at` and `idp_tracking` never reach the model.
 
-    Asserted against a row that DOES carry all four (via `store.raw()`) rather than one that never
+    Asserted against a row that DOES carry all four (via `NoticeStore.raw()`) rather than one that never
     had them, so this test would fail if a future change stopped writing them instead of merely
     passing by accident.
     """
     _make_notices_table()
-    store = NoticeStore(table_name="recon-notices")
-    store.put(
+    _put(
         notice=Notice(
             notice_id="NTC-TRACKED",
             notice_class="wire_confirmation",
@@ -582,6 +622,38 @@ def test_idp_bookkeeping_fields_are_withheld_but_still_stored() -> None:
     for name in withheld:
         assert name not in row
 
-    raw = store.raw(notice_id="NTC-TRACKED")
+    raw = NoticeStore(table_name="recon-notices").raw(notice_id="NTC-TRACKED")
     for name in withheld:
         assert name in raw
+
+
+@mock_aws
+def test_an_empty_index_over_a_non_empty_table_raises_rather_than_returning_nothing() -> None:
+    """The index is the ONLY access path, so an un-built index blacks out every search silently.
+
+    Without this guard the agent gets `rows: []` for every query and reads it as fact -- the exact
+    conflation this module refuses everywhere else. A notice written straight to the table (a direct
+    writer, a restored backup, a migration that ran the notices half only) reproduces it.
+    """
+    _make_notices_table()
+    NoticeStore(table_name="recon-notices").put(
+        notice=Notice(
+            notice_id="NTC-UNINDEXED",
+            notice_class="wire_confirmation",
+            counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.",
+            notice_date="2026-03-02",
+            extraction_confidence=Decimal("0.9"),
+            confidence_alert_count=0,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="index is empty but recon-notices is not"):
+        handle({"counterparty": "CINDERMOOR LOGISTICS HOLDINGS INC."}, None)
+
+
+@mock_aws
+def test_an_empty_index_over_an_empty_table_is_an_honest_empty_result() -> None:
+    """The other side of the guard: nothing indexed and nothing stored is genuinely no match."""
+    _make_notices_table()
+    out = handle({"counterparty": "ANYONE"}, None)
+    assert out["rows"] == []

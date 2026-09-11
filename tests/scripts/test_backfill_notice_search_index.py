@@ -84,8 +84,9 @@ def test_backfill_indexes_every_extracted_field() -> None:
     counts = _run(notices, index)
 
     assert counts["notices"] == 2
-    assert counts["postings"] == 3
-    assert index.scan()["Count"] == 3
+    # 3 field postings + one all-notices posting per notice.
+    assert counts["postings"] == 5
+    assert index.scan()["Count"] == 5
     search = NoticeSearchIndex(table_name=INDEX, ddb=index)
     assert search.notice_ids_for(field="counterparty", equals="CINDERMOOR LTD") == {"n1"}
 
@@ -106,7 +107,7 @@ def test_a_tracking_only_row_is_skipped_and_counted() -> None:
     assert counts["notices"] == 1
     assert counts["tracking_rows"] == 1
     assert counts["no_fields"] == 0
-    assert index.scan()["Count"] == 1
+    assert index.scan()["Count"] == 2  # one field + the all-notices posting
 
 
 @mock_aws
@@ -150,7 +151,7 @@ def test_dry_run_writes_nothing_but_still_reports_the_real_count() -> None:
 
     counts = _run(notices, index, dry_run=True)
 
-    assert counts["postings"] == 2
+    assert counts["postings"] == 3  # two fields + the all-notices posting
     assert index.scan()["Count"] == 0
 
 
@@ -197,4 +198,4 @@ def test_the_scan_follows_pagination() -> None:
     counts = _run(notices, index)
 
     assert counts["notices"] == 120
-    assert index.scan()["Count"] == 120
+    assert index.scan()["Count"] == 240  # one field + one all-notices posting each

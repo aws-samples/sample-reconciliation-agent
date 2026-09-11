@@ -41,6 +41,20 @@ from backend.recon_core.notices import INDEX_KEY_FIELDS
 # value was `"123"`.
 SEP = "#"
 
+# The partition holding one posting per notice, used to compute "notices that do NOT carry field X" as
+# `all_notice_ids() - notice_ids_with_field(X)`. That complement is what lets `search_notices` keep a
+# filter SOFT -- a notice missing the field is annotated rather than excluded -- without naming a single
+# extracted field in code. A posting list alone cannot express absence; this partition is its complement.
+#
+# Far cheaper than the Scan it replaces: a posting is ~100 bytes against a ~5.7 KB notice row.
+ALL_FIELD = "#all"
+
+# `#` prefixes recon's own reserved partitions. Extracted field names come from the extraction
+# configuration, so collision is prevented by REJECTING such a name rather than by hoping none appears --
+# a field called `#all` would otherwise silently merge its postings into the all-notices set and make
+# every notice look like it matched everything.
+RESERVED_PREFIX = "#"
+
 # ⚠️ The separator has to be ESCAPED out of the encoded value, or a value that itself contains one
 # breaks that exactness: `"WIRE#001"` and `"WIRE"` would encode to `wire#001#n1` and `wire#n2`, and a
 # probe for `"WIRE"` (`begins_with("wire#")`) would match both. `#` occurs in real extracted references,
@@ -144,7 +158,16 @@ def postings_for(*, notice_id: str, fields: dict[str, Any]) -> Iterator[dict[str
     :param fields: the notice's extracted fields, flattened -- field name to value.
     :yields: the full item to write, key attributes plus ``notice_id`` and the un-encoded ``raw_value``.
     """
+    # The all-notices posting, written for every notice regardless of what it extracted. Its absence is
+    # not a degraded index but a WRONG one: `all - present(X)` would under-report the notices lacking X,
+    # so a soft filter would silently exclude rows it is required to annotate.
+    yield {"search_field": ALL_FIELD, "search_value": notice_id, "notice_id": notice_id}
     for field, value in fields.items():
+        if field.startswith(RESERVED_PREFIX):
+            raise ValueError(
+                f"extracted field {field!r} starts with the reserved prefix {RESERVED_PREFIX!r}; "
+                "recon uses that prefix for its own index partitions and cannot store this field"
+            )
         key = posting_key(field=field, value=value, notice_id=notice_id)
         if key is None:
             continue
@@ -314,6 +337,48 @@ class NoticeSearchIndex:
                 f"{len(pending)} search-index write(s) still unprocessed after 3 attempts on "
                 f"{self._table_name}; the index is now incomplete for this notice"
             )
+
+    def notice_ids_with_field(self, *, field: str) -> set[str]:
+        """Every notice that carries a value for one field, whatever that value is.
+
+        The whole partition, with no value condition -- a posting exists if and only if the notice
+        carried something for that field. Paired with :meth:`all_notice_ids` this yields the notices
+        LACKING the field, which is the half a posting list cannot express and the reason
+        `search_notices` can keep a filter soft without naming any field in code.
+
+        :param field: the extracted field's name.
+        :returns: the notice ids carrying it. Empty means no notice does.
+        """
+        return self._ids_in_partition(field)
+
+    def all_notice_ids(self) -> set[str]:
+        """Every notice the index knows about.
+
+        :returns: the notice ids. Empty means the index is empty -- which for a non-empty notices table
+            means the index was never built, and the caller must not read that as "nothing matches".
+        """
+        return self._ids_in_partition(ALL_FIELD)
+
+    def _ids_in_partition(self, field: str) -> set[str]:
+        """Read every notice id in one partition, following pagination.
+
+        :param field: the partition's `search_field`.
+        :returns: the notice ids.
+        """
+        out: set[str] = set()
+        kwargs: dict[str, Any] = {
+            "KeyConditionExpression": "search_field = :f",
+            "ExpressionAttributeValues": {":f": field},
+            "ProjectionExpression": "notice_id",
+        }
+        while True:
+            resp = self._table.query(**kwargs)
+            out.update(i["notice_id"] for i in resp.get("Items", []) if "notice_id" in i)
+            token = resp.get("LastEvaluatedKey")
+            if not token:
+                break
+            kwargs["ExclusiveStartKey"] = token
+        return out
 
     def notice_ids_for(
         self,
