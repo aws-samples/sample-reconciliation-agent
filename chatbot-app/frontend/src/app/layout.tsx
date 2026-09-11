@@ -4,13 +4,14 @@ import "./globals.css";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import AuthWrapper from "@/components/AuthWrapper";
 import { FontSizeProvider } from "@/components/FontSizeProvider";
+import { AppShell } from "@/components/shell/AppShell";
 
 const manrope = Manrope({ subsets: ["latin"], variable: "--font-manrope" });
 
 export const metadata: Metadata = {
-  title: "Reconciliation Workflow",
+  title: "Agentic Operations Console",
   description:
-    "Agentic reconciliation platform — triage, investigate, and resolve breaks",
+    "Trade reconciliation and deal pipeline agents behind one console",
   icons: {
     icon: "/recon-favicon.svg",
     shortcut: "/recon-favicon.svg",
@@ -46,7 +47,11 @@ export default function RootLayout({
           disableTransitionOnChange
         >
           <FontSizeProvider>
-            <AuthWrapper>{children}</AuthWrapper>
+            {/* The shell sits INSIDE the auth gate: it asks /api/me who is signed in, so it must not
+                mount before there is a session to describe. Providers stay exactly as they were. */}
+            <AuthWrapper>
+              <AppShell>{children}</AppShell>
+            </AuthWrapper>
           </FontSizeProvider>
         </ThemeProvider>
       </body>

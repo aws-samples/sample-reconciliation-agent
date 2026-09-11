@@ -11,7 +11,7 @@
  *
  * Returns no header when unauthenticated (local dev, or unconfigured builds). That is not a
  * silent failure: the server decides, and it only accepts a missing header when
- * `RECON_ALLOW_ANONYMOUS_API=true` is explicitly set.
+ * `ALLOW_ANONYMOUS_API=true` (or the older `RECON_ALLOW_ANONYMOUS_API=true`) is explicitly set.
  */
 
 import { reauthenticate } from "@/lib/reauth";

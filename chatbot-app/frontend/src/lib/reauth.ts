@@ -183,7 +183,7 @@ export async function reauthenticate(trigger: ReauthTrigger): Promise<boolean> {
     console.error(
       `[Reauth] cannot re-authenticate (${trigger}): NEXT_PUBLIC_AUTH_PROVIDER is ` +
         `"${PROVIDER}" but its issuer/client id are not configured in this build. If the API is ` +
-        `rejecting calls, the server needs RECON_ALLOW_ANONYMOUS_API=true or a real provider.`,
+        `rejecting calls, the server needs ALLOW_ANONYMOUS_API=true or a real provider.`,
     );
   }
   return started;

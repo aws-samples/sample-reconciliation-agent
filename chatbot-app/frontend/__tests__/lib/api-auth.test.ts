@@ -1,25 +1,41 @@
 /**
- * BFF authorization (live-QA P0-2). The security property under test is deny-by-default:
- * no configuration and no token must never resolve to "allowed".
+ * BFF authorization for both apps (live-QA P0-2). The security property under test is
+ * deny-by-default: no configuration and no token must never resolve to "allowed".
  *
- * Runs on the node environment, not the suite's default jsdom: this is server-side middleware
- * code, and under jsdom jose's `payload instanceof Uint8Array` check fails because the encoder
- * and the global constructor come from different realms.
+ * Runs on the node environment, not the suite's default jsdom: this is server-side proxy code, and
+ * under jsdom jose's `payload instanceof Uint8Array` check fails because the encoder and the global
+ * constructor come from different realms.
  */
 // @vitest-environment node
 
-import { describe, expect, it, beforeAll } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { SignJWT, exportJWK, generateKeyPair, type JWK } from "jose";
 
 import {
+  anonymousGroups,
   authorizeRequest,
+  isAnonymousEnabled,
   oktaJwksUri,
   resolveApiAuth,
   type ApiAuthConfig,
 } from "@/lib/api-auth";
 
+import {
+  clearAuthEnv,
+  restoreAuthEnv,
+  setAuthEnv,
+  snapshotAuthEnv,
+} from "./auth/testEnv";
+
 const ISSUER = "https://integrator-1234567.okta.com/oauth2/default";
 const CLIENT_ID = "0oaTESTclientid";
+
+/** The shell-wide switch first, then the two app-specific names it superseded. */
+const ANONYMOUS_SWITCH_NAMES = [
+  "ALLOW_ANONYMOUS_API",
+  "RECON_ALLOW_ANONYMOUS_API",
+  "PIPELINE_ALLOW_ANONYMOUS_API",
+] as const;
 
 describe("resolveApiAuth", () => {
   it("resolves okta from the runtime (non-NEXT_PUBLIC) env vars", () => {
@@ -78,16 +94,32 @@ describe("resolveApiAuth", () => {
     expect(config.reason).toContain("saml");
   });
 
-  it("only goes anonymous on the exact explicit opt-in", () => {
-    expect(resolveApiAuth({ RECON_ALLOW_ANONYMOUS_API: "true" }).mode).toBe(
-      "anonymous",
-    );
+  // One server hosts both apps, so one switch opens both. The two app-specific names predate the
+  // shell and stay so existing `.env.local` files and dev task definitions keep working unchanged.
+  it.each(ANONYMOUS_SWITCH_NAMES)("goes anonymous on %s=true", (name) => {
+    expect(resolveApiAuth({ [name]: "true" }).mode).toBe("anonymous");
+  });
+
+  it.each(ANONYMOUS_SWITCH_NAMES)("only goes anonymous on the exact string for %s", (name) => {
     // Anything other than the exact string stays locked down.
     for (const value of ["TRUE", "1", "yes", ""]) {
-      expect(resolveApiAuth({ RECON_ALLOW_ANONYMOUS_API: value }).mode).toBe(
-        "misconfigured",
-      );
+      expect(resolveApiAuth({ [name]: value }).mode).toBe("misconfigured");
     }
+  });
+
+  it("lets the anonymous switch win over a configured browser provider", () => {
+    // The normal dev setup: NEXT_PUBLIC_AUTH_PROVIDER tells the BROWSER which sign-in to render while
+    // the server is opened for local work. That is not a conflict to report as misconfigured.
+    expect(
+      resolveApiAuth({ ALLOW_ANONYMOUS_API: "true", NEXT_PUBLIC_AUTH_PROVIDER: "entra" }).mode,
+    ).toBe("anonymous");
+  });
+
+  it("names the shell-wide switch, not an app-specific one, when nothing is configured", () => {
+    const { reason } = resolveApiAuth({});
+    expect(reason).toContain("ALLOW_ANONYMOUS_API=true");
+    expect(reason).not.toContain("RECON_ALLOW_ANONYMOUS_API");
+    expect(reason).not.toContain("PIPELINE_ALLOW_ANONYMOUS_API");
   });
 
   it("falls back to NEXT_PUBLIC_* only for next dev", () => {
@@ -111,6 +143,57 @@ describe("oktaJwksUri", () => {
     expect(oktaJwksUri("https://org.okta.com")).toBe(
       "https://org.okta.com/oauth2/v1/keys",
     );
+  });
+});
+
+describe("isAnonymousEnabled", () => {
+  it("is off on an empty environment", () => {
+    expect(isAnonymousEnabled({})).toBe(false);
+  });
+
+  it.each(ANONYMOUS_SWITCH_NAMES)("is on for %s=true and only for the exact string", (name) => {
+    expect(isAnonymousEnabled({ [name]: "true" })).toBe(true);
+    expect(isAnonymousEnabled({ [name]: "True" })).toBe(false);
+    expect(isAnonymousEnabled({ [name]: "1" })).toBe(false);
+  });
+});
+
+describe("anonymousGroups", () => {
+  it("grants every configured app group when ANONYMOUS_GROUPS is unset", () => {
+    // A local run without an identity provider should see every app and every admin surface; the
+    // switch has already opened the whole BFF, so withholding the groups would buy no safety.
+    const groups = anonymousGroups({
+      RECON_ADMIN_GROUP: "recon-admin",
+      PIPELINE_ACCESS_GROUP: "deal-desk",
+      PIPELINE_ADMIN_GROUP: "deal-desk-admins",
+    });
+    expect([...groups].sort()).toEqual(["deal-desk", "deal-desk-admins", "recon-admin"]);
+  });
+
+  it("grants nothing when no app group is configured", () => {
+    expect(anonymousGroups({})).toEqual([]);
+  });
+
+  it("uses ANONYMOUS_GROUPS as the whole list when set, trimming each name", () => {
+    // The configured groups are ignored, not merged: the point is to preview a NARROWER user.
+    expect(
+      anonymousGroups({
+        ANONYMOUS_GROUPS: " deal-desk , recon-users ,",
+        RECON_ADMIN_GROUP: "recon-admin",
+      }),
+    ).toEqual(["deal-desk", "recon-users"]);
+  });
+
+  it("de-duplicates a repeated name", () => {
+    expect(anonymousGroups({ ANONYMOUS_GROUPS: "desk,desk" })).toEqual(["desk"]);
+  });
+
+  it("treats a blank ANONYMOUS_GROUPS as unset", () => {
+    // Consistent with how every other group variable is read: declared-but-empty means "not set".
+    // A caller in NO groups is previewed by naming a group no app is configured with instead.
+    expect(anonymousGroups({ ANONYMOUS_GROUPS: "  , ", RECON_ADMIN_GROUP: "recon-admin" })).toEqual([
+      "recon-admin",
+    ]);
   });
 });
 
@@ -327,28 +410,57 @@ describe("authorizeRequest", () => {
     }
   });
 
-  it("allows through in anonymous mode without a token", async () => {
-    expect(await authorizeRequest(req(), { mode: "anonymous" })).toEqual({
-      ok: true,
-      mode: "anonymous",
-      subject: "anonymous",
-      // No RECON_ADMIN_GROUP in the test environment, so no group to grant.
-      groups: [],
-    });
-  });
+  describe("anonymous mode", () => {
+    // Group names are read from process.env at call time (they are runtime deployment facts), so
+    // these cases set the real environment and put it back afterwards.
+    const saved = snapshotAuthEnv();
+    beforeEach(() => clearAuthEnv());
+    afterAll(() => restoreAuthEnv(saved));
 
-  it("grants the configured admin group in anonymous mode", async () => {
-    // `RECON_ALLOW_ANONYMOUS_API=true` already opens the whole BFF, so withholding the group here would
-    // buy no safety and would make the Config tab impossible to work on locally.
-    const saved = process.env.RECON_ADMIN_GROUP;
-    process.env.RECON_ADMIN_GROUP = "recon-admin";
-    try {
-      expect(
-        await authorizeRequest(req(), { mode: "anonymous" }),
-      ).toMatchObject({ ok: true, groups: ["recon-admin"] });
-    } finally {
-      if (saved === undefined) delete process.env.RECON_ADMIN_GROUP;
-      else process.env.RECON_ADMIN_GROUP = saved;
-    }
+    it("allows through without a token, with no groups when none are configured", async () => {
+      expect(await authorizeRequest(req(), { mode: "anonymous" })).toEqual({
+        ok: true,
+        mode: "anonymous",
+        subject: "anonymous",
+        groups: [],
+      });
+    });
+
+    it("grants every configured app group", async () => {
+      // `ALLOW_ANONYMOUS_API=true` already opens the whole BFF, so withholding the groups would buy no
+      // safety and would make both apps' admin surfaces impossible to work on locally.
+      setAuthEnv({
+        RECON_ADMIN_GROUP: "recon-admin",
+        PIPELINE_ACCESS_GROUP: "deal-desk",
+        PIPELINE_ADMIN_GROUP: "deal-desk-admins",
+      });
+      const result = await authorizeRequest(req(), { mode: "anonymous" });
+      expect(result.ok).toBe(true);
+      expect(result.ok && [...result.groups].sort()).toEqual([
+        "deal-desk",
+        "deal-desk-admins",
+        "recon-admin",
+      ]);
+    });
+
+    it("honours ANONYMOUS_GROUPS as the whole group list", async () => {
+      setAuthEnv({ ANONYMOUS_GROUPS: " recon-users ,deal-desk", RECON_ADMIN_GROUP: "recon-admin" });
+      expect(await authorizeRequest(req(), { mode: "anonymous" })).toMatchObject({
+        ok: true,
+        groups: ["recon-users", "deal-desk"],
+      });
+    });
+
+    it("resolves anonymous mode from the environment when no config is injected", async () => {
+      // The production call shape: `authorizeRequest(request)` with the config resolved from
+      // process.env at call time, which is what the proxy and every route handler do.
+      setAuthEnv({ RECON_ALLOW_ANONYMOUS_API: "true", RECON_ADMIN_GROUP: "recon-admin" });
+      expect(await authorizeRequest(req())).toEqual({
+        ok: true,
+        mode: "anonymous",
+        subject: "anonymous",
+        groups: ["recon-admin"],
+      });
+    });
   });
 });

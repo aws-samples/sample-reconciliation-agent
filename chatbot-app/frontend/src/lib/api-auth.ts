@@ -1,13 +1,23 @@
 /**
- * Server-side authorization for the reconciliation BFF (`/api/recon/*`).
+ * Server-side authorization for the shell's BFF: `/api/recon/*`, `/api/pipeline/*` and `/api/me`.
  *
- * Live QA 2026-08-09 (P0-2) found the BFF completely open: the Okta wrapper gates the UI, but
- * the API routes underneath it read and WRITE with the ECS task role, so an anonymous caller
- * could PUT the agent system prompt or approve a case (ledger write + outbound email) just by
- * hitting the URL. This module is the verifier; `src/proxy.ts` is the choke point that
- * applies it to every route under `/api/recon/` before the handler runs.
+ * Two applications share one Next.js server tier behind one app rail: Trade Reconciliation
+ * (`/api/recon`) and Deal Pipeline (`/api/pipeline`). Both act with the ECS task role, so an
+ * unauthenticated call to either one can read and WRITE production state. Live QA 2026-08-09 (P0-2)
+ * found exactly that on the recon BFF: an anonymous caller could PUT the agent system prompt or
+ * approve a case (ledger write + outbound email) just by hitting the URL. This module is the verifier
+ * that closed it; `src/proxy.ts` is the choke point that applies it to every matched route before the
+ * handler runs, and then layers per-app ACCESS on top (see `lib/auth/apps.ts`).
  *
- * Kept separate from the middleware so it is unit-testable without booting a Next.js server.
+ * The layers, from the outside in:
+ *  1. Authentication (this module): who is calling, and which groups the identity provider vouched
+ *     for. One token, one verification, shared by both apps, because the two apps are one OIDC client
+ *     on one origin.
+ *  2. App access (`lib/auth/apps.ts`, applied by the proxy): may this caller use THIS app at all.
+ *  3. App administration (`reconAdmin.ts`, `pipelineAdmin.ts`, applied inside the write routes): may
+ *     this caller change how the app behaves.
+ *
+ * Kept separate from the proxy so it is unit-testable without booting a Next.js server.
  *
  * Deliberate design points:
  *  - The browser sends its **ID token**. For an Okta OIDC app the ID token's `aud` is exactly
@@ -16,16 +26,32 @@
  *    API credential; that is acceptable here only because the BFF is this SPA's own server tier
  *    on the same origin. The hardening step is a custom Okta authorization server issuing
  *    access tokens with a dedicated audience.
- *  - A missing/incoherent configuration resolves to `misconfigured`, which the middleware turns
- *    into a **503 — never an open door**. A deploy that loses its issuer env var must break
- *    visibly rather than silently reopen the API.
+ *  - A missing/incoherent configuration resolves to `misconfigured`, which the proxy turns into a
+ *    **503 — never an open door**. A deploy that loses its issuer env var must break visibly rather
+ *    than silently reopen the API.
+ *  - Anonymous mode is ONE switch for both apps. `ALLOW_ANONYMOUS_API=true` is the name; the
+ *    app-specific `RECON_ALLOW_ANONYMOUS_API` and `PIPELINE_ALLOW_ANONYMOUS_API` are still honoured
+ *    so a checkout or a dev deployment that predates the shell keeps working, but all three mean the
+ *    same thing. There is one server process, so there is no way to leave one app open and the other
+ *    verified; pretending otherwise with two switches would only invite the misconfiguration.
+ *  - Anonymous mode grants every configured app group, so a local run sees every app as an admin
+ *    (`ANONYMOUS_GROUPS` narrows that, which is how a developer previews what a restricted user
+ *    sees). Withholding the groups would buy no safety: the switch has already opened the whole BFF.
  */
 
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { NextResponse } from "next/server";
 
+import { allConfiguredGroups } from "@/lib/auth/apps";
+
 /** How the BFF is configured to authorize callers. */
 export type ApiAuthMode = "okta" | "entra" | "anonymous" | "misconfigured";
+
+/**
+ * The modes a request can actually be authorized under. `misconfigured` never yields `ok: true`, and
+ * saying so in the type is what lets `/api/me` hand the mode to the shell's `Viewer` without a cast.
+ */
+export type VerifiedAuthMode = Exclude<ApiAuthMode, "misconfigured">;
 
 export interface ApiAuthConfig {
   mode: ApiAuthMode;
@@ -40,7 +66,7 @@ export interface ApiAuthConfig {
 }
 
 export type AuthResult =
-  | { ok: true; mode: ApiAuthMode; subject: string; groups: string[] }
+  | { ok: true; mode: VerifiedAuthMode; subject: string; groups: string[] }
   | { ok: false; status: 401 | 503; message: string };
 
 /**
@@ -59,7 +85,7 @@ export type AuthResult =
  * @param env process environment to read `AUTH_GROUPS_CLAIM` from (injected in tests).
  * @returns the caller's groups, or `[]` when the claim is absent or not a list of strings.
  */
-function groupsFrom(
+export function groupsFrom(
   payload: Record<string, unknown>,
   env: Record<string, string | undefined> = process.env,
 ): string[] {
@@ -67,6 +93,56 @@ function groupsFrom(
   const raw = payload[claim];
   if (!Array.isArray(raw)) return [];
   return raw.filter((g): g is string => typeof g === "string");
+}
+
+/**
+ * The variables that switch the BFF into anonymous mode, in the order they are documented.
+ *
+ * `ALLOW_ANONYMOUS_API` is the shell-era name. The other two are what each app used before it shared
+ * a server with the other; they stay so `.env.local` files and dev task definitions written against
+ * either app keep working unchanged. Each must be the exact string "true" — never a truthy check — so
+ * a generic `NODE_ENV`/`CI` style variable cannot flip the API open by accident.
+ */
+const ANONYMOUS_SWITCHES = [
+  "ALLOW_ANONYMOUS_API",
+  "RECON_ALLOW_ANONYMOUS_API",
+  "PIPELINE_ALLOW_ANONYMOUS_API",
+] as const;
+
+/**
+ * Whether the environment asks for anonymous mode.
+ *
+ * @param env process environment to read (injected in tests).
+ * @returns true when any of the three switches is exactly "true".
+ */
+export function isAnonymousEnabled(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return ANONYMOUS_SWITCHES.some((name) => env[name] === "true");
+}
+
+/**
+ * The groups an anonymous caller is treated as belonging to.
+ *
+ * Default is every group the app registry knows about, so a local run without an identity provider
+ * sees every app and every admin surface. `ANONYMOUS_GROUPS` (comma-separated, each name trimmed)
+ * replaces that list when it names at least one group, which is how a developer previews the shell
+ * as a restricted user: `ANONYMOUS_GROUPS=deal-desk` shows the pipeline as a plain user and hides a
+ * restricted recon app. To preview a caller in NO groups, name one that no app is configured with
+ * (`ANONYMOUS_GROUPS=nobody`); a blank value is read as "unset" because the codebase reads every
+ * other empty group variable that way too.
+ *
+ * @param env process environment to read (injected in tests).
+ * @returns the effective group list, de-duplicated.
+ */
+export function anonymousGroups(
+  env: Record<string, string | undefined> = process.env,
+): string[] {
+  const listed = (env.ANONYMOUS_GROUPS ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name !== "");
+  return listed.length > 0 ? [...new Set(listed)] : allConfiguredGroups(env);
 }
 
 /** Drop a trailing slash so `${issuer}/v1/keys` never doubles up. */
@@ -98,15 +174,17 @@ export function oktaJwksUri(issuer: string): string {
  * / `OKTA_ISSUER` / `OKTA_CLIENT_ID` at runtime. The `NEXT_PUBLIC_*` fallbacks below exist only
  * for `next dev`, which loads `.env.local` into the server process.
  *
+ * Precedence: the anonymous switch wins over a configured provider. A `.env.local` that names the
+ * provider the BROWSER should use (`NEXT_PUBLIC_AUTH_PROVIDER`) while opening the server for local
+ * work is the normal dev setup, not a conflict.
+ *
  * @param env process environment to read (injected in tests).
  * @returns the resolved config; `mode: "misconfigured"` when it cannot be trusted.
  */
 export function resolveApiAuth(
   env: Record<string, string | undefined> = process.env,
 ): ApiAuthConfig {
-  // Explicit local-dev escape hatch. Deliberately an exact "true" match on a
-  // recon-specific name so it cannot be switched on by a generic NODE_ENV/CI variable.
-  if (env.RECON_ALLOW_ANONYMOUS_API === "true") {
+  if (isAnonymousEnabled(env)) {
     return { mode: "anonymous" };
   }
 
@@ -156,7 +234,7 @@ export function resolveApiAuth(
     mode: "misconfigured",
     reason: provider
       ? `unsupported AUTH_PROVIDER "${provider}" (expected "okta" or "entra")`
-      : "AUTH_PROVIDER is unset — set it, or set RECON_ALLOW_ANONYMOUS_API=true for local dev",
+      : "AUTH_PROVIDER is unset — set it, or set ALLOW_ANONYMOUS_API=true for local dev",
   };
 }
 
@@ -205,12 +283,16 @@ function statusForVerifyError(error: unknown): 401 | 503 {
 }
 
 /**
- * Authorize an inbound BFF request.
+ * Authenticate an inbound BFF request.
+ *
+ * Authentication only: the result says who is calling and which groups they hold. Whether those
+ * groups admit them to the app the path belongs to is the proxy's decision (`lib/auth/access.ts`),
+ * and whether they may administer it is each write route's (`reconAdmin.ts`, `pipelineAdmin.ts`).
  *
  * @param request the incoming request (only its `authorization` header is read).
  * @param config resolved auth configuration (injected in tests).
- * @returns `{ ok: true }` with the verified subject, or `{ ok: false }` with the status the
- *   middleware should return. Never throws.
+ * @returns `{ ok: true }` with the verified subject and groups, or `{ ok: false }` with the status
+ *   the proxy should return. Never throws.
  */
 export async function authorizeRequest(
   request: Request,
@@ -220,19 +302,17 @@ export async function authorizeRequest(
     return {
       ok: false,
       status: 503,
-      message: `recon API authorization is not configured: ${config.reason}`,
+      message: `API authorization is not configured: ${config.reason}`,
     };
   }
   if (config.mode === "anonymous") {
-    // `RECON_ALLOW_ANONYMOUS_API=true` already grants the whole BFF, so withholding the admin group
-    // here would only make the Config tab untestable locally without pretending to secure anything.
-    // The group is named from the environment so a local run and the deployment agree on the string.
-    const admin = process.env.RECON_ADMIN_GROUP;
+    // Groups are named from the environment so a local run and the deployment agree on the strings;
+    // see `anonymousGroups` for why the default is "everything" and how to narrow it.
     return {
       ok: true,
       mode: "anonymous",
       subject: "anonymous",
-      groups: admin ? [admin] : [],
+      groups: anonymousGroups(),
     };
   }
 
@@ -282,10 +362,11 @@ export async function authorizeRequest(
 /**
  * The authenticated principal for a write route, or the response explaining why there is none.
  *
- * `src/proxy.ts` has already rejected unauthenticated `/api/recon/*` by the time a handler runs, so
- * this rarely fails — it exists to NAME the actor on rows that record who changed them. Deriving that
- * name any other way (a header the client sets, a default like "operator") would produce an audit
- * trail that looks authoritative and is not, which is worse than having none.
+ * `src/proxy.ts` has already rejected unauthenticated and un-admitted `/api/recon/*` and
+ * `/api/pipeline/*` calls by the time a handler runs, so this rarely fails — it exists to NAME the
+ * actor on rows that record who changed them. Deriving that name any other way (a header the client
+ * sets, a default like "operator") would produce an audit trail that looks authoritative and is not,
+ * which is worse than having none.
  *
  * @param req - the incoming request.
  * @returns `{ actor }` on success, or `{ error }` holding the response to return unchanged.

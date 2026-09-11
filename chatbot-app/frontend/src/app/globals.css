@@ -504,3 +504,23 @@ div[style*="position: fixed"][style*="top: 0"][style*="right: 0"][style*="z-inde
 .dark .overflow-x-auto::-webkit-scrollbar-thumb:hover {
   background: hsl(var(--muted-foreground) / 0.5);
 }
+
+/* ============================================================================
+   Console shell — the neutral frame (app rail, landing chooser, access panels)
+   that sits around both applications.
+   Its own palette on purpose: the apps theme themselves under .recon-root and
+   .pipeline-root, and the shell must read the same whichever app is open, so it
+   never references --rc-* or --dp-*. Declared on :root rather than .dark because
+   the shell is dark in both colour schemes.
+   ============================================================================ */
+:root {
+  --shell-bg: #0c0e12;
+  --shell-panel: #141821;
+  --shell-line: #242a35;
+  --shell-ink: #e6e9ee;
+  --shell-ink-dim: #8a919e;
+  --shell-accent: #7aa2f7;
+  --shell-accent-soft: rgba(122, 162, 247, 0.14);
+  --shell-danger: #e5484d;
+  --shell-danger-soft: rgba(229, 72, 77, 0.16);
+}

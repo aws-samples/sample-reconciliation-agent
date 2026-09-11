@@ -10,6 +10,12 @@
  * (see `api-auth.ts`), so there is no `cognito:groups` to read and no Terraform resource that grants
  * this: an operator adds someone to the group in Okta or Entra, and the next token they get carries it.
  *
+ * This is the ADMIN half of the recon app's access model. The ACCESS half — may this caller use the
+ * app at all — is decided per request by the proxy from `RECON_ACCESS_GROUP` (see `lib/auth/apps.ts`),
+ * and the admin group named here implies access there, so an admin never needs to be in both groups.
+ * In local dev, `ALLOW_ANONYMOUS_API=true` grants this group automatically and `ANONYMOUS_GROUPS`
+ * narrows that; see `api-auth.ts`.
+ *
  * Fails closed when `RECON_ADMIN_GROUP` is unset. A deployment that loses the variable locks everyone
  * out of the Config tab, which is loud, wrong in the safe direction, and fixed by one env var — where
  * the alternative reading of "unset means unrestricted" would quietly reopen the hole this closes.

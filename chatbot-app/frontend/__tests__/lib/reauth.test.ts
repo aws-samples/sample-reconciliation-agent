@@ -172,7 +172,7 @@ describe("reauthenticate", () => {
 
   it("reports failure rather than redirecting when no provider is configured", async () => {
     // Local dev and unconfigured builds: a 401 here is the server missing
-    // RECON_ALLOW_ANONYMOUS_API, and there is nowhere to sign in.
+    // ALLOW_ANONYMOUS_API, and there is nowhere to sign in.
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     oktaConfigModule.HAS_OKTA_CONFIG = false;
     const { reauthenticate } = await loadReauth("okta");
