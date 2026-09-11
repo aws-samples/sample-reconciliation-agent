@@ -20,8 +20,6 @@ def _notice(**overrides: object) -> Notice:
     base: dict[str, object] = {
         "notice_id": "NTC-0001",
         "notice_class": "wire_confirmation",
-        "counterparty": "CINDERMOOR LOGISTICS HOLDINGS INC.",
-        "notice_date": "2026-03-02",
         "extraction_confidence": 0.94,
         "confidence_alert_count": 0,
     }
@@ -36,23 +34,23 @@ def test_notice_requires_confidence_alert_count() -> None:
             {
                 "notice_id": "NTC-0001",
                 "notice_class": "wire_confirmation",
-                "counterparty": "X",
-                "notice_date": "2026-03-02",
                 "extraction_confidence": 0.9,
             }
         )
 
 
-def test_notice_distinguishes_absent_from_empty_optional_fields() -> None:
-    """Not-extracted-for-this-class and extracted-and-blank are different answers.
+def test_no_extracted_field_is_a_model_attribute() -> None:
+    """The invariant the whole de-promotion bought, asserted so a regression cannot be quiet.
 
-    Asserted on `reference`, an index key and therefore one of the three extracted fields that is still
-    an attribute. The same distinction holds for every other extracted field, but there it is a property
-    of `idp_sections[].fields`, which stores whatever the extractor emitted.
+    Passing an extracted name to `Notice` does NOT store it -- pydantic ignores extras -- so a reader
+    that reached for `notice.counterparty` would get AttributeError rather than a wrong value. The
+    absent-versus-blank distinction still matters, but it is now a property of `idp_sections[].fields`,
+    which stores exactly what the extractor emitted.
     """
-    notice = _notice(reference="")
-    assert notice.reference == ""  # extracted, and genuinely blank
-    assert _notice().reference is None  # this class never extracts a reference
+    for name in ("counterparty", "notice_date", "reference", "amount", "fund"):
+        assert name not in Notice.model_fields, f"{name} came back as an attribute"
+    notice = _notice(idp_sections=[{"section_id": "1", "fields": {"reference": ""}}])
+    assert notice.idp_sections[0]["fields"]["reference"] == ""  # extracted, and genuinely blank
 
 
 def test_notice_rejects_confidence_outside_unit_interval() -> None:
@@ -161,17 +159,20 @@ def test_put_stores_and_get_round_trips() -> None:
     store = NoticeStore(table_name="recon-notices")
     store.put(
         notice=_notice(
-            reference="WIRE-20260302-EVG",
             idp_sections=[
                 {
                     "section_id": "1",
-                    "fields": {"fund": "Direct Lending Fund I", "amount": "2052425.70"},
+                    "fields": {
+                        "reference": "WIRE-20260302-EVG",
+                        "fund": "Direct Lending Fund I",
+                        "amount": "2052425.70",
+                    },
                 }
             ],
         )
     )
     fetched = store.get(notice_id="NTC-0001")
-    assert fetched.reference == "WIRE-20260302-EVG"
+    assert fetched.idp_sections[0]["fields"]["reference"] == "WIRE-20260302-EVG"
     assert fetched.idp_sections[0]["fields"]["fund"] == "Direct Lending Fund I"
     assert fetched.idp_sections[0]["fields"]["amount"] == "2052425.70"
 
@@ -203,7 +204,8 @@ def test_unextracted_fields_are_absent_not_null() -> None:
     store = NoticeStore(table_name="recon-notices")
     store.put(notice=_notice())
     raw = store.raw(notice_id="NTC-0001")
-    assert "reference" not in raw
+    # `subscription_status` is the feed's reference data, never set on the document path.
+    assert "subscription_status" not in raw
     assert "confidence_alert_count" in raw
 
 
@@ -375,7 +377,7 @@ def test_an_oversized_extraction_leaves_the_rest_of_the_notice_intact() -> None:
         )
     )
     fetched = store.get(notice_id="NTC-0001")
-    assert fetched.reference == "WIRE-20260302-EVG"
+    assert fetched.notice_class == "wire_confirmation"
     assert fetched.idp_sections == []  # the model's default, with the reason beside it
     assert fetched.idp_sections_omitted is not None
 
@@ -601,13 +603,18 @@ def test_put_document_record_over_an_existing_notice_is_a_no_op() -> None:
     _make_notices_table()
     store = NoticeStore(table_name="recon-notices")
     notice_id = "idp-inbox/2026/03/01/wire-0007.pdf"
-    store.put(notice=_notice(notice_id=notice_id, reference="WIRE-KEEP-ME"))
+    store.put(
+        notice=_notice(
+            notice_id=notice_id,
+            idp_sections=[{"section_id": "1", "fields": {"reference": "WIRE-KEEP-ME"}}],
+        )
+    )
 
     # Must not raise, and must not change the stored notice.
     store.put_document_record(record=_document_record(notice_id=notice_id))
 
     fetched = store.get(notice_id=notice_id)
-    assert fetched.reference == "WIRE-KEEP-ME"
+    assert fetched.idp_sections[0]["fields"]["reference"] == "WIRE-KEEP-ME"
     assert fetched.record_kind == "notice"
 
 

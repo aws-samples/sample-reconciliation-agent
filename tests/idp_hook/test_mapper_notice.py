@@ -65,15 +65,25 @@ def test_unresolvable_alert_count_maps_to_none_not_zero() -> None:
     assert notice.confidence_alert_count is None
 
 
-def test_an_index_key_the_class_never_extracted_is_none_not_empty() -> None:
-    """None and "" mean different things downstream: unavailable vs extracted-and-blank."""
+def test_absent_and_blank_stay_distinguishable_in_the_extraction() -> None:
+    """None and "" mean different things downstream: unavailable vs extracted-and-blank.
+
+    The distinction now lives entirely in `idp_sections[].fields`, which stores exactly what the extractor
+    emitted -- an absent key versus a key whose value is the empty string. Nothing normalises between the
+    two on the way in, which is what keeps `fields_unavailable` meaningful.
+    """
     doc = _document()
     del doc["Sections"][0]["attributes"]["reference"]
-    notice = idp_event_to_notice(doc, output_reader=None, execution_arn="arn:x")
-    assert notice.reference is None
-    # Extracted-and-blank stays distinguishable from that.
+    fields = idp_event_to_notice(doc, output_reader=None, execution_arn="arn:x").idp_sections[0][
+        "fields"
+    ]
+    assert "reference" not in fields
+
     doc["Sections"][0]["attributes"]["reference"] = ""
-    assert idp_event_to_notice(doc, output_reader=None, execution_arn="arn:x").reference == ""
+    fields = idp_event_to_notice(doc, output_reader=None, execution_arn="arn:x").idp_sections[0][
+        "fields"
+    ]
+    assert fields["reference"] == ""
 
 
 def test_a_non_index_field_reaches_the_notice_only_through_idp_sections() -> None:
@@ -123,9 +133,9 @@ def test_a_document_with_no_extractable_date_maps_with_the_date_absent() -> None
     doc = _document()
     del doc["Sections"][0]["attributes"]["notice_date"]
     notice = idp_event_to_notice(doc, output_reader=None, execution_arn="arn:x")
-    assert notice.notice_date is None
+    assert notice.idp_sections[0]["fields"].get("notice_date") is None
     # The rest of the notice still maps, which is the point of not dead-lettering it.
-    assert notice.counterparty
+    assert notice.idp_sections[0]["fields"].get("counterparty")
     assert notice.notice_class
 
 
@@ -143,7 +153,7 @@ def test_a_dateless_notice_never_borrows_the_pipeline_start_time() -> None:
     notice = idp_event_to_notice(
         doc, output_reader=None, execution_arn="arn:x", idp_tracking=tracking
     )
-    assert notice.notice_date is None
+    assert notice.idp_sections[0]["fields"].get("notice_date") is None
     assert notice.idp_tracking["initial_event_time"] == "2026-09-09T21:14:59Z"
 
 
@@ -198,8 +208,8 @@ def test_the_reader_is_called_with_the_bucket_and_prefix_derived_from_a_section_
 def test_read_field_values_win_over_the_events_own_section_data() -> None:
     """When the read succeeds, the extracted VALUES are what the notice is built from."""
     notice = idp_event_to_notice(_document(), output_reader=_FakeReader(), execution_arn="arn:x")
-    assert notice.counterparty == "MERIDIAN AGENCY SERVICES LLC"
-    assert notice.notice_date == "2026-12-26"
+    assert notice.idp_sections[0]["fields"].get("counterparty") == "MERIDIAN AGENCY SERVICES LLC"
+    assert notice.idp_sections[0]["fields"].get("notice_date") == "2026-12-26"
     assert notice.idp_sections[0]["fields"]["amount"] == Decimal("150800000.0")
 
 
@@ -245,7 +255,7 @@ def test_a_failed_read_degrades_to_the_events_own_section_data() -> None:
 
     notice = idp_event_to_notice(_document(), output_reader=_BrokenReader(), execution_arn="arn:x")
     assert notice.notice_class == "LoanRateSettingNotice"
-    assert notice.reference == "WIRE-20260302-EVG"
+    assert notice.idp_sections[0]["fields"].get("reference") == "WIRE-20260302-EVG"
 
 
 def test_snakecase_shape_is_supported() -> None:
@@ -334,8 +344,8 @@ def test_the_promoted_fields_still_reach_the_notice() -> None:
     nested map.
     """
     notice = idp_event_to_notice(_with_canonical(), output_reader=None, execution_arn="arn:x")
-    assert notice.counterparty
-    assert notice.notice_date
+    assert notice.idp_sections[0]["fields"].get("counterparty")
+    assert notice.idp_sections[0]["fields"].get("notice_date")
     assert notice.idp_sections[0]["fields"]["activity_type"] == "Interest"
 
 

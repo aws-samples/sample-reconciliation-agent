@@ -2,6 +2,8 @@
 escalate→PROPOSED, failure→degraded, double-delivery no-op, write-denied→PROPOSED. Uses an
 injected invoke transport (harness stream) + injected write_transport (gateway write) + moto."""
 
+import time
+
 import boto3
 from moto import mock_aws
 
@@ -92,6 +94,8 @@ def _run(invoke, threshold=0.9, write_transport=None, write_calls=None):
         # Required keyword (no default) — the worker labels the run's token usage with it. See
         # tests/harness_agent/test_worker_token_usage.py for what that label has to be in production.
         model_id="us.anthropic.claude-sonnet-5",
+        # Far enough out that the closing-turn floor never trips here; the floor has its own test.
+        deadline=time.monotonic() + 900.0,
     ), cases
 
 

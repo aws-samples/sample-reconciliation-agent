@@ -153,40 +153,27 @@ def test_flatten_sections_takes_the_first_section_on_a_duplicate_key() -> None:
     assert flatten_sections(sections) == {"amount": "100.00", "fund": "A", "cusip": "X"}
 
 
-def test_indexable_fields_layers_the_normalised_index_keys_over_the_sections() -> None:
-    """The promoted attribute WINS, and that precedence is the point.
+def test_indexable_fields_is_exactly_the_embedded_extraction() -> None:
+    """Extracted content lives in one place, so there is nothing left to layer over it.
 
-    Those three attributes hold a value the raw extraction does not: the mapper resolves `borrower` to
-    `counterparty`, `value_date` to `notice_date`, and a missing obligor to `"unknown"`. Indexing the
-    sections alone leaves such a notice findable under `borrower` and not under `counterparty`, and an
-    unattributable one findable under neither — invisible to the agent's primary lookup.
+    This used to merge three promoted attributes on top -- `counterparty`, `notice_date`, `reference` --
+    which carried normalisation the raw extraction lacked. Those attributes went with the GSIs that
+    required them, so the extraction IS the whole indexable surface. A row's own top-level attributes are
+    deliberately NOT indexed: they are recon's bookkeeping (`notice_class`, confidences, tracking), and
+    indexing them would let a caller filter on recon's internals as though they were document content.
     """
     row = {
-        "counterparty": "CINDERMOOR LOGISTICS HOLDINGS, INC.",  # normalised from `borrower`
-        "notice_date": "2026-02-02",  # normalised from `value_date`
-        "idp_sections": [
-            {
-                "fields": {
-                    "borrower": "CINDERMOOR LOGISTICS",
-                    "value_date": "2026-02-02",
-                    "cusip": "X",
-                }
-            }
-        ],
+        "notice_id": "n1",
+        "notice_class": "borrowing_notice",
+        "confidence_alert_count": 0,
+        "idp_sections": [{"fields": {"counterparty": "CINDERMOOR LTD", "cusip": "X"}}],
     }
-    out = indexable_fields(row)
-    assert out["counterparty"] == "CINDERMOOR LOGISTICS HOLDINGS, INC."
-    assert out["notice_date"] == "2026-02-02"
-    # The raw extraction is still indexed alongside it, so the document's own wording stays searchable.
-    assert out["borrower"] == "CINDERMOOR LOGISTICS"
-    assert out["cusip"] == "X"
+    assert indexable_fields(row) == {"counterparty": "CINDERMOOR LTD", "cusip": "X"}
 
 
-def test_indexable_fields_omits_an_index_key_the_row_does_not_carry() -> None:
-    """`reference` is genuinely absent on most classes; a None must not become a posting."""
-    out = indexable_fields({"counterparty": "X", "idp_sections": [{"fields": {"amount": "1.00"}}]})
-    assert "reference" not in out
-    assert sorted(out) == ["amount", "counterparty"]
+def test_indexable_fields_is_empty_for_a_notice_that_extracted_nothing() -> None:
+    """A fieldless notice contributes only its all-notices posting, which `reindex` adds."""
+    assert indexable_fields({"notice_id": "n1", "notice_class": "incomplete_notice"}) == {}
 
 
 # --- querying ---------------------------------------------------------------------------------------

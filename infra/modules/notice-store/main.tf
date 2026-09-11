@@ -18,18 +18,6 @@ resource "aws_dynamodb_table" "notices" {
     type = "S"
   }
   attribute {
-    name = "counterparty"
-    type = "S"
-  }
-  attribute {
-    name = "notice_date"
-    type = "S"
-  }
-  attribute {
-    name = "reference"
-    type = "S"
-  }
-  attribute {
     name = "idp_record"
     type = "S"
   }
@@ -38,19 +26,11 @@ resource "aws_dynamodb_table" "notices" {
     type = "S"
   }
 
-  # The two exact-match hints search_notices is most often given. Amount (tolerance) and fund
-  # (alias resolution) are non-equality matches and stay filter expressions by necessity.
-  global_secondary_index {
-    name            = "counterparty-index"
-    hash_key        = "counterparty"
-    range_key       = "notice_date"
-    projection_type = "ALL"
-  }
-  global_secondary_index {
-    name            = "reference-index"
-    hash_key        = "reference"
-    projection_type = "ALL"
-  }
+  # ⚠️ `counterparty-index` and `reference-index` are GONE, and nothing should reinstate them.
+  # `search_notices` resolves every filter through the `-notice-search` table below, whose key attributes
+  # are names recon owns, so no extracted field name needs to be a declared attribute here. Those two
+  # GSIs were the last reason `counterparty`, `notice_date` and `reference` existed as top-level
+  # attributes at all -- see PROMOTED_EXTRACTED_FIELDS in backend/recon_core/notices.py, now empty.
 
   # The Documents tab's list query: every IDP-ingested document over a date window, newest first.
   # Neither GSI above can answer that -- counterparty-index and reference-index are both keyed on a

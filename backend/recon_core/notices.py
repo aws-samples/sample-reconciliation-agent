@@ -9,8 +9,8 @@ and is surfaced to the agent as ``fields_unavailable``, while ``""`` means "extr
 Collapsing the two is fail-quiet behaviour: a field the class never carries would become
 indistinguishable from one the document left blank.
 
-**Extracted content does not live in this model.** The attributes below are recon's own bookkeeping plus
-:data:`PROMOTED_EXTRACTED_FIELDS`, and nothing else. Everything the extractor read is carried verbatim
+**Extracted content does not live in this model.** The attributes below are recon's own bookkeeping and
+nothing else -- :data:`PROMOTED_EXTRACTED_FIELDS` is empty. Everything the extractor read is carried verbatim
 in ``idp_sections[].fields``, under the extractor's own key names, which is why a field the pipeline
 adds or renames needs no change here. ``search_notices`` resolves a filter against that map, so an
 extracted field is queryable without being an attribute.
@@ -42,27 +42,17 @@ from pydantic import BaseModel, Field
 # ledger write it cannot evaluate rather than passing it.
 ALWAYS_STORED = ("extraction_confidence", "confidence_alert_count")
 
-# The ONLY extracted field names recon hardcodes. Every other extracted field reaches its reader
-# through `Notice.idp_sections[].fields`, under the name the extraction configuration gave it, and has
-# no entry anywhere in this repository.
+# ⚠️ EMPTY, AND IT MUST STAY EMPTY. Recon hardcodes NO extracted field name.
 #
-# The bar for membership is that something must be UNABLE to read a nested map. A DynamoDB index key
-# attribute must be declared on the table, so the three below clear it; nothing else does. A name here
-# is one recon has to keep in step with a configuration in another repository, and when it drifts the
-# mapper stores the field as absent and the agent reads "this notice class does not carry that field" --
-# a confident false negative rather than an error. That is the whole cost, and it is why the list is
-# closed. `tests/input_corpus/test_extraction_requirements.py` asserts the mapper reads exactly these.
-INDEX_KEY_FIELDS = (
-    "counterparty",  # counterparty-index HASH
-    "notice_date",  # counterparty-index RANGE
-    "reference",  # reference-index HASH
-)
-
-# Read as fallbacks for two of the index keys and never stored under these names: a document that
-# prints only an effective date, or names the obligor as `borrower`, still has to land in the index.
-INDEX_KEY_ALIASES = ("value_date", "borrower")
-
-PROMOTED_EXTRACTED_FIELDS = INDEX_KEY_FIELDS + INDEX_KEY_ALIASES
+# This tuple used to hold `counterparty`, `notice_date` and `reference` -- the three DynamoDB GSI key
+# attributes, which had to be declared on the table and so could not live in a nested map. Those GSIs are
+# gone: `search_notices` resolves every filter through the notice search index, whose key attributes are
+# names recon owns. With nothing pinning them, the names went too.
+#
+# `tests/input_corpus/test_extraction_requirements.py` asserts the mapper reads exactly these, so adding a
+# name here is the one edit that makes the mapper allowed to couple to the extraction schema again. The
+# bar for doing so is that something must be UNABLE to read `idp_sections[].fields`, and nothing is.
+PROMOTED_EXTRACTED_FIELDS: tuple[str, ...] = ()
 
 
 class Notice(BaseModel):
@@ -70,35 +60,13 @@ class Notice(BaseModel):
 
     notice_id: str = Field(min_length=1)
     notice_class: str = Field(min_length=1)
-    counterparty: str = Field(min_length=1)
-    # ISO-8601 date the SOURCE printed. The `counterparty-index` RANGE key, which is the only reason it
-    # is an attribute at all.
+    # ⚠️ NO EXTRACTED FIELD IS AN ATTRIBUTE HERE, and none may become one. Everything the extractor read
+    # is carried verbatim in `idp_sections` below, under the extractor's own key names, and
+    # `search_notices` resolves filters against that map -- so a field the pipeline adds or renames needs
+    # no change to this model, this file's tests, or the table definition.
     #
-    # Optional, and never back-filled from an ingest timestamp. A document that prints no date of any
-    # kind is stored with this ABSENT rather than rejected: the corpus fax cover carries a counterparty
-    # and an agent bank and is worth keeping. Substituting `idp_started_at` would put a PROCESSING
-    # timestamp in an ISSUE date, and `_matches` compares a present date as a real one -- so a February
-    # notice processed in September would satisfy a September window with its date apparently aligning,
-    # turning "cannot check" into "checks out". The ingest time is stored under its own name for readers
-    # that want it.
-    #
-    # ⚠️ DynamoDB omits an item with no range key from `counterparty-index`, so a dateless notice is
-    # reachable only by `notice_id`, by the Documents tab, or by the scan path. `search_notices` reports
-    # the field in `fields_unavailable`, so the gap is visible rather than silent.
-    notice_date: str | None = None
-
-    # `reference-index` HASH key -- again, the only reason this is an attribute.
-    reference: str | None = None
-
-    # ⚠️ NO EXTRACTED FIELD BELONGS HERE. The three above are the complete set, and
-    # :data:`PROMOTED_EXTRACTED_FIELDS` states the rule they satisfy: a DynamoDB index key attribute has
-    # to be declared on the table, so it cannot live in a nested map. Nothing else clears that bar.
-    #
-    # An extracted field reaches every reader through `idp_sections[].fields` below, under the name the
-    # extractor gave it. `search_notices` resolves a filter against that map, so adding an attribute here
-    # buys a flatter shape and costs a name recon must keep in step with a configuration in another
-    # repository -- and when that drifts, the row stores the field as absent and the agent reads "this
-    # notice class does not carry that field", which is a confident false negative rather than an error.
+    # `counterparty`, `notice_date` and `reference` were the last three, kept only because they were GSI
+    # key attributes. See PROMOTED_EXTRACTED_FIELDS above for why that reason no longer exists.
 
     # Provenance derived by whichever component wrote the row, never extracted from the document and
     # never supplied by a caller. On the document path these are constant: OTHER + IDP.
