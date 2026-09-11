@@ -1,16 +1,30 @@
 # `chatbot-app/` — the operator console
 
-A Next.js app that is both the UI and its own backend-for-frontend. `frontend/src/app/api/recon/*`
-holds server routes; `frontend/src/app/recon/*` holds the screens. It runs as a Fargate task behind
-an ALB and CloudFront (`infra/modules/frontend-ecs`).
+A Next.js app that is both the UI and its own backend-for-frontend, hosting two applications behind
+one shell: Trade Reconciliation (`/recon`, BFF `/api/recon`) and Deal Pipeline (`/pipeline`, BFF
+`/api/pipeline`). `/` is the landing chooser and a collapsible app rail switches between the apps the
+viewer may open. It runs as one Fargate task behind an ALB and CloudFront (`infra/modules/frontend-ecs`),
+or locally with `npm run dev`.
 
 ```
-frontend/src/app/recon/          screens: dashboard, queue, case/[id], skills, lessons, evals,
-                                 idp-documents, config
-frontend/src/app/api/recon/      the BFF — every AWS call the browser cannot make itself
-frontend/src/components/recon/   the console's own components
-frontend/src/lib/                clients, stores and policy helpers
-frontend/__tests__/              vitest, mirroring the two trees above
+frontend/src/app/page.tsx         the landing chooser; /api/me reports the viewer's per-app access
+frontend/src/lib/auth/apps.ts     the app registry: paths, BFF prefixes, access + admin group names
+frontend/src/proxy.ts             the gate in front of both BFFs
+
+frontend/src/app/recon/           screens: dashboard, queue, case/[id], skills, lessons, evals,
+                                  idp-documents, config
+frontend/src/app/api/recon/       the recon BFF — every AWS call the browser cannot make itself
+frontend/src/components/recon/    the recon app's own components
+frontend/src/lib/                 recon clients, stores and policy helpers (recon*, api-auth, ...)
+
+frontend/src/app/pipeline/        screens: inbox, inbox/[id], deals, deals/[id], assistant,
+                                  skills, skills/[name], skills/system-prompt, skills/proposals, config
+frontend/src/app/api/pipeline/    the pipeline BFF (emails, deals, chat SSE, memory, skills, config)
+frontend/src/components/pipeline/ the pipeline app's own components
+frontend/src/lib/pipeline/        wire types, the OMS schema mirror, and server/ (env, aws, stores,
+                                  samples, the chat agent)
+
+frontend/__tests__/               vitest, mirroring the trees above
 ```
 
 ```bash
@@ -23,10 +37,28 @@ npx prettier --check .  # formatting
 Repo-wide ESLint is broken; `prettier` + `tsc` are the local gate and CI's `frontend` job is the real
 one.
 
+## Two apps, one shell
+
+The apps do not import each other. What they share is the auth module (`src/lib/auth/`,
+`src/lib/api-auth.ts`, `src/lib/reauth.ts`), the `src/components/ui/` primitives and a couple of
+app-agnostic helpers; each keeps its own theme CSS, nav, hooks and BFF. Who may open which app comes
+from identity-provider groups — `RECON_ACCESS_GROUP` / `RECON_ADMIN_GROUP` and `PIPELINE_ACCESS_GROUP`
+/ `PIPELINE_ADMIN_GROUP`, resolved by `src/lib/auth/apps.ts`. An unset access group leaves that app
+open to every authenticated user; an unset admin group means nobody can change it. Locally,
+`ALLOW_ANONYMOUS_API=true` grants everything and `ANONYMOUS_GROUPS` previews a restricted user;
+`frontend/.env.example` is the template for both apps.
+
+Because the pipeline BFF shares the process with recon's, it reads `PIPELINE_ASSETS_BUCKET`,
+`PIPELINE_AGENT_MODEL_PARAM` and `PIPELINE_SKILLS_PREFIX` first and the bare names only as a fallback
+for the standalone `.env.local` — in the container the bare names are recon's. Its sample emails come
+from `data/deal-emails` when that directory exists and from S3 under `PIPELINE_SAMPLES_PREFIX` when it
+does not (`src/lib/pipeline/server/samples.ts`).
+
 ## The BFF exists because the browser must not hold credentials
 
-Every route under `api/recon/` is same-origin and runs as the task role. `src/proxy.ts` gates
-`/api/recon/*`, so an unauthenticated request never reaches a route file.
+Every route under `api/recon/` and `api/pipeline/` is same-origin and runs as the task role.
+`src/proxy.ts` gates both prefixes, verifying the token and matching the caller's groups against that
+app's access group, so an unauthenticated or unentitled request never reaches a route file.
 
 That gate has a consequence worth knowing before you touch anything that displays a file: **neither
 `<iframe src>` nor `<img src>` can carry an `Authorization` header.** So binary content is fetched

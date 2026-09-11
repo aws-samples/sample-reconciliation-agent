@@ -21,6 +21,62 @@ one queue needs no redeploy. Alongside both, an evaluation pipeline scores
 sessions against analyst decisions as ground truth and surfaces prompt and tool recommendations
 in the Evals tab.
 
+## Two applications, one console
+
+The console hosts two applications behind one shell, one sign-in and one identity provider:
+
+| App                      | Pages         | BFF               | What it does                                                                                                                                       |
+| ------------------------ | ------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Trade Reconciliation** | `/recon/*`    | `/api/recon/*`    | Everything the rest of this README describes                                                                                                       |
+| **Deal Pipeline**        | `/pipeline/*` | `/api/pipeline/*` | Turns new-issue deal emails into OMS staging records, reviewed before upload — contract and demo script in [`docs/deal-pipeline-design.md`](docs/deal-pipeline-design.md) |
+
+`/` is the landing chooser: one card per app the signed-in viewer may open. Inside an app, a
+collapsible vertical rail on the left switches between the apps the viewer has access to. An app the
+viewer may not open is absent from the chooser and the rail, and every request to its BFF answers
+403. Each app keeps its own routes, hooks, screens and theme; the shell adds the rail and the access
+check and changes nothing inside either app.
+
+**Per-app access from identity-provider groups.** Authorization reuses the group claim the BFF
+already verifies (`AUTH_GROUPS_CLAIM`). Each app has an _access_ group ("may use it") and an _admin_
+group ("may change how it behaves"), named by four environment variables on the console's task. The
+registry that reads them is `chatbot-app/frontend/src/lib/auth/apps.ts`; adding an app is one entry
+there plus its own route trees.
+
+| Variable                | Grants                                                                                                              | Unset means                          |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| `RECON_ACCESS_GROUP`    | may open Trade Reconciliation                                                                                       | open to every authenticated user     |
+| `RECON_ADMIN_GROUP`     | may change its configuration (auto-resolve threshold, agent backend, Tier-1, contacts, templates); implies access   | nobody can change configuration      |
+| `PIPELINE_ACCESS_GROUP` | may open Deal Pipeline                                                                                              | open to every authenticated user     |
+| `PIPELINE_ADMIN_GROUP`  | may approve or reject deals, edit staged fields, write skills, prompts and memories, change the model; implies access | nobody can change the pipeline      |
+
+An unset **access** group keeps an app open to all authenticated users, which is exactly what every
+deployment had before the shell existed; set it to restrict. An unset **admin** group fails closed,
+as it always has. Nothing in Terraform creates a group: an operator maintains membership in Okta or
+Entra and the next token carries it. The access check runs in `src/proxy.ts` for every
+`/api/recon/*` and `/api/pipeline/*` request, and each write route re-checks the admin group for
+itself, so an app hidden from the rail is a courtesy on top of the gate, not the gate.
+
+**Local development** runs without an identity provider. `ALLOW_ANONYMOUS_API=true` in
+`chatbot-app/frontend/.env.local` skips token verification and grants every app and both admin roles
+to the single `anonymous` subject. To preview what a restricted user sees, set `ANONYMOUS_GROUPS` to
+the comma-separated groups that subject should carry instead — for example
+`RECON_ACCESS_GROUP=recon-analysts`, `PIPELINE_ACCESS_GROUP=deal-desk` and
+`ANONYMOUS_GROUPS=deal-desk` shows the Deal Pipeline app alone, with no admin controls.
+`chatbot-app/frontend/.env.example` is the template for both apps, and its Deal Pipeline block uses
+the `PIPELINE_`-prefixed names below.
+
+**Deploying.** `infra/environments/recon` is the console's root. Setting `enable_deal_pipeline = true`
+there composes `infra/modules/deal-pipeline` (one bucket, three tables, two AgentCore Memories, two
+Lambdas) into the same apply, grants the console's task role access to those resources, seeds the
+sample-email corpus to the pipeline bucket under `samples/` (the container ships no `data/`, so the
+BFF reads samples from S3 there and from disk under `next dev`), and hands the task the pipeline's
+variables — under `PIPELINE_`-prefixed names where a bare name would collide with recon's in the shared
+process: `PIPELINE_ASSETS_BUCKET`, `PIPELINE_AGENT_MODEL_PARAM`, `PIPELINE_SKILLS_PREFIX`,
+`PIPELINE_SAMPLES_PREFIX`. With the flag off (the default) the deployment is the recon app alone and
+the Deal Pipeline entry never appears. `infra/environments/deal-pipeline` remains the standalone root
+for running the pipeline by itself against `npm run dev`, with local state and an `env_local` output
+that renders `.env.local`. The five-step demo is §12 of the design doc.
+
 ---
 
 ## Solution Architecture
@@ -50,7 +106,7 @@ The architecture has three planes:
 | Deterministic tier | A Tier-1 Lambda consuming the items stream. Sided items match within tolerance; sides-less (IDP) items are looked up in a mocked general ledger (Athena over S3) and auto-clear only on an unambiguous attribute match: account name, entry-type direction, and amount within tolerance. Toggleable via SSM or the Config tab                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | Agent              | Two interchangeable backends selected by the `agent_backend` SSM parameter: an AgentCore Runtime container (Strands `Agent` agentic loop), or the managed AgentCore Harness (config-declared), with the model each one invokes selected by a second parameter (`agent-model-id`), read per invocation. Skills and the system prompt are live from S3, with a ~60 s cache on the runtime and per-session on the harness. Two AgentCore gateways (AWS_IAM/SigV4): the egress tools gateway (10 targets, 7 of them conditional — one is a managed `bedrock-knowledge-bases` **connector** target, the rest Lambda/OpenAPI/MCP) with the Cedar Policy confidence gate, and an ingress agent gateway fronting the runtime (one `http/agentcoreRuntime` target of its own). AgentCore Memory holds the `lessons_learned` semantic strategy, and a fully managed Bedrock Knowledge Base holds the guidance corpus, queried with agent-supplied metadata filters |
 | Evaluation         | AgentCore Online Evaluation (a custom analyst-agreement evaluator plus 3 builtins) over harness OTel traces, on-demand batch re-scores, managed recommendations, and a versioned harness-config store (immutable S3 docs + SSM pointer). All of it surfaces in the Evals tab                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Frontend           | Next.js on ECS Fargate behind an ALB and CloudFront, with a WAFv2 web ACL (`AWSManagedRulesCommonRuleSet`) on the distribution, which is the single internet entry point. Okta OIDC login (`auth_provider`, swappable to Entra) and same-origin BFF routes (`/api/recon/*`) running under the task role                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Frontend           | Next.js on ECS Fargate behind an ALB and CloudFront, with a WAFv2 web ACL (`AWSManagedRulesCommonRuleSet`) on the distribution, which is the single internet entry point. Okta OIDC login (`auth_provider`, swappable to Entra) and same-origin BFF routes (`/api/recon/*`, plus `/api/pipeline/*` when the Deal Pipeline app is enabled) running under the task role, gated per app by identity-provider groups (see "Two applications, one console")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | Notifications      | Microsoft Graph is the only channel (app-only, from the shared mailbox), reached through the egress gateway's OpenAPI target. It carries resolution emails on approve/auto-resolve (`cases/notify.py` plus the frontend BFF calling `sendSharedMailboxMail` through the gateway with SigV4), counterparty email sent by the BFF from an analyst-approved draft, and mailbox reads (`listSharedMailboxMessages`, reached only through the `search_correspondence` wrapper). No agent holds a send tool on either backend: the model writes the counterparty message into its proposal and a human approves a specific revision of it. Nothing stores an address: a draft and a resolution notice both name a contact id, and the address is read from the contacts table at the moment of sending, so deactivating a contact stops mail to them even if a draft was already approved. Sends are gated at the gateway REQUEST interceptor.                 |
 | IaC                | Terraform (`infra/`) with S3-backed state. The AgentCore Harness lifecycle is an `aws_cloudformation_stack` (`infra/modules/recon-agent-harness`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
@@ -106,30 +162,50 @@ backend/                Python 3.12 Lambda handlers
                         recipient and a template by id
   skills_api/           Skills BFF (CRUD)
   lessons_api/          Lessons BFF
+  deal_pipeline/        Deal Pipeline: parser_handler (Bedrock Converse tool loop with
+                        lookup_security_master + stage_deal), oms_upload_handler (mock OMS
+                        validator), oms_schema + oms_fields.json (the staging-CSV contract),
+                        security_master, skills_loader, memory_recall, store, coerce
 
 agent-blueprint/
   recon-agent/          AgentCore Runtime container: agent.py, strands_investigator.py, llm.py,
                         classifier.py, proposal.py, gateway_mcp.py, skills_loader.py,
                         skills/*.md, system-prompt.md, Dockerfile
   recon-agent-harness/  Harness blueprint: harness_config.py (tools/schema), system-prompt.md
+  deal-pipeline-agent/  Deal Pipeline seed, no code: skills/*/SKILL.md (deal-parsing,
+                        news-alert-format, bank-notice-format, oms-csv-format) and
+                        prompts/{parser,assistant}-system.md, seeded to the pipeline bucket
 
 chatbot-app/
-  frontend/             Next.js app: /recon/* pages + /api/recon/* BFF routes. Other api/ route
-                        groups are scaffolding inherited with the fork; 10 of them are
-                        non-functional in this deployment and now fail loudly naming the missing
-                        env var (src/lib/deployment-env.ts)
+  frontend/             Next.js console: the shell (/ landing chooser, the app rail, /api/me,
+                        src/lib/auth/apps.ts) hosting two apps — /recon/* pages + /api/recon/*
+                        BFF, and /pipeline/* pages + /api/pipeline/* BFF (server libs under
+                        src/lib/pipeline/server). Other api/ route groups are scaffolding
+                        inherited with the fork; 10 of them are non-functional in this
+                        deployment and fail loudly naming the missing env var
+                        (src/lib/deployment-env.ts)
+
+docs/
+  deal-pipeline-design.md  The Deal Pipeline contract: flow, data model, OMS rules, BFF routes,
+                        environment, console integration, demo script
 
 infra/
   modules/              Terraform modules: foundation, intake, tier1, idp-hook, recon-agent,
                         recon-agent-harness, agent-evals, gl-mock, api, frontend-ecs,
-                        lambda-package, lambda-logs, network, observability, microsoft-graph-obo
-  environments/recon/   Dev environment root (S3-backed state via a partial backend config)
+                        lambda-package, lambda-logs, network, observability, microsoft-graph-obo,
+                        deal-pipeline (bucket, tables, memories, parser + OMS Lambdas)
+  environments/recon/   The console's root (S3-backed state via a partial backend config);
+                        enable_deal_pipeline composes modules/deal-pipeline into it
+  environments/deal-pipeline/  Standalone root for the pipeline alone (local state, env_local output)
   bootstrap/            Terraform-state bucket bootstrap (local state; import-first — see
                         "Getting Started" step 1)
   scripts/              Utility scripts (deploy-recon.sh, spike_harness.py, spike_evals.md)
 
-data/                   Synthetic sample documents + mocked general-ledger CSV
-tests/                  60 pytest test files (moto-mocked AWS); frontend: chatbot-app/frontend/__tests__
+data/                   Synthetic sample documents + mocked general-ledger CSV (recon);
+                        deal-emails/ (the pipeline's seven fictional emails, file name = corpus
+                        id) and security-master/ (issuers + canonical counterparties)
+tests/                  pytest (moto-mocked AWS), one directory per backend package incl.
+                        tests/deal_pipeline; frontend: chatbot-app/frontend/__tests__
 assets/                 Architecture diagrams (SVG/HTML), screenshots, CUJ walkthrough + template
 
 .github/workflows/      GitHub Actions: CI only (the public remote has no AWS account)
@@ -338,6 +414,8 @@ unprotected branch cannot plan, which is usually what you want and is worth know
 | `auth_provider`                           | no       | Frontend IdP: `okta` (deployed) or `entra` (var default)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `okta_issuer` / `okta_client_id`          | no       | Required when `auth_provider=okta`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `agent_backend`                           | no       | `runtime` (default) or `harness`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `enable_deal_pipeline`                    | no       | `false` (default) deploys the recon app alone. `true` composes `infra/modules/deal-pipeline` into this environment and hands the console's task the `PIPELINE_*` variables, so the Deal Pipeline app appears in the rail — see [Two applications, one console](#two-applications-one-console)                                                                                                                                                                                                                                                                                                                                  |
+| `recon_admin_group` / `recon_access_group` / `pipeline_admin_group` / `pipeline_access_group` | no | The identity-provider groups behind `RECON_ADMIN_GROUP`, `RECON_ACCESS_GROUP`, `PIPELINE_ADMIN_GROUP`, `PIPELINE_ACCESS_GROUP`. An empty access group leaves that app open to every authenticated user; an empty admin group means nobody can change it                                                                                                                                                                                                                                                                                                                                                              |
 | `harness_model_id`                        | no       | Override harness LLM (default `us.anthropic.claude-sonnet-5`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `policy_enforcement_mode`                 | no       | `ENFORCE` (default) or `LOG_ONLY` (observe only)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `interceptor_mode`                        | no       | Gateway REQUEST interceptor: `enforce` (default) or `log` (observes only, **never blocks**). The example tfvars also ships `"enforce"` explicitly; set `"log"` only for a first rollout, then remove it.                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -704,6 +782,9 @@ there is nothing on the repo side to conflict with it.
 
 ## Frontend tabs
 
+The Trade Reconciliation app's tabs. The Deal Pipeline app's screens (inbox, deals, assistant, skills,
+memory manager, config) are listed in §10 of [`docs/deal-pipeline-design.md`](docs/deal-pipeline-design.md).
+
 | Tab             | Purpose                                                                                                                                                                                                                                                                                                                                                                                                |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Dashboard**   | Lifecycle status counts across all cases; click-through to filtered history                                                                                                                                                                                                                                                                                                                            |
@@ -727,6 +808,12 @@ providers:
 
 `UserMenu` shows the signed-in user's name and a Logout button. Cognito survives only as the intake
 HTTP API's JWT authorizer; it is not the frontend login.
+
+Which apps a signed-in user may open, and where they are an admin, comes from the token's group claim
+(`AUTH_GROUPS_CLAIM`) matched against the four `*_ACCESS_GROUP` / `*_ADMIN_GROUP` variables — see
+[Two applications, one console](#two-applications-one-console). `ALLOW_ANONYMOUS_API=true` is the
+local-dev switch that replaces token verification with a single anonymous subject holding every
+configured group (or the ones in `ANONYMOUS_GROUPS`).
 
 ---
 

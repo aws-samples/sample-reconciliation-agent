@@ -6,15 +6,16 @@ hard way; none of it is inferable from reading the code.
 
 ## Layout
 
-| Path                    | Guide                                                                    |
-| ----------------------- | ------------------------------------------------------------------------ |
-| `backend/`              | [Python Lambdas + libraries](backend/README.md)                          |
-| `agent-blueprint/`      | [the two Tier-2 agent backends](agent-blueprint/README.md)               |
-| `infra/`                | [Terraform](infra/README.md) — root module is `infra/environments/recon` |
-| `tests/`                | [the Python suite](tests/README.md) — never beside the code              |
-| `scripts/`              | [generators + live-deployment tooling](scripts/README.md)                |
-| `data/`                 | [fixtures and the guidance corpus](data/README.md)                       |
-| `chatbot-app/frontend/` | Next.js BFF + UI; tests in `__tests__/`, run with `npx vitest run`       |
+| Path                    | Guide                                                                                                                         |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `backend/`              | [Python Lambdas + libraries](backend/README.md) — recon packages plus `deal_pipeline/`                                        |
+| `agent-blueprint/`      | [the two Tier-2 agent backends](agent-blueprint/README.md), plus the Deal Pipeline's skills and prompts                        |
+| `infra/`                | [Terraform](infra/README.md) — the console's root is `infra/environments/recon`; `environments/deal-pipeline` runs the pipeline alone |
+| `tests/`                | [the Python suite](tests/README.md) — never beside the code                                                                   |
+| `scripts/`              | [generators + live-deployment tooling](scripts/README.md)                                                                     |
+| `data/`                 | [fixtures and the guidance corpus](data/README.md) — recon's notices and ledger, the pipeline's emails and security master     |
+| `docs/`                 | [`deal-pipeline-design.md`](docs/deal-pipeline-design.md), the Deal Pipeline contract — the one design doc that is tracked    |
+| `chatbot-app/frontend/` | Next.js shell + two apps (`/recon`, `/pipeline`) + their BFFs; tests in `__tests__/`, run with `npx vitest run`               |
 
 ## Commands that are actually the gate
 
@@ -54,6 +55,44 @@ reports the difference. So —
   makes a broken query look like a counterparty that does not exist.
 - Never add a silent fallback or a default to keep code running. Raise.
 
+## Two apps, one console
+
+Since 2026-09-11 the frontend is a shell hosting two applications side by side: Trade Reconciliation
+(`/recon`, `/api/recon`) and Deal Pipeline (`/pipeline`, `/api/pipeline`). The shell is a landing
+chooser at `/`, a collapsible app rail, `/api/me`, and one access check. Read these before touching
+either app's edges:
+
+| File                                                | Owns                                                                                                                                                                     |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `chatbot-app/frontend/src/lib/auth/apps.ts`         | The app registry: `APPS`, `Viewer`, `resolveAppAccess`, `allConfiguredGroups`, `appForApiPath` / `appForPagePath`. Adding an app is one entry here plus its route trees |
+| `chatbot-app/frontend/src/lib/api-auth.ts`          | Token verification, the groups claim, anonymous mode (`ALLOW_ANONYMOUS_API`, `ANONYMOUS_GROUPS`)                                                                        |
+| `chatbot-app/frontend/src/proxy.ts`                 | The deny-by-default gate: every `/api/recon/*` and `/api/pipeline/*` request is verified and matched against that app's access group before a handler runs               |
+| `src/lib/reconAdmin.ts`, `src/lib/pipelineAdmin.ts` | The admin re-check inside each app's write routes — the rail hiding a button is not the gate                                                                            |
+| `src/lib/pipeline/server/env.ts`                    | Every environment name the pipeline BFF reads                                                                                                                            |
+| `docs/deal-pipeline-design.md`                      | The pipeline's data model, OMS rules, routes, environment and demo script; §13 is the console integration                                                               |
+
+Rules that follow:
+
+- **The two apps stay decoupled.** Nothing under `src/{app,components,lib,hooks}` that is recon's
+  imports from the pipeline's tree, or the reverse. The shared surface is the auth module
+  (`src/lib/auth/`, `src/lib/api-auth.ts`, `src/lib/reauth.ts`, the auth wrappers), the `src/components/ui/`
+  primitives, and app-agnostic helpers with no app state (`columnPrefs`, `skillFrontmatter`). A
+  feature both apps need goes into one of those, never into one app for the other to reach into.
+- **Access groups: unset access = open, unset admin = closed.** `RECON_ACCESS_GROUP` /
+  `PIPELINE_ACCESS_GROUP` unset keeps that app open to every authenticated user (what every
+  deployment had before the shell). `RECON_ADMIN_GROUP` / `PIPELINE_ADMIN_GROUP` unset means nobody
+  can change that app. Do not "fix" either direction.
+- **In the composed container, always set the `PIPELINE_`-prefixed names.** The pipeline BFF reads
+  `PIPELINE_ASSETS_BUCKET ?? ASSETS_BUCKET`, `PIPELINE_AGENT_MODEL_PARAM ?? AGENT_MODEL_PARAM`,
+  `PIPELINE_SKILLS_PREFIX ?? SKILLS_PREFIX`. The bare fallbacks exist for the standalone root's
+  `.env.local`; in the console's task the bare names are recon's and all three exist, so a missing
+  prefixed name reads recon's bucket, model parameter or skills with no error at all. The Lambdas
+  keep bare names — they are separate processes.
+- **Sample emails come from disk when `data/deal-emails` exists and from S3 (`PIPELINE_SAMPLES_PREFIX`,
+  default `samples/`) when it does not.** The container ships no `data/`, so Terraform seeds the corpus
+  to the pipeline bucket; a new sample file needs an apply before the console shows it. Ids are the
+  file name without `.json` in both sources.
+
 ## Git workflow
 
 Worktrees per feature, at `<repo-root>/.worktrees/<branch-name>/` — a `PreToolUse` hook rejects any
@@ -63,9 +102,11 @@ other target. Never implement on `main`.
 local merge to `main` means no pipeline ever runs and nothing is applied, so the work looks shipped
 and isn't.
 
-⚠️ `docs/` is **gitignored**. Design docs and plans live only in the primary checkout; a fresh
-worktree has no `docs/` at all, and no plan artifact ever reaches an MR. Don't cite a `docs/` path
-from tracked code — it resolves to nothing in a clone.
+⚠️ `docs/` holds exactly one tracked file, `docs/deal-pipeline-design.md`, because it is the
+contract the pipeline's code and tests are written against. Everything else that used to live there —
+plans, design records, audit reports — stays untracked working notes: don't add a second file without
+the same justification, and don't cite an untracked `docs/` path from tracked code, because it
+resolves to nothing in a clone.
 
 ## Deploys
 
@@ -111,6 +152,10 @@ Don't restate a rule in a second place — these are the single owners:
 | Whether a counterparty send is permitted | the gateway REQUEST interceptor, and nowhere else                                        |
 | What extraction must emit                | `data/input/IDP-EXTRACTION-REQUIREMENTS.md`, asserted both ways by `tests/input_corpus/` |
 | The classification catalog               | `agent-blueprint/recon-agent/skills/*.md`                                                |
+| Which app owns a path, and who may use it | `chatbot-app/frontend/src/lib/auth/apps.ts`                                              |
+| The OMS staging-CSV schema               | `backend/deal_pipeline/oms_fields.json` (the frontend mirror is asserted equal by a test)  |
+| The mock OMS validation rules            | `backend/deal_pipeline/oms_validator.py`, one stable `code` per rule                      |
+| The pipeline's environment names         | `chatbot-app/frontend/src/lib/pipeline/server/env.ts`                                    |
 
 The email-domain allowlist is the cautionary tale: it was once read in four places, and the three
 non-authoritative copies each read a container env var fixed at task start. A narrowed allowlist was

@@ -116,3 +116,25 @@ archive of counterparty correspondence, and `source-selection.md` on which sourc
 question. The playbooks carry **precedent and convention only** — procedure lives in the skills, and
 policy in the shared-core system prompt, because a rule reached by a filtered search is a rule that is
 sometimes absent.
+
+## The Deal Pipeline's data (`deal-emails/`, `security-master/`)
+
+Two more corpora sit beside the reconciliation ones and belong to the other app in the console.
+
+`deal-emails/` is the simulated inbox: seven fictional new-issue deal emails, one JSON file each
+(`id`, `source_kind`, `from`, `to`, `sent`, `subject`, `body`). **The file name without `.json` is the
+corpus id** the simulate dialog sends back, so keep the numbering — it is the demo's narrative order —
+and never rename a file without expecting the id to change. The BFF reads the directory straight off
+disk under `next dev`; the console's container ships no `data/`, so `infra/modules/deal-pipeline`
+seeds the same files to the pipeline bucket under `samples/` and the BFF reads them from there. A new
+sample therefore needs a Terraform apply before it appears in the deployed console.
+`tests/deal_pipeline/test_sample_emails.py` runs every file through the parsing agent with a scripted
+model, so a file that drifts from the shape breaks there rather than as an empty menu on stage.
+
+`security-master/issuers.csv` is the fictional issuer reference data the parser enriches from, and
+`counterparties.csv` the OMS's canonical arranger names with their aliases — the list the mock OMS's
+`LEFT_AGENT_UNKNOWN` rule checks against. Both are seeded to `security-master/` in the pipeline bucket
+and, unlike the skills, track the repo on every apply.
+
+The same rules apply as everywhere in `data/`: no real firm, person or vendor, and every address in a
+reserved domain (`.example`, `.test`).

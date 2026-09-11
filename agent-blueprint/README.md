@@ -49,3 +49,14 @@ adding rigour. 5/6 = 0.833 does not. `tests/skills/` enforces this.
 These files are **live-editable from the UI** and read from S3, so the catalog can change without a
 deploy. That is also why there is deliberately no predicate DSL in the frontmatter: routing decisions
 must not be expressible in a file an operator can edit.
+
+## `deal-pipeline-agent/` — the Deal Pipeline's knowledge, not a third backend
+
+The console's second app has its own agent, and this directory is everything that agent _knows_:
+four `skills/*/SKILL.md` (core parsing rules, two email-format skills, the staging-CSV contract) and
+two prompts (`parser-system.md` for the parsing Lambda, `assistant-system.md` for the desk assistant
+in the BFF). No code — the runtime is `backend/deal_pipeline/`. Terraform seeds these to the pipeline
+bucket once; from then on the Skills tab and approved skill proposals rewrite them in S3, so the
+repo file is the seed, not the truth. Frontmatter rules and the `metadata.applies_to` filter the
+parser uses are in [`deal-pipeline-agent/README.md`](deal-pipeline-agent/README.md). It shares
+nothing with the two recon backends above; the two agents are decoupled end to end.
