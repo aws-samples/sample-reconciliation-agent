@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 
+import { authHeaders } from "@/lib/auth/client-token";
 import { APPS, type AppAccess, type AppId, type Viewer } from "@/lib/auth/apps";
-import { authHeaders } from "@/lib/pipeline-auth";
+import { reauthenticate } from "@/lib/reauth";
 
 // The console viewer: who is signed in and which applications they may open, as `/api/me` reports it.
 //
@@ -13,9 +14,9 @@ import { authHeaders } from "@/lib/pipeline-auth";
 // already 403s an API call the viewer may not make, so a client that lies to itself about `apps` gets
 // an empty page, not data.
 //
-// The Authorization header comes from the deal-pipeline token helper rather than a third copy of the
-// Okta/Entra token-reading code. Both existing helpers are byte-identical apart from their log prefix;
-// picking one keeps the shell on the same ID token the BFF verifies everywhere else.
+// The Authorization header comes from the console-level token helper in `lib/auth/`, the same one both
+// apps' fetch wrappers use, so the shell verifies against the same ID token as everything else and
+// depends on neither application's module.
 
 /**
  * Page trees that render without the shell.
@@ -86,6 +87,16 @@ async function readFailure(res: Response): Promise<string> {
 export async function fetchViewer(): Promise<Viewer> {
   const headers = await authHeaders();
   const res = await fetch("/api/me", { headers, cache: "no-store" });
+  if (res.status === 401) {
+    // The same backstop the apps' fetch wrappers have. `/api/me` is the only request on `/`, so when a
+    // session dies while the user is there (an Entra refresh token past its lifetime: the silent token
+    // read fails, the header is missing, the proxy says 401) nothing else would ever start the redirect
+    // and the landing page would stay on its error card. Not awaited: the redirect resolves as the page
+    // unloads, and the error below must still reach the banner if the loop guard refuses.
+    void reauthenticate("unauthorized").catch((error: unknown) =>
+      console.error("[Shell] re-authentication failed:", error),
+    );
+  }
   if (!res.ok) {
     throw new Error(`GET /api/me failed (${res.status}): ${await readFailure(res)}`);
   }
@@ -102,80 +113,113 @@ export interface ViewerState {
 
 const LOADING: ViewerState = { viewer: null, loading: true, error: null };
 
-// Module-scope cache, same pattern as `useReconSubject`: a PROMISE, so concurrent mounts (the rail and
-// the landing page mount in the same tick) share one in-flight request instead of racing two. A settled
-// value is kept alongside so a component mounted after the answer arrived (client-side navigation to `/`)
-// renders it on its first paint instead of flashing a skeleton.
-let shared: Promise<Viewer> | null = null;
-let settled: Viewer | null = null;
+// A module-scope STORE rather than a per-hook snapshot. The shell frame mounts once in the root layout
+// and stays mounted across every client-side navigation, so it must see the result of a request that a
+// later mount (the landing page after a failure) or the banner's Retry started — a snapshot copied into
+// each hook at mount time would leave the frame pinned on the first answer for the whole session. One
+// in-flight promise is shared so concurrent mounts (the rail and the landing page mount in the same tick)
+// ask `/api/me` once; a settled value is served synchronously so a component mounted after the answer
+// (client-side navigation to `/`) renders it on its first paint instead of flashing a skeleton.
+let snapshot: ViewerState = LOADING;
+let inflight: Promise<ViewerState> | null = null;
+/** Identifies the newest request; an older one that settles after a reset or reload must not publish. */
+let current: object | null = null;
+const listeners = new Set<() => void>();
 
-/**
- * The shared viewer promise, started on first call.
- *
- * A failure clears the cache so the next mount retries — a transient 502 during a deploy must not pin
- * the banner for the whole session, and nothing else ever invalidates it.
- */
-export function loadViewer(): Promise<Viewer> {
-  if (!shared) {
-    shared = fetchViewer().then(
-      (viewer) => {
-        settled = viewer;
-        return viewer;
-      },
-      (err: unknown) => {
-        shared = null;
-        throw err;
-      },
-    );
-  }
-  return shared;
+function publish(next: ViewerState): void {
+  snapshot = next;
+  for (const listener of listeners) listener();
 }
 
-/** Forget the cached viewer. For tests, and for a future "signed in as someone else" transition. */
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+function getSnapshot(): ViewerState {
+  return snapshot;
+}
+
+/** The server has no session to describe; every SSR pass reads as loading. */
+function getServerSnapshot(): ViewerState {
+  return LOADING;
+}
+
+/** Start one `/api/me` round trip and publish its outcome to every subscriber. */
+function start(): Promise<ViewerState> {
+  const token = {};
+  current = token;
+  publish(LOADING);
+  const request = fetchViewer()
+    .then(
+      (viewer): ViewerState => ({ viewer, loading: false, error: null }),
+      (err: unknown): ViewerState => ({
+        viewer: null,
+        loading: false,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    )
+    .then((state) => {
+      if (current === token) {
+        inflight = null;
+        publish(state);
+      }
+      return state;
+    });
+  inflight = request;
+  return request;
+}
+
+/**
+ * Make sure the viewer is being (or has been) loaded.
+ *
+ * Idempotent while a request is in flight or a viewer is known. After a FAILURE it starts a fresh
+ * request, so a component that mounts later retries — a transient 502 during a deploy must not pin
+ * the banner for the whole session — and, because every subscriber reads the same store, the frame
+ * that showed the failure recovers along with it.
+ *
+ * @returns the settled state; never rejects, the failure is in `error`.
+ */
+export function loadViewer(): Promise<ViewerState> {
+  if (inflight) return inflight;
+  if (snapshot.viewer) return Promise.resolve(snapshot);
+  return start();
+}
+
+/**
+ * Discard what is known and ask `/api/me` again.
+ *
+ * For the banner's Retry, and for a future "signed in as someone else" transition. Subscribers see
+ * `loading` while the request runs so nothing renders the stale identity in between.
+ *
+ * @returns the settled state; never rejects.
+ */
+export function reloadViewer(): Promise<ViewerState> {
+  if (inflight) return inflight;
+  return start();
+}
+
+/** Forget the cached viewer. For tests. Subscribers are told so none keeps rendering a stale answer. */
 export function resetViewerCache(): void {
-  shared = null;
-  settled = null;
+  inflight = null;
+  current = null;
+  publish(LOADING);
 }
 
 /**
  * The console viewer, for rendering decisions.
  *
  * @returns `loading: true` until `/api/me` answers (or immediately the cached viewer when it already
- *   has), then either the viewer or the error string. Never throws into the tree.
+ *   has), then either the viewer or the error string. Never throws into the tree, and updates in place
+ *   when any other mount or the banner's Retry reloads the viewer.
  */
 export function useViewer(): ViewerState {
-  const [state, setState] = useState<ViewerState>(() =>
-    settled ? { viewer: settled, loading: false, error: null } : LOADING,
-  );
-
+  const state = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
   useEffect(() => {
-    let live = true;
-    loadViewer().then(
-      (viewer) => {
-        // Functional update with a bail-out: a component that initialised from the settled cache already
-        // holds this viewer, and handing React the same state object back schedules nothing.
-        if (live) {
-          setState((prev) =>
-            prev.viewer === viewer ? prev : { viewer, loading: false, error: null },
-          );
-        }
-      },
-      (err: unknown) => {
-        if (live) {
-          setState({
-            viewer: null,
-            loading: false,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      },
-    );
-    return () => {
-      // Setting state on an unmounted component is a warning at best; on a page the user has already
-      // left it is pure noise.
-      live = false;
-    };
+    // Mounting is what starts (or, after a failure, retries) the request; rendering must stay pure.
+    void loadViewer();
   }, []);
-
   return state;
 }

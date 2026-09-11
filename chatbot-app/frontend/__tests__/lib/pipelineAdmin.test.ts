@@ -64,6 +64,18 @@ describe("isPipelineAdmin", () => {
       }),
     ).toBe(false);
   });
+
+  it("trims the configured name, so it agrees with what /api/me reports", () => {
+    // `resolveAppAccess` trims; if this did not, a padded tfvars value would show an admin chip in the
+    // rail and hide the Config tab at the same time.
+    expect(
+      isPipelineAdmin(["deal-desk-admins"], { PIPELINE_ADMIN_GROUP: "deal-desk-admins  " }),
+    ).toBe(true);
+  });
+
+  it("reads a blank variable as unset rather than as a group named by whitespace", () => {
+    expect(isPipelineAdmin(["  ", ""], { PIPELINE_ADMIN_GROUP: "  " })).toBe(false);
+  });
 });
 
 describe("requirePipelineActor", () => {
@@ -135,6 +147,37 @@ describe("requirePipelineAdmin", () => {
     // the group, so an operator can act on it without reading the source.
     expect(body.error).toContain("deal-desk-admins");
     expect(body.error).toContain("sub-analyst-2");
+  });
+
+  it("names the trimmed group in the 403, not the padded value", async () => {
+    process.env.PIPELINE_ADMIN_GROUP = "deal-desk-admins ";
+    authorizeRequest.mockResolvedValue({
+      ok: true,
+      mode: "entra",
+      subject: "sub-analyst-2",
+      groups: ["deal-desk-readers"],
+    });
+    const got = await requirePipelineAdmin(req());
+    if (!("error" in got)) throw new Error("expected a refusal");
+    const body = (await got.error.json()) as { error: string };
+    expect(body.error).toContain('"deal-desk-admins" group');
+    expect(body.error).not.toContain('"deal-desk-admins "');
+  });
+
+  it("403s everyone when PIPELINE_ADMIN_GROUP is blank, naming the variable", async () => {
+    process.env.PIPELINE_ADMIN_GROUP = "  ";
+    authorizeRequest.mockResolvedValue({
+      ok: true,
+      mode: "entra",
+      subject: "sub-reviewer-1",
+      groups: ["deal-desk-admins", "  "],
+    });
+    const got = await requirePipelineAdmin(req());
+    if (!("error" in got)) throw new Error("expected a refusal");
+    expect(got.error.status).toBe(403);
+    expect(((await got.error.json()) as { error: string }).error).toContain(
+      "PIPELINE_ADMIN_GROUP",
+    );
   });
 
   it("403s everyone when PIPELINE_ADMIN_GROUP is unset, naming the variable", async () => {

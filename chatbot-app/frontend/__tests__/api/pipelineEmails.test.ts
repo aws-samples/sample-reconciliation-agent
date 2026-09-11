@@ -11,7 +11,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
 
 process.env.AWS_REGION = "us-east-1";
-process.env.ASSETS_BUCKET = "test-assets";
+process.env.PIPELINE_ASSETS_BUCKET = "test-assets";
 process.env.EMAILS_TABLE = "test-emails";
 process.env.PARSER_FUNCTION = "test-parser";
 

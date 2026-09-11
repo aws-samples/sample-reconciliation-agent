@@ -168,3 +168,61 @@ describe("proxy per-app access", () => {
     }
   });
 });
+
+describe("proxy app enablement", () => {
+  it("403s the pipeline prefix on a recon-only console and leaves everything else alone", async () => {
+    // Terraform renders PIPELINE_ENABLED=false when enable_deal_pipeline is false. The pipeline's
+    // routes must not run at all there: several of them would otherwise read the shared container's
+    // recon resources, and the rest 500 on tables that do not exist.
+    setAuthEnv({ ALLOW_ANONYMOUS_API: "true", PIPELINE_ENABLED: "false" });
+    const denied = await proxy(request("/api/pipeline/deals"));
+    expect(denied.status).toBe(403);
+    expect(await body(denied)).toEqual({ error: "Deal Pipeline is not enabled on this deployment" });
+    expect((await proxy(request("/api/pipeline"))).status).toBe(403);
+    expect((await proxy(request("/api/recon/cases"))).status).toBe(200);
+    expect((await proxy(request("/api/me"))).status).toBe(200);
+  });
+
+  it("403s a disabled app even for a caller in its admin group", async () => {
+    setAuthEnv({
+      ALLOW_ANONYMOUS_API: "true",
+      PIPELINE_ENABLED: "false",
+      PIPELINE_ADMIN_GROUP: "deal-desk-admins",
+    });
+    expect((await proxy(request("/api/pipeline/config"))).status).toBe(403);
+  });
+
+  it.each(["true", "1", ""])("keeps the pipeline reachable when PIPELINE_ENABLED is %j", async (value) => {
+    setAuthEnv({ ALLOW_ANONYMOUS_API: "true", PIPELINE_ENABLED: value });
+    expect((await proxy(request("/api/pipeline/deals"))).status).toBe(200);
+  });
+});
+
+describe("proxy under REQUIRE_ACCESS_GROUPS", () => {
+  it("403s both apps for a caller in no group when their access groups are unset", async () => {
+    // The composed deployment sets this, so a blank group can never mean "both desks may use it".
+    setAuthEnv({
+      ALLOW_ANONYMOUS_API: "true",
+      ANONYMOUS_GROUPS: "nobody",
+      REQUIRE_ACCESS_GROUPS: "true",
+    });
+    const denied = await proxy(request("/api/recon/cases"));
+    expect(denied.status).toBe(403);
+    expect((await body(denied)).error).toContain("RECON_ACCESS_GROUP is not configured");
+    expect((await proxy(request("/api/pipeline/deals"))).status).toBe(403);
+    // Still answers: the shell needs to be told the viewer may use nothing.
+    expect((await proxy(request("/api/me"))).status).toBe(200);
+  });
+
+  it("admits the admin group and a configured access group as before", async () => {
+    setAuthEnv({
+      ALLOW_ANONYMOUS_API: "true",
+      ANONYMOUS_GROUPS: "recon-admin,deal-desk",
+      REQUIRE_ACCESS_GROUPS: "true",
+      RECON_ADMIN_GROUP: "recon-admin",
+      PIPELINE_ACCESS_GROUP: "deal-desk",
+    });
+    expect((await proxy(request("/api/recon/cases"))).status).toBe(200);
+    expect((await proxy(request("/api/pipeline/deals"))).status).toBe(200);
+  });
+});

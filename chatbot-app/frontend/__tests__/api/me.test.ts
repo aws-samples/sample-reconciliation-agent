@@ -14,6 +14,8 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
 import { GET } from "@/app/api/me/route";
 import type { Viewer } from "@/lib/auth/apps";
+import { isPipelineAdmin } from "@/lib/pipelineAdmin";
+import { isReconAdmin } from "@/lib/reconAdmin";
 
 import {
   clearAuthEnv,
@@ -111,6 +113,56 @@ describe("GET /api/me", () => {
       recon: { access: true, admin: false },
       pipeline: { access: true, admin: false },
     });
+  });
+
+  it("hides a disabled app from everyone, including its admins", async () => {
+    // The recon-only upgrade: Terraform renders PIPELINE_ENABLED=false. The body is what drives the
+    // landing page's single-app redirect and keeps Deal Pipeline out of the rail, so `access` AND
+    // `admin` must both be false even for a viewer who holds the pipeline admin group.
+    setAuthEnv({
+      ALLOW_ANONYMOUS_API: "true",
+      PIPELINE_ENABLED: "false",
+      RECON_ADMIN_GROUP: "recon-admin",
+      PIPELINE_ADMIN_GROUP: "deal-desk-admins",
+    });
+    const viewer = (await (await get()).json()) as Viewer;
+    expect(viewer.groups).toContain("deal-desk-admins");
+    expect(viewer.apps).toEqual({
+      recon: { access: true, admin: true },
+      pipeline: { access: false, admin: false },
+    });
+  });
+
+  it("closes an app with no access group to non-admins under REQUIRE_ACCESS_GROUPS", async () => {
+    // The composed deployment: a deal-desk user must not see (or reach) recon just because recon's
+    // access group was left blank.
+    setAuthEnv({
+      ALLOW_ANONYMOUS_API: "true",
+      ANONYMOUS_GROUPS: "deal-desk",
+      REQUIRE_ACCESS_GROUPS: "true",
+      RECON_ADMIN_GROUP: "recon-admin",
+      PIPELINE_ACCESS_GROUP: "deal-desk",
+    });
+    const viewer = (await (await get()).json()) as Viewer;
+    expect(viewer.apps).toEqual({
+      recon: { access: false, admin: false },
+      pipeline: { access: true, admin: false },
+    });
+  });
+
+  it("agrees with the write-route helpers about a padded admin group", async () => {
+    // A tfvars value with stray whitespace reaches the task verbatim. If this route trimmed and the
+    // helpers did not, the rail would show an admin chip while every write route answered 403.
+    setAuthEnv({
+      ALLOW_ANONYMOUS_API: "true",
+      RECON_ADMIN_GROUP: "  recon-admin ",
+      PIPELINE_ADMIN_GROUP: "deal-desk-admins  ",
+    });
+    const viewer = (await (await get()).json()) as Viewer;
+    expect(viewer.apps.recon.admin).toBe(true);
+    expect(viewer.apps.pipeline.admin).toBe(true);
+    expect(isReconAdmin(viewer.groups)).toBe(true);
+    expect(isPipelineAdmin(viewer.groups)).toBe(true);
   });
 
   it("401s without a token rather than inventing a viewer", async () => {

@@ -63,21 +63,32 @@ then treated as having no `metadata` at all.
 
 ## How the files reach S3
 
-Terraform (`infra/modules/deal-pipeline`) seeds this directory into the assets bucket
-(`deal-pipeline-dev-assets-<account_id>`) under the layout in design §3:
+Terraform (`infra/modules/deal-pipeline`) seeds this directory into the assets bucket under the
+layout in design §3. The bucket is `deal-pipeline-dev-assets-<account_id>` from the standalone root
+and `<name_prefix>-pipeline-assets-<account_id>` (e.g. `recon-dev-pipeline-assets-...`) when the
+recon root composes the module:
 
 ```
-skills/<name>/SKILL.md     ← skills/<name>/SKILL.md          (prefix SKILLS_PREFIX=skills/)
+skills/<name>/SKILL.md     ← skills/<name>/SKILL.md          (Lambda: SKILLS_PREFIX=skills/; BFF: PIPELINE_SKILLS_PREFIX)
 prompts/parser-system.md   ← prompts/parser-system.md         (key PARSER_PROMPT_KEY)
-prompts/assistant-system.md← prompts/assistant-system.md
+prompts/assistant-system.md← prompts/assistant-system.md      (fixed key, no variable)
 ```
 
 - The **parsing agent** loads `skills/` and `prompts/parser-system.md` from S3 at every run, so a
   change in S3 is live on the next parse with no redeploy.
 - The **Skills tab** in the UI reads the same objects, lets an admin edit the parser prompt, and
   applies approved skill proposals by writing `skills/<name>/SKILL.md`. Approved proposals and
-  UI edits change S3 only; they are **not** written back to this directory. Re-applying Terraform
-  re-seeds from here, so a live skill you want to keep must be copied back into the repo first.
+  UI edits change S3 only; they are **not** written back to this directory.
+- **Skills and the parser prompt are seeded once, then owned by S3.** Their `aws_s3_object` seeds
+  carry `ignore_changes`, so re-applying Terraform never re-uploads them and a learned skill is
+  never reverted — which also means a rule you fix under `skills/` here does **not** reach a
+  running environment on the next apply. It gets there either through the Skills tab or by
+  forcing a reseed (`terraform taint` the object, or delete it in S3 and apply). The single owner
+  of this rule, with the full attribute list, is "Things to know before you edit" in
+  `infra/environments/deal-pipeline/README.md`.
+- **`prompts/assistant-system.md` is the opposite.** It has no UI editor, so it tracks the repo: a
+  committed change re-uploads on the next apply, and a hand edit made only in S3 is reverted by
+  the next apply, even one that changes nothing else.
 - The **assistant** proposes skill changes through the `skill_proposals` table and never writes
   S3 directly.
 

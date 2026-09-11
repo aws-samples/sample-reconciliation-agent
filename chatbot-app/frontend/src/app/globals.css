@@ -523,4 +523,8 @@ div[style*="position: fixed"][style*="top: 0"][style*="right: 0"][style*="z-inde
   --shell-accent-soft: rgba(122, 162, 247, 0.14);
   --shell-danger: #e5484d;
   --shell-danger-soft: rgba(229, 72, 77, 0.16);
+  /* --shell-danger-soft composited over --shell-bg, as a solid colour. For the one shell surface (the
+     /api/me failure banner) that sits directly on body rather than on a shell background: body is
+     white in the light scheme, and the translucent tint over white left --shell-ink unreadable. */
+  --shell-danger-panel: #2f171b;
 }

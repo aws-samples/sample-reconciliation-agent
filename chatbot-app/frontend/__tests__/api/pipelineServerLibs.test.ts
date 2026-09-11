@@ -66,7 +66,7 @@ describe("env", () => {
   });
 
   it("applies the design defaults for optional variables", () => {
-    delete process.env.SKILLS_PREFIX;
+    delete process.env.PIPELINE_SKILLS_PREFIX;
     delete process.env.PARSER_PROMPT_KEY;
     delete process.env.ASSISTANT_MODEL_ID;
     delete process.env.KNOWLEDGE_MEMORY_ID;
@@ -77,14 +77,16 @@ describe("env", () => {
   });
 
   it("treats a blank value as unset", () => {
-    process.env.SKILLS_PREFIX = "   ";
+    process.env.PIPELINE_SKILLS_PREFIX = "   ";
     expect(env.skillsPrefix()).toBe("skills/");
   });
 
-  // The three names below collide with the recon BFF's when both apps share one container. The
-  // prefixed name must win whenever it is set, or the pipeline silently reads recon's bucket, model
-  // parameter and skills — all of which exist, so nothing would fail.
-  describe("PIPELINE_-prefixed names shadow the bare names the recon app owns", () => {
+  // The three names below collide with the recon BFF's when both apps share one container, and every
+  // one of recon's values exists and is writable by the task role. So the bare name must NEVER be read:
+  // a fallback would point the Skills and Config tabs at recon's bucket, skills and live Tier-2 model
+  // parameter with no error, on exactly the deployment (recon-only, or a half-filled `.env.local`)
+  // where the pipeline's own variables are missing.
+  describe("PIPELINE_-prefixed names never fall back to the bare names the recon app owns", () => {
     beforeEach(() => {
       for (const name of [
         "PIPELINE_ASSETS_BUCKET",
@@ -99,35 +101,41 @@ describe("env", () => {
       }
     });
 
-    it("prefers the prefixed bucket and falls back to the bare one", () => {
+    it("throws for the bucket when only recon's ASSETS_BUCKET is set", () => {
       process.env.ASSETS_BUCKET = "recon-dev-assets";
-      expect(env.assetsBucket()).toBe("recon-dev-assets");
+      expect(() => env.assetsBucket()).toThrow(/^PIPELINE_ASSETS_BUCKET is not set/);
+    });
+
+    it("reads the bucket from PIPELINE_ASSETS_BUCKET", () => {
+      process.env.ASSETS_BUCKET = "recon-dev-assets";
       process.env.PIPELINE_ASSETS_BUCKET = "deal-pipeline-dev-assets";
       expect(env.assetsBucket()).toBe("deal-pipeline-dev-assets");
     });
 
-    it("names both bucket variables when neither is set", () => {
-      expect(() => env.assetsBucket()).toThrow(/PIPELINE_ASSETS_BUCKET \(or ASSETS_BUCKET\)/);
-    });
-
-    it("treats a blank prefixed value as unset and keeps reading the bare name", () => {
+    it("treats a blank prefixed bucket as unset and still refuses the bare name", () => {
+      // `.env.example` ships `PIPELINE_ASSETS_BUCKET=` blank next to a filled `ASSETS_BUCKET=`.
       process.env.PIPELINE_ASSETS_BUCKET = "  ";
-      process.env.ASSETS_BUCKET = "deal-pipeline-dev-assets";
-      expect(env.assetsBucket()).toBe("deal-pipeline-dev-assets");
+      process.env.ASSETS_BUCKET = "recon-dev-assets";
+      expect(() => env.assetsBucket()).toThrow(/^PIPELINE_ASSETS_BUCKET is not set/);
     });
 
-    it("prefers the prefixed model parameter, then the bare one, then the design default", () => {
-      expect(env.agentModelParam()).toBe("/deal-pipeline-dev/agent-model-id");
+    it("throws for the model parameter when only recon's AGENT_MODEL_PARAM is set", () => {
+      // Required, not defaulted: `PUT /config` writes this parameter, and recon's Tier-2 model lives
+      // under the bare name.
+      expect(() => env.agentModelParam()).toThrow(/^PIPELINE_AGENT_MODEL_PARAM is not set/);
       process.env.AGENT_MODEL_PARAM = "/recon-dev/agent-model-id";
-      expect(env.agentModelParam()).toBe("/recon-dev/agent-model-id");
+      expect(() => env.agentModelParam()).toThrow(/^PIPELINE_AGENT_MODEL_PARAM is not set/);
+    });
+
+    it("reads the model parameter from PIPELINE_AGENT_MODEL_PARAM", () => {
+      process.env.AGENT_MODEL_PARAM = "/recon-dev/agent-model-id";
       process.env.PIPELINE_AGENT_MODEL_PARAM = "/deal-pipeline-dev/agent-model-id";
       expect(env.agentModelParam()).toBe("/deal-pipeline-dev/agent-model-id");
     });
 
-    it("prefers the prefixed skills prefix, then the bare one, then the design default", () => {
-      expect(env.skillsPrefix()).toBe("skills/");
+    it("ignores recon's SKILLS_PREFIX and defaults the skills prefix", () => {
       process.env.SKILLS_PREFIX = "recon-skills/";
-      expect(env.skillsPrefix()).toBe("recon-skills/");
+      expect(env.skillsPrefix()).toBe("skills/");
       process.env.PIPELINE_SKILLS_PREFIX = "pipeline/skills/";
       expect(env.skillsPrefix()).toBe("pipeline/skills/");
     });
@@ -138,7 +146,7 @@ describe("env", () => {
       expect(env.samplesPrefix()).toBe("corpus/");
     });
 
-    it("keeps a single-name required variable's message to that one name", () => {
+    it("names exactly one variable in a required-variable message", () => {
       delete process.env.EMAILS_TABLE;
       expect(() => env.emailsTable()).toThrow(/^EMAILS_TABLE is not set/);
     });

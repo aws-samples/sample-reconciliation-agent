@@ -20,11 +20,16 @@ hard way; none of it is inferable from reading the code.
 ## Commands that are actually the gate
 
 ```bash
-python3 -m pytest tests/ -q                  # 1416 passed, 15 skipped, ~35s
+python3 -m pytest tests/ -q                  # 1851 passed, 21 skipped, ~50s
 python3 -m ruff check backend/ tests/        # lint
-cd chatbot-app/frontend && npx vitest run    # 62 files, 874 tests
+cd chatbot-app/frontend && npx vitest run    # 107 files, 1395 tests
 cd chatbot-app/frontend && npx tsc --noEmit  # typecheck
 cd infra/environments/recon && terraform fmt -check -recursive ../..
+# Module tests: plan-only under mocked providers, no credentials. Both CIs run them, and they are
+# the only check that notices a renamed PIPELINE_* variable or a missing task-role grant.
+for m in deal-pipeline frontend-ecs lambda-package; do
+  (cd infra/modules/$m && terraform init -backend=false && terraform test)
+done
 ```
 
 Three traps:
@@ -64,10 +69,10 @@ either app's edges:
 
 | File                                                | Owns                                                                                                                                                                     |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `chatbot-app/frontend/src/lib/auth/apps.ts`         | The app registry: `APPS`, `Viewer`, `resolveAppAccess`, `allConfiguredGroups`, `appForApiPath` / `appForPagePath`. Adding an app is one entry here plus its route trees |
-| `chatbot-app/frontend/src/lib/api-auth.ts`          | Token verification, the groups claim, anonymous mode (`ALLOW_ANONYMOUS_API`, `ANONYMOUS_GROUPS`)                                                                        |
-| `chatbot-app/frontend/src/proxy.ts`                 | The deny-by-default gate: every `/api/recon/*` and `/api/pipeline/*` request is verified and matched against that app's access group before a handler runs               |
-| `src/lib/reconAdmin.ts`, `src/lib/pipelineAdmin.ts` | The admin re-check inside each app's write routes — the rail hiding a button is not the gate                                                                            |
+| `chatbot-app/frontend/src/lib/auth/apps.ts`         | The app registry: `APPS`, `Viewer`, `resolveAppAccess`, `adminGroupFor` / `accessGroupFor`, `allConfiguredGroups`, `appForApiPath` / `appForPagePath`. Adding an app is one entry here plus its route trees; the pipeline entry also names `PIPELINE_ENABLED` as its `enabledEnv` |
+| `chatbot-app/frontend/src/lib/api-auth.ts`          | Token verification, the groups claim, anonymous mode — three switch names mean the same thing (`ALLOW_ANONYMOUS_API`, plus the pre-shell `RECON_ALLOW_ANONYMOUS_API` and `PIPELINE_ALLOW_ANONYMOUS_API`), narrowed by `ANONYMOUS_GROUPS` |
+| `chatbot-app/frontend/src/proxy.ts`                 | The deny-by-default gate: every `/api/recon/*` and `/api/pipeline/*` request is verified and matched against that app's access group before a handler runs; a disabled app's BFF is a 403 |
+| `src/lib/reconAdmin.ts`, `src/lib/pipelineAdmin.ts` | The admin re-check inside the write routes that carry one — every pipeline write, but only part of recon's (see the access-groups rule below). The rail hiding a button is not the gate |
 | `src/lib/pipeline/server/env.ts`                    | Every environment name the pipeline BFF reads                                                                                                                            |
 | `docs/deal-pipeline-design.md`                      | The pipeline's data model, OMS rules, routes, environment and demo script; §13 is the console integration                                                               |
 
@@ -75,19 +80,38 @@ Rules that follow:
 
 - **The two apps stay decoupled.** Nothing under `src/{app,components,lib,hooks}` that is recon's
   imports from the pipeline's tree, or the reverse. The shared surface is the auth module
-  (`src/lib/auth/`, `src/lib/api-auth.ts`, `src/lib/reauth.ts`, the auth wrappers), the `src/components/ui/`
-  primitives, and app-agnostic helpers with no app state (`columnPrefs`, `skillFrontmatter`). A
-  feature both apps need goes into one of those, never into one app for the other to reach into.
-- **Access groups: unset access = open, unset admin = closed.** `RECON_ACCESS_GROUP` /
-  `PIPELINE_ACCESS_GROUP` unset keeps that app open to every authenticated user (what every
-  deployment had before the shell). `RECON_ADMIN_GROUP` / `PIPELINE_ADMIN_GROUP` unset means nobody
-  can change that app. Do not "fix" either direction.
-- **In the composed container, always set the `PIPELINE_`-prefixed names.** The pipeline BFF reads
-  `PIPELINE_ASSETS_BUCKET ?? ASSETS_BUCKET`, `PIPELINE_AGENT_MODEL_PARAM ?? AGENT_MODEL_PARAM`,
-  `PIPELINE_SKILLS_PREFIX ?? SKILLS_PREFIX`. The bare fallbacks exist for the standalone root's
-  `.env.local`; in the console's task the bare names are recon's and all three exist, so a missing
-  prefixed name reads recon's bucket, model parameter or skills with no error at all. The Lambdas
-  keep bare names — they are separate processes.
+  (`src/lib/auth/` — including `client-token.ts`, the one browser-side `authHeaders()` / `idToken()`
+  helper that `recon-auth.ts`, `pipeline-auth.ts` and the shell all import — `src/lib/api-auth.ts`,
+  `src/lib/reauth.ts`, the auth wrappers), the `src/components/ui/` primitives, and app-agnostic
+  helpers with no app state (`columnPrefs`, whose storage keys carry the app id, `skillFrontmatter`).
+  A feature both apps need goes into one of those, never into one app for the other to reach into.
+- **Access groups: unset access = open, unset admin = closed — until `REQUIRE_ACCESS_GROUPS`.**
+  `RECON_ACCESS_GROUP` / `PIPELINE_ACCESS_GROUP` unset keeps that app open to every authenticated
+  user (what a recon-only deployment had before the shell). `REQUIRE_ACCESS_GROUPS=true` (exact
+  string) flips that to fail closed: an app whose access group is blank is then denied to everyone
+  but its admins. The composed ECS deployment sets it whenever the pipeline is enabled, and the recon
+  root refuses to plan `enable_deal_pipeline = true` with either access group blank — because the
+  moment two populations share one OIDC client, "every authenticated user" stops meaning "a recon
+  analyst". `RECON_ADMIN_GROUP` / `PIPELINE_ADMIN_GROUP` unset means nobody can change that app. Do
+  not "fix" either direction.
+- **`RECON_ACCESS_GROUP` is recon's real write boundary, not `RECON_ADMIN_GROUP`.** Every pipeline
+  write route re-checks the admin group. Recon's admin group gates only `config/*` (threshold,
+  backend, Tier-1, contacts, templates, workflow-types), `memory` DELETE and `uploads`; the
+  case-decision routes (`cases/[id]`, its `draft`) verify the actor. The rest of recon's writes —
+  `system-prompt`, `skills`, `harness/configs` (+ `deploy`), `evals/batch`,
+  `evals/recommendations`, `idp-extractions`, bulk `cases` POST — are open to anyone the proxy
+  admits, so whoever holds recon access can rewrite the Tier-2 agent's prompt and skills. Name the
+  group before you widen who signs in.
+- **`PIPELINE_ENABLED=false` (exact string) switches the pipeline app off** in the running console:
+  `resolveAppAccess` reports no access, `/api/me` hides it and the proxy 403s `/api/pipeline/*`.
+  Unset or anything else is enabled, so local dev needs no extra variable; the ECS task sets it from
+  `pipeline_enabled`. Recon has no such switch — it is always on.
+- **The pipeline BFF reads only the `PIPELINE_`-prefixed names.** `PIPELINE_ASSETS_BUCKET` and
+  `PIPELINE_AGENT_MODEL_PARAM` are required, `PIPELINE_SKILLS_PREFIX` defaults to `skills/`, and
+  there is no fallback to `ASSETS_BUCKET`, `AGENT_MODEL_PARAM` or `SKILLS_PREFIX`: in the console's
+  task those bare names are recon's and all three exist, so a fallback would have read recon's
+  bucket, model parameter or skills with no error at all. The standalone root's `env_local` output
+  renders the prefixed names too. The Lambdas keep bare names — they are separate processes.
 - **Sample emails come from disk when `data/deal-emails` exists and from S3 (`PIPELINE_SAMPLES_PREFIX`,
   default `samples/`) when it does not.** The container ships no `data/`, so Terraform seeds the corpus
   to the pipeline bucket; a new sample file needs an apply before the console shows it. Ids are the
@@ -103,10 +127,11 @@ local merge to `main` means no pipeline ever runs and nothing is applied, so the
 and isn't.
 
 ⚠️ `docs/` holds exactly one tracked file, `docs/deal-pipeline-design.md`, because it is the
-contract the pipeline's code and tests are written against. Everything else that used to live there —
-plans, design records, audit reports — stays untracked working notes: don't add a second file without
-the same justification, and don't cite an untracked `docs/` path from tracked code, because it
-resolves to nothing in a clone.
+contract the pipeline's code and tests are written against. `.gitignore` enforces the rest with
+`docs/*` plus a negation for that one file, so plans, design records and audit reports dropped into
+`docs/` stay untracked working notes even under `git add -A`. Tracking a second file means adding a
+second negation with the same justification — and never cite an untracked `docs/` path from tracked
+code, because it resolves to nothing in a clone.
 
 ## Deploys
 

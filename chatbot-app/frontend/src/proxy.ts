@@ -8,11 +8,14 @@
  *     mode. A failure is the 401 or 503 that `authorizeRequest` decided; the distinction matters
  *     because one means "sign in again" and the other means "the server is misconfigured or the
  *     identity provider is unreachable", and a client that retries the wrong one loops.
- *  2. Per-app access — an app-prefixed path additionally needs the caller in that app's access
- *     group (or its admin group, which implies access). An app whose access group is unset stays open
- *     to every authenticated user, so a deployment that predates the shell behaves exactly as it did.
- *     `/api/me` is not app-prefixed and stops at step 1: the shell calls it to learn WHICH apps to
- *     show, so it must answer for a caller who may use none of them.
+ *  2. Per-app access — an app-prefixed path additionally needs the app to be deployed
+ *     (`PIPELINE_ENABLED` is not "false") and the caller in that app's access group (or its admin
+ *     group, which implies access). An app whose access group is unset stays open to every
+ *     authenticated user, so a deployment that predates the shell behaves exactly as it did — unless
+ *     `REQUIRE_ACCESS_GROUPS=true`, which the composed deployment sets because "every authenticated
+ *     user" then includes the other app's desk; an unset group is admins-only there. `/api/me` is not
+ *     app-prefixed and stops at step 1: the shell calls it to learn WHICH apps to show, so it must
+ *     answer for a caller who may use none of them. The rules live in `lib/auth/apps.ts`.
  *
  * This is the fix for live-QA finding P0-2 (the recon BFF was reachable anonymously, including the
  * system-prompt PUT and the case-approval POST, both of which act with the ECS task role), widened

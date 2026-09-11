@@ -4,7 +4,7 @@ variable "backend_dir" {
 }
 
 variable "name" {
-  description = "Base name for the output zip (e.g. \"backend\")."
+  description = "Base name for the output zip AND for this instance's staging directory (.build/<name>/staging), e.g. \"backend\". Two roots that instantiate the module from one checkout must use different names or they stage over each other."
   type        = string
   default     = "backend"
 }
@@ -19,10 +19,11 @@ variable "runtime_dependencies" {
   # nothing while a root relied on it would ship a zip whose imports fail at cold start. With an
   # empty list stage.sh never calls pip.
   #
-  # One list for every Lambda a root deploys, because local.staging_dir is
-  # "${path.module}/.build/staging" and path.module is the module SOURCE directory — shared by
-  # every instance. A second instance of this module with its own dependency set would stage into
-  # the same directory and rm -rf the first one's work.
+  # One list for every Lambda a root deploys: a root builds ONE zip and every Lambda it deploys runs
+  # from it, so the list is the union of what all of them import. Roots do not share a staging
+  # directory (local.staging_dir is keyed by var.name), so the standalone deal-pipeline root's
+  # shorter list cannot end up in recon's zip -- two roots given the SAME name from one checkout
+  # would collide, which is why the standalone root names its instance differently.
   #
   # The recon root's list is DUPLICATED in .gitlab-ci.yml's pre-plan staging call, which passes it
   # as arguments to stage.sh. The two MUST agree: archive_file reads the staging directory at PLAN

@@ -228,10 +228,10 @@ describe("samples reader — S3 when the directory is absent", () => {
     expect(s3Send).not.toHaveBeenCalled();
   });
 
-  it("names the bucket variables when neither is set, rather than guessing", async () => {
+  it("names PIPELINE_ASSETS_BUCKET when it is unset, even with recon's ASSETS_BUCKET present", async () => {
     delete process.env.PIPELINE_ASSETS_BUCKET;
-    delete process.env.ASSETS_BUCKET;
-    await expect(listSamples()).rejects.toThrow(/PIPELINE_ASSETS_BUCKET \(or ASSETS_BUCKET\)/);
+    process.env.ASSETS_BUCKET = "recon-dev-assets";
+    await expect(listSamples()).rejects.toThrow(/^PIPELINE_ASSETS_BUCKET is not set/);
   });
 
   it("propagates a read failure instead of reporting an empty corpus", async () => {

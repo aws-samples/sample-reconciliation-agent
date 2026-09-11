@@ -107,12 +107,12 @@ export function DataTable<T>({
   // Re-read when the subject arrives (one render later than the first paint) and when the table's own
   // column set changes under us.
   useEffect(() => {
-    setPrefs(loadColumnPrefs(tableId, sub, defaults));
+    setPrefs(loadColumnPrefs("pipeline", tableId, sub, defaults));
   }, [tableId, sub, defaults]);
 
   const persist = (next: ColumnPref[]) => {
     setPrefs(next);
-    saveColumnPrefs(tableId, sub, next);
+    saveColumnPrefs("pipeline", tableId, sub, next);
   };
 
   const byId = useMemo(() => new Map(columns.map((c) => [c.id, c])), [columns]);

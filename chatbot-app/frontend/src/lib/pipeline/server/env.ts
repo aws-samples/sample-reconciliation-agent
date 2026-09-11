@@ -9,54 +9,45 @@
  * `.env.local` fails on the first request that needs the value rather than with an opaque SDK
  * error about an undefined table name.
  *
- * Three names carry a `PIPELINE_` prefix with a fallback to the bare name. In the composed console
- * the recon BFF and this BFF run in ONE Next.js process, and the recon side already owns
- * `ASSETS_BUCKET`, `AGENT_MODEL_PARAM` and `SKILLS_PREFIX` in that container's environment (see
- * `infra/modules/frontend-ecs`). Reading the bare name there would point the pipeline at recon's
- * bucket, recon's model parameter and recon's skills — with no error, because every one of those
- * exists. So the composed deployment sets the prefixed names and they win; the bare names remain
- * only so the standalone root's rendered `.env.local` (`terraform output -raw env_local`) keeps
- * working unchanged.
+ * Three names carry a `PIPELINE_` prefix and are read under that name ONLY. In the composed console
+ * the recon BFF and this BFF run in ONE Next.js process, and the recon side owns `ASSETS_BUCKET`,
+ * `AGENT_MODEL_PARAM` and `SKILLS_PREFIX` in that container's environment (see
+ * `infra/modules/frontend-ecs`). An earlier version fell back to those bare names, which meant a
+ * container whose pipeline variables were missing (a recon-only deployment, or a half-filled
+ * `.env.local`) pointed the Skills and Config tabs at recon's bucket, recon's live skills and recon's
+ * Tier-2 model parameter with no error at all: every one of those exists, and the task role can write
+ * them. So a missing `PIPELINE_ASSETS_BUCKET` or `PIPELINE_AGENT_MODEL_PARAM` now fails loudly on the
+ * first request that needs it, and `PIPELINE_SKILLS_PREFIX` falls back to the design's default prefix
+ * rather than to recon's. The standalone root's `env_local` output and `.env.example` already emit
+ * the prefixed names, so nothing that was correctly configured changes.
  */
 
-/** One variable name, or several aliases tried in order (first non-blank wins). */
-type Names = string | readonly string[];
-
-function asList(names: Names): readonly string[] {
-  return typeof names === "string" ? [names] : names;
+/** Trimmed value of one variable, or undefined when unset or blank (a blank value is a typo, not a name). */
+function read(name: string): string | undefined {
+  const value = process.env[name]?.trim();
+  return value || undefined;
 }
 
-/** First non-blank value among `names`, in order; undefined when none is set. */
-function firstSet(names: Names): string | undefined {
-  for (const name of asList(names)) {
-    const value = process.env[name]?.trim();
-    if (value) return value;
-  }
-  return undefined;
-}
-
-/** Read a required variable (or the first of its aliases), or throw a message naming them. */
-function required(names: Names): string {
-  const value = firstSet(names);
+/** Read a required variable, or throw a message naming it. */
+function required(name: string): string {
+  const value = read(name);
   if (!value) {
-    const [primary, ...aliases] = asList(names);
-    const label = aliases.length ? `${primary} (or ${aliases.join(", ")})` : primary;
     throw new Error(
-      `${label} is not set — copy it from the Terraform outputs into chatbot-app/frontend/.env.local`,
+      `${name} is not set — copy it from the Terraform outputs into chatbot-app/frontend/.env.local`,
     );
   }
   return value;
 }
 
-/** Read an optional variable (or the first of its aliases), falling back to the design's default. */
-function optional(names: Names, fallback: string): string {
-  return firstSet(names) ?? fallback;
+/** Read an optional variable, falling back to the design's default. */
+function optional(name: string, fallback: string): string {
+  return read(name) ?? fallback;
 }
 
 export const env = {
   region: (): string => optional("AWS_REGION", "us-east-1"),
-  /** Prefixed name first: in the shared container the bare name is recon's bucket. */
-  assetsBucket: (): string => required(["PIPELINE_ASSETS_BUCKET", "ASSETS_BUCKET"]),
+  /** The pipeline's own bucket. Never `ASSETS_BUCKET`: in the shared container that is recon's. */
+  assetsBucket: (): string => required("PIPELINE_ASSETS_BUCKET"),
   emailsTable: (): string => required("EMAILS_TABLE"),
   dealsTable: (): string => required("DEALS_TABLE"),
   skillProposalsTable: (): string => required("SKILL_PROPOSALS_TABLE"),
@@ -66,12 +57,12 @@ export const env = {
   chatMemoryId: (): string => optional("CHAT_MEMORY_ID", ""),
   parserFunction: (): string => required("PARSER_FUNCTION"),
   omsUploadFunction: (): string => required("OMS_UPLOAD_FUNCTION"),
-  /** Prefixed name first: in the shared container the bare name is recon's Tier-2 model parameter. */
-  agentModelParam: (): string =>
-    optional(
-      ["PIPELINE_AGENT_MODEL_PARAM", "AGENT_MODEL_PARAM"],
-      "/deal-pipeline-dev/agent-model-id",
-    ),
+  /**
+   * The pipeline's own model parameter. Never `AGENT_MODEL_PARAM`: in the shared container that is
+   * recon's Tier-2 parameter, and this BFF's `PUT /config` would overwrite it. Required rather than
+   * defaulted because a guessed SSM name fails no differently from a wrong one.
+   */
+  agentModelParam: (): string => required("PIPELINE_AGENT_MODEL_PARAM"),
   assistantModelId: (): string =>
     optional("ASSISTANT_MODEL_ID", "us.anthropic.claude-sonnet-5"),
   /** Relative paths resolve against `process.cwd()`, i.e. `chatbot-app/frontend` under `next dev`. */
@@ -79,12 +70,11 @@ export const env = {
     optional("SAMPLE_EMAILS_DIR", "../../data/deal-emails"),
   /**
    * S3 prefix the sample corpus is read from when the directory above does not exist — the
-   * container case, where `data/` is not shipped. Pipeline-only, so no bare-name fallback.
+   * container case, where `data/` is not shipped.
    */
   samplesPrefix: (): string => optional("PIPELINE_SAMPLES_PREFIX", "samples/"),
-  /** Prefixed name first: in the shared container the bare name is recon's skills prefix. */
-  skillsPrefix: (): string =>
-    optional(["PIPELINE_SKILLS_PREFIX", "SKILLS_PREFIX"], "skills/"),
+  /** The pipeline's own skills prefix. Never `SKILLS_PREFIX`: in the shared container that is recon's live skills. */
+  skillsPrefix: (): string => optional("PIPELINE_SKILLS_PREFIX", "skills/"),
   parserPromptKey: (): string =>
     optional("PARSER_PROMPT_KEY", "prompts/parser-system.md"),
 };

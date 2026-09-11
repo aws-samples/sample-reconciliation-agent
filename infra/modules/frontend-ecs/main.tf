@@ -352,22 +352,48 @@ resource "aws_iam_role" "ecs_task" {
 }
 
 # ---------------------------------------------------------------------------------
-# Deal-pipeline app: the S3 prefixes the console's BFF touches, named ONCE so the object grant, the
-# ListBucket condition and the environment cannot disagree (the same invariant modules/deal-pipeline
-# keeps for its Lambdas). prompts/ carries the parser prompt the Skills tab edits and the assistant
-# prompt the chat reads; emails/ is the BFF's own copy of each received email; deal-csv/ the staging
-# CSV the review screen downloads; security-master/ the counterparty list the assistant consults.
-# oms-staging/ is deliberately absent: only the mock OMS Lambda writes there, and nothing in the
-# console reads it back.
+# Deal-pipeline app: the S3 locations the console's BFF touches, named ONCE and grouped by the verbs
+# the BFF actually issues (src/lib/pipeline/server/{skillsStore,samples,emailStore,dealStore,
+# chatAgent}.ts), so the object grants, the ListBucket condition and the environment cannot disagree
+# -- the same verb-per-resource invariant modules/deal-pipeline keeps for its Lambdas. oms-staging/
+# is deliberately absent: only the mock OMS Lambda writes there, and nothing in the console reads it
+# back.
 # ---------------------------------------------------------------------------------
 locals {
-  pipeline_s3_prefixes = [
-    var.pipeline_skills_prefix,
-    "prompts/",
-    "emails/",
-    "deal-csv/",
-    var.pipeline_samples_prefix,
-    "security-master/",
+  # The assistant system prompt's key is a constant in the BFF (ASSISTANT_PROMPT_KEY in
+  # src/lib/pipeline/server/env.ts) rather than an environment variable, so it is spelled out here
+  # and nowhere else in this module.
+  pipeline_assistant_prompt_key = "prompts/assistant-system.md"
+
+  # Read only. samples/ and security-master/ are Terraform-managed seeds that track the repo, and
+  # the assistant prompt has no UI editor; the BFF only ever GETs them. PutObject or DeleteObject here
+  # would let a compromised task rewrite counterparties.csv -- the list the mock OMS validator trusts
+  # and the one the parser role is deliberately denied write access to -- or delete the sample
+  # corpus, and either would stand until the next apply re-uploaded the seed.
+  pipeline_s3_read_only = [
+    "${var.pipeline_samples_prefix}*",
+    "security-master/*",
+    local.pipeline_assistant_prompt_key,
+  ]
+  # Read and write, no delete. emails/<id>.json is the BFF's own copy of each received email;
+  # deal-csv/<id>.csv is the staging CSV the BFF re-renders when a deal's fields are edited; the
+  # parser prompt is the one prompt the Skills tab edits in place. Nothing removes any of them: a
+  # rejected deal and a superseded email stay on the record.
+  pipeline_s3_read_write = [
+    "emails/*",
+    "deal-csv/*",
+    var.pipeline_parser_prompt_key,
+  ]
+  # Read, write AND delete: the Skills tab. A retired skill is removed, not blanked, or the parser
+  # would still load an empty SKILL.md.
+  pipeline_s3_read_write_delete = [
+    "${var.pipeline_skills_prefix}*",
+  ]
+  # The only two prefixes the BFF LISTS: the Skills tab lists skills/, the simulate dialog lists
+  # samples/. Everything else is addressed by exact key.
+  pipeline_s3_listed_prefixes = [
+    "${var.pipeline_skills_prefix}*",
+    "${var.pipeline_samples_prefix}*",
   ]
 
   # Every ARN the pipeline statements below name. The precondition on the policy checks these are
@@ -390,7 +416,8 @@ locals {
   #
   # The three PIPELINE_-prefixed names collide with recon's ASSETS_BUCKET / AGENT_MODEL_PARAM /
   # SKILLS_PREFIX, which name recon's bucket, parameter and prefix in the same process; the pipeline
-  # BFF reads the prefixed name first. The rest are unprefixed because nothing in recon reads them.
+  # BFF reads ONLY the prefixed names (a bare-name fallback once resolved to recon's bucket and
+  # parameter in this very task). The rest are unprefixed because nothing in recon reads them.
   pipeline_task_environment = [
     { name = "PIPELINE_ASSETS_BUCKET", value = var.pipeline_assets_bucket },
     { name = "PIPELINE_AGENT_MODEL_PARAM", value = var.pipeline_agent_model_param },
@@ -414,37 +441,48 @@ locals {
   # was before the app rail existed.
   pipeline_task_statements = [
     {
-      # The three pipeline tables plus the deals table's indexes (the inbox reads a deal by its
-      # email through the by_email GSI, and a Query on an index needs the index ARN). Scan because
-      # the inbox, the deal list and the proposals list are all rendered whole -- these are demo-
-      # scale tables with no listing index. No DeleteItem: rows are superseded or rejected, never
-      # removed, so a proposal's decision and a deal's rejection stay on the record.
+      # The three pipeline tables, with exactly the verbs src/lib/pipeline/server/aws.ts exports:
+      # getItem, putItem (whole-row writes, conditional where a status transition needs it) and
+      # scanAll. Scan because the inbox, the deal list and the proposals list are all rendered whole
+      # -- demo-scale tables with no listing index. No UpdateItem, no Query and no index ARN: the BFF
+      # issues neither (the by_email GSI is the parser Lambda's, for re-parse). No DeleteItem: rows
+      # are superseded or rejected, never removed, so a proposal's decision and a deal's rejection
+      # stay on the record.
       Effect = "Allow"
-      Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Query", "dynamodb:Scan"]
+      Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Scan"]
       Resource = [
         var.pipeline_emails_table_arn,
         var.pipeline_deals_table_arn,
-        "${var.pipeline_deals_table_arn}/index/*",
         var.pipeline_skill_proposals_table_arn,
       ]
     },
     {
-      # Object-level, on the six prefixes above and nothing else in the bucket. DeleteObject is for
-      # the Skills tab (a retired skill is removed, not blanked, or the parser would still load an
-      # empty SKILL.md). Note the parser Lambda's own role in modules/deal-pipeline can read none of
-      # emails/ or deal-csv/; this role can, because it is the one writing them.
+      # Object-level, one statement per access tier (the locals above), and nothing else in the
+      # bucket. Note the parser Lambda's own role in modules/deal-pipeline can read none of emails/
+      # or deal-csv/; this role can, because it is the one writing them.
       Effect   = "Allow"
-      Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
-      Resource = [for p in local.pipeline_s3_prefixes : "${var.pipeline_assets_bucket_arn}/${p}*"]
+      Action   = ["s3:GetObject"]
+      Resource = [for p in local.pipeline_s3_read_only : "${var.pipeline_assets_bucket_arn}/${p}"]
     },
     {
-      # ListBucket authorizes on the BUCKET arn; the prefix condition confines it to the same six
-      # prefixes as the object grant, the way the recon statements above scope skills/ and
-      # lambda-src/. The simulate dialog lists samples/, the Skills tab lists skills/.
+      Effect   = "Allow"
+      Action   = ["s3:GetObject", "s3:PutObject"]
+      Resource = [for p in local.pipeline_s3_read_write : "${var.pipeline_assets_bucket_arn}/${p}"]
+    },
+    {
+      Effect   = "Allow"
+      Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+      Resource = [for p in local.pipeline_s3_read_write_delete : "${var.pipeline_assets_bucket_arn}/${p}"]
+    },
+    {
+      # ListBucket authorizes on the BUCKET arn; the prefix condition confines it to the two prefixes
+      # the BFF lists, the way the recon statements above scope skills/ and lambda-src/. Narrower
+      # than the object grants on purpose: a listing is how a compromised task would discover keys it
+      # was never told about.
       Effect    = "Allow"
       Action    = ["s3:ListBucket"]
       Resource  = var.pipeline_assets_bucket_arn
-      Condition = { StringLike = { "s3:prefix" = [for p in local.pipeline_s3_prefixes : "${p}*"] } }
+      Condition = { StringLike = { "s3:prefix" = local.pipeline_s3_listed_prefixes } }
     },
     {
       # Intake and reparse async-invoke the parser; approve invokes the mock OMS synchronously.
@@ -465,15 +503,17 @@ locals {
       ]
     },
     {
-      # Both pipeline memories. Knowledge: the assistant's save_memory tool writes an event, the
-      # Memory Manager lists and deletes consolidated records. Chat: the assistant appends each turn
-      # and rebuilds history on page load (ListEvents), and a cleared session deletes its events.
-      # GetMemory is the read behind the Memory Manager's strategy panel, the same as recon's.
+      # Both pipeline memories, with exactly the commands src/lib/pipeline/server/memoryClient.ts
+      # sends. Knowledge: the assistant's save_memory tool writes an event (CreateEvent), the
+      # assistant recalls consolidated records (RetrieveMemoryRecords), the Memory Manager lists and
+      # batch-deletes them. Chat: the assistant appends each turn (CreateEvent) and rebuilds history
+      # on page load (ListEvents). GetMemory is the read behind the Memory Manager's strategy panel,
+      # the same as recon's. No DeleteEvent: nothing in the pipeline BFF deletes an event -- the recon
+      # session routes that do target recon's MEMORY_ID under recon's own grant.
       Effect = "Allow"
       Action = [
         "bedrock-agentcore:CreateEvent",
         "bedrock-agentcore:ListEvents",
-        "bedrock-agentcore:DeleteEvent",
         "bedrock-agentcore:RetrieveMemoryRecords",
         "bedrock-agentcore:ListMemoryRecords",
         "bedrock-agentcore:BatchDeleteMemoryRecords",
@@ -987,12 +1027,24 @@ resource "aws_ecs_task_definition" "frontend" {
       { name = "AUTH_GROUPS_CLAIM", value = var.auth_groups_claim },
       # --- Per-app access (src/lib/auth/apps.ts) ---
       # Always present, pipeline deployed or not: the proxy and /api/me resolve every app in the
-      # registry from these, and an unset ACCESS group is the "open to every authenticated user"
-      # reading that keeps a pre-rail deployment's behaviour. RECON_ADMIN_GROUP above is the recon
-      # app's admin group; this is the pipeline's. Both admin groups fail closed when empty.
+      # registry from these. RECON_ADMIN_GROUP above is the recon app's admin group; this is the
+      # pipeline's. Both admin groups fail closed when empty.
       { name = "RECON_ACCESS_GROUP", value = var.recon_access_group },
       { name = "PIPELINE_ACCESS_GROUP", value = var.pipeline_access_group },
       { name = "PIPELINE_ADMIN_GROUP", value = var.pipeline_admin_group },
+      # Whether the pipeline app is deployed in this console at all. Exactly "false" makes the shell
+      # resolve it as inaccessible for everyone (/api/me hides it, the proxy 403s /api/pipeline/*);
+      # anything else, including unset on a developer's laptop, means enabled. Without this a
+      # recon-only console showed a Deal Pipeline entry whose pages failed with a missing-variable 500
+      # and whose Skills and Config tabs read recon's resources.
+      { name = "PIPELINE_ENABLED", value = tostring(var.pipeline_enabled) },
+      # How a BLANK access group reads. "false": open to every authenticated user, which is what every
+      # recon-only deployment had before the rail existed. "true": denied to non-admins (fail closed).
+      # Tied to pipeline_enabled because that is the moment "every authenticated user" stops meaning
+      # "every recon analyst": two populations sign in through one OIDC client, and several recon
+      # write routes are gated by the access check alone. The validation on pipeline_enabled already
+      # refuses a blank group at plan; this is the runtime backstop for the same invariant.
+      { name = "REQUIRE_ACCESS_GROUPS", value = var.pipeline_enabled ? "true" : "false" },
       # Deal-pipeline BFF variables, only when that app is deployed here (local.pipeline_task_environment).
     ], [for e in local.pipeline_task_environment : e if var.pipeline_enabled])
     logConfiguration = {

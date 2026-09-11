@@ -45,27 +45,30 @@ mock upload with structured failures, chatbot + memory manager, skills tab with 
   to a short-term AgentCore Memory so a session survives reload.
 - **Storage**: one S3 bucket, three DynamoDB tables, two AgentCore Memories, one SSM parameter.
 - **Terraform**: `infra/environments/deal-pipeline` (local state) using
-  `infra/modules/deal-pipeline` and the existing `lambda-package` module. Provider
+  `infra/modules/deal-pipeline` and the existing `lambda-package` module. That root's provider sets
   `default_tags = { Project = "deal-pipeline-demo" }` on every resource. The recon environment
-  composes the same module when `enable_deal_pipeline = true` (§13).
+  composes the same module when `enable_deal_pipeline = true`, under its own prefix and its own
+  (untagged) provider (§13).
 
 ## 3. Naming and tagging
 
 | Thing | Value |
 | --- | --- |
-| name prefix | `deal-pipeline-dev` |
+| name prefix | `deal-pipeline-dev` from the standalone root; `<name_prefix>-pipeline` (e.g. `recon-dev-pipeline`) when the recon root composes the module, so every name below shifts accordingly (§13) |
 | S3 bucket | `deal-pipeline-dev-assets-<account_id>` |
 | DynamoDB | `deal-pipeline-dev-emails`, `deal-pipeline-dev-deals`, `deal-pipeline-dev-skill-proposals` |
 | Memories | `deal_pipeline_dev_knowledge` (strategy `edge_cases`), `deal_pipeline_dev_chat` (no strategy, 7-day expiry) |
 | Lambdas | `deal-pipeline-dev-parser`, `deal-pipeline-dev-oms-upload` |
 | SSM | `/deal-pipeline-dev/agent-model-id` (default `us.anthropic.claude-sonnet-5`) |
-| Tag | `Project = deal-pipeline-demo` on everything |
+| Tag | `Project = deal-pipeline-demo` on everything the standalone root creates; the module itself tags nothing, so the composed root's resources carry only what the recon provider applies (none) |
 
 S3 layout:
 
 ```
 skills/<name>/SKILL.md          agent skills (seeded from agent-blueprint/deal-pipeline-agent/skills)
-prompts/parser-system.md        parsing agent system prompt (seeded, editable in the Skills tab)
+prompts/parser-system.md        parsing agent system prompt (seeded once, editable in the Skills tab)
+prompts/assistant-system.md     desk assistant system prompt (seeded, tracks the repo on every apply;
+                                no UI editor, fixed key in src/lib/pipeline/server/env.ts)
 security-master/issuers.csv     fictional issuer reference data (seeded from data/security-master)
 security-master/counterparties.csv  OMS canonical arranger names + aliases (seeded)
 samples/<file>.json             the simulated inbox's corpus (seeded from data/deal-emails, file
@@ -258,8 +261,13 @@ per-app access; this app's `/me` keeps answering for its own hooks.
 | `/config` | GET, PUT | `{modelId}` via SSM; PUT **admin-gated** |
 
 Authorization: `ALLOW_ANONYMOUS_API=true` admits everything (local dev; `ANONYMOUS_GROUPS`
-narrows the anonymous subject to named groups to preview a restricted user). `PIPELINE_ACCESS_GROUP`
-decides who may call any of these routes at all — unset, every authenticated user may.
+narrows the anonymous subject to named groups to preview a restricted user). The older
+`RECON_ALLOW_ANONYMOUS_API` and `PIPELINE_ALLOW_ANONYMOUS_API` are the same switch — any of the three
+being exactly `true` opens both BFFs, and none may be set in a deployment. `PIPELINE_ACCESS_GROUP`
+decides who may call any of these routes at all — unset, every authenticated user may, unless
+`REQUIRE_ACCESS_GROUPS=true`, in which case a blank group denies everyone but admins (§13).
+`PIPELINE_ENABLED=false` takes the whole app away: `/api/me` reports no access and the proxy answers
+403 here regardless of groups.
 `PIPELINE_ADMIN_GROUP` gates every route that changes what the next parse does or what reaches
 the OMS: approve/reject, field edits (PATCH `/deals/[id]`), skill and parser-prompt writes,
 proposal decisions, memory add and delete (the REST routes and the assistant's `save_memory` /
@@ -286,6 +294,8 @@ ALLOW_ANONYMOUS_API=true
 # ANONYMOUS_GROUPS=deal-desk
 PIPELINE_ACCESS_GROUP=
 PIPELINE_ADMIN_GROUP=deal-desk-admins
+# REQUIRE_ACCESS_GROUPS=true   (console: blank access group denies instead of opens)
+# PIPELINE_ENABLED=false       (console: switch this app off; unset = enabled)
 NEXT_PUBLIC_AUTH_PROVIDER=entra
 AWS_REGION=us-east-1
 PIPELINE_ASSETS_BUCKET=
@@ -305,25 +315,30 @@ PARSER_PROMPT_KEY=prompts/parser-system.md
 ```
 
 `src/lib/pipeline/server/env.ts` is the single reader of these names. Three of them carry a
-`PIPELINE_` prefix with a fallback to the bare name — `PIPELINE_ASSETS_BUCKET ?? ASSETS_BUCKET`,
-`PIPELINE_AGENT_MODEL_PARAM ?? AGENT_MODEL_PARAM`, `PIPELINE_SKILLS_PREFIX ?? SKILLS_PREFIX` —
-because in the console the recon BFF owns the bare names in the same process (§13). The
-standalone root's `terraform output -raw env_local` still renders the bare names and keeps
-working; the composed deployment sets the prefixed ones. `PIPELINE_SAMPLES_PREFIX` (default
-`samples/`) has no bare form: it names where the corpus lives in S3 when `SAMPLE_EMAILS_DIR` does
-not exist on the server. The Lambdas are separate processes and keep `ASSETS_BUCKET`,
-`AGENT_MODEL_PARAM` and `SKILLS_PREFIX` unprefixed.
+`PIPELINE_` prefix and are read **only** under that prefix — `PIPELINE_ASSETS_BUCKET` (required),
+`PIPELINE_AGENT_MODEL_PARAM` (required), `PIPELINE_SKILLS_PREFIX` (default `skills/`) — with no
+fallback to `ASSETS_BUCKET`, `AGENT_MODEL_PARAM` or `SKILLS_PREFIX`, because in the console the
+recon BFF owns the bare names in the same process (§13) and a fallback would have read recon's
+values without an error. The standalone root's `terraform output -raw env_local` renders the
+prefixed names; the composed deployment sets the same ones on the task. `PIPELINE_SAMPLES_PREFIX`
+(default `samples/`) names where the corpus lives in S3 when `SAMPLE_EMAILS_DIR` does not exist on
+the server. The Lambdas are separate processes and keep `ASSETS_BUCKET`, `AGENT_MODEL_PARAM` and
+`SKILLS_PREFIX` unprefixed.
 
 Authorization names are the console's, shared with the recon app: `ALLOW_ANONYMOUS_API` (exact
 `true`) replaces token verification with one anonymous subject that holds every configured group,
-or only the comma-separated groups in `ANONYMOUS_GROUPS`; `PIPELINE_ACCESS_GROUP` (unset = open
-to every authenticated user) and `PIPELINE_ADMIN_GROUP` (unset = nobody) are read by
-`src/lib/auth/apps.ts` and `src/lib/pipelineAdmin.ts`.
+or only the comma-separated groups in `ANONYMOUS_GROUPS`. `RECON_ALLOW_ANONYMOUS_API` and
+`PIPELINE_ALLOW_ANONYMOUS_API` — each app's spelling from before the shell — are honoured as the
+same switch, so a deployment must carry none of the three. `PIPELINE_ACCESS_GROUP` (unset = open
+to every authenticated user, or denied when `REQUIRE_ACCESS_GROUPS=true`) and
+`PIPELINE_ADMIN_GROUP` (unset = nobody) are read through `accessGroupFor` / `adminGroupFor` in
+`src/lib/auth/apps.ts` and by `src/lib/pipelineAdmin.ts`; `PIPELINE_ENABLED` (exact `false` =
+app off) is the pipeline entry's `enabledEnv` in the same registry.
 
 Two further groups are read from `.env.local` and only matter with a real identity provider.
 Server-side token verification — `AUTH_PROVIDER`, `OKTA_ISSUER`, `OKTA_CLIENT_ID`,
-`ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `AUTH_GROUPS_CLAIM` — is read only when
-`ALLOW_ANONYMOUS_API` is not `true`; an incomplete set is a 503 from the BFF, never an open door.
+`ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `AUTH_GROUPS_CLAIM` — is read only when none of the three
+anonymous switches is `true`; an incomplete set is a 503 from the BFF, never an open door.
 Browser-side login — `NEXT_PUBLIC_ENTRA_TENANT_ID`, `NEXT_PUBLIC_ENTRA_CLIENT_ID`,
 `NEXT_PUBLIC_ENTRA_API_AUDIENCE`, `NEXT_PUBLIC_OKTA_ISSUER`, `NEXT_PUBLIC_OKTA_CLIENT_ID`,
 `NEXT_PUBLIC_OKTA_REDIRECT_URI` — is active only when the provider named by
@@ -355,36 +370,60 @@ and so are this app's; a shell around both adds what neither had.
 **Shell.** `/` is a landing chooser with one card per app the signed-in viewer may open (a viewer
 with exactly one app is sent straight into it). Inside an app a collapsible vertical rail on the
 left switches between the apps the viewer has access to. The registry behind both is
-`src/lib/auth/apps.ts`: id, label, page prefix (`/pipeline`), BFF prefix (`/api/pipeline`) and the
-two group variable names per app. `/api/me` returns the `Viewer` — subject, groups, auth mode and
+`src/lib/auth/apps.ts`: id, label, page prefix (`/pipeline`), BFF prefix (`/api/pipeline`), the
+two group variable names per app and, for this app only, `enabledEnv: "PIPELINE_ENABLED"` — the
+value `false` (exact) makes `resolveAppAccess` report `{access: false, admin: false}`, so `/api/me`
+hides the app and the proxy 403s `/api/pipeline/*`; unset or anything else is enabled, and recon
+has no such switch. `/api/me` returns the `Viewer` — subject, groups, auth mode and
 `apps.<id>.{access, admin}` — and the shell renders from that alone.
 
 **Access groups.** Permissions come from the identity-provider group claim the BFF already verifies
 (`AUTH_GROUPS_CLAIM`). Each app has an access group and an admin group; admins implicitly have
 access. For this app: `PIPELINE_ACCESS_GROUP` and `PIPELINE_ADMIN_GROUP`; for recon,
-`RECON_ACCESS_GROUP` and `RECON_ADMIN_GROUP`. An unset access group leaves that app open to every
-authenticated user — the behaviour every deployment had before the shell — and an unset admin
-group fails closed, as before. `src/proxy.ts` applies the access check to every `/api/pipeline/*`
-request before the handler runs, and the admin-gated routes in §9 re-check the admin group for
-themselves; the rail not showing an app is a courtesy on top of the gate. Local development uses
-anonymous mode, which grants every app and both admin roles; `ANONYMOUS_GROUPS` previews a
+`RECON_ACCESS_GROUP` and `RECON_ADMIN_GROUP`, read through `accessGroupFor` / `adminGroupFor`
+(trimmed, `""` when unset). An unset access group leaves that app open to every authenticated user —
+the behaviour a recon-only deployment had before the shell — and an unset admin group fails closed,
+as before. That open default is only safe while one population signs in, so the console has
+`REQUIRE_ACCESS_GROUPS`: exactly `true` makes a blank access group **deny** the app to everyone but
+its admins. The composed deployment sets it whenever the pipeline is enabled, and the recon root
+refuses to plan `enable_deal_pipeline = true` while either access group is blank. `src/proxy.ts`
+applies the access check to every `/api/pipeline/*` and `/api/recon/*` request before the handler
+runs. Behind it the two apps differ: every admin-gated route in §9 re-checks `PIPELINE_ADMIN_GROUP`
+for itself, whereas on the recon side only `config/*`, `memory` DELETE and `uploads` re-check
+`RECON_ADMIN_GROUP` — recon's `system-prompt`, `skills`, `harness/configs`, `evals/batch`,
+`idp-extractions` and bulk `cases` writes are gated by access alone, so `RECON_ACCESS_GROUP` is the
+boundary around what the reconciliation agent does (the README's "Two applications, one console"
+lists both sets). The rail not showing an app is a courtesy on top of the gate. Local development
+uses anonymous mode, which grants every app and both admin roles; `ANONYMOUS_GROUPS` previews a
 restricted user (§11).
 
 **Prefixed environment names.** Both BFFs run in one Next.js process, and the recon side already
 owns `ASSETS_BUCKET`, `AGENT_MODEL_PARAM` and `SKILLS_PREFIX` in the container's environment. The
 pipeline BFF therefore reads `PIPELINE_ASSETS_BUCKET`, `PIPELINE_AGENT_MODEL_PARAM` and
-`PIPELINE_SKILLS_PREFIX` first and the bare names only as a fallback for the standalone
-`.env.local`. In the composed task the prefixed names must always be set: the bare ones exist and
-are recon's, so a missing prefixed name would read recon's bucket, model parameter or skills
-without any error. `PIPELINE_SAMPLES_PREFIX` is new and pipeline-only.
+`PIPELINE_SKILLS_PREFIX`, and **only** those: there is no fallback to the bare names, because in
+the composed task the bare ones exist and are recon's, so a fallback would have read recon's
+bucket, model parameter or skills without any error. A missing `PIPELINE_ASSETS_BUCKET` or
+`PIPELINE_AGENT_MODEL_PARAM` fails the first request that needs it, naming the variable;
+`PIPELINE_SKILLS_PREFIX` defaults to `skills/`. The standalone root's `env_local` output renders the
+prefixed names as well. `PIPELINE_SAMPLES_PREFIX` is new and pipeline-only.
 
 **Composed Terraform.** `infra/environments/recon` gains `enable_deal_pipeline` (default `false`).
 When true it instantiates `infra/modules/deal-pipeline` beside `modules/frontend-ecs`, grants the
 console's task role the bucket, table, memory, Lambda and SSM access this app needs, and passes the
-task the §11 variables under the prefixed names. The module's resources, names and tags are the
-ones in §3, so the standalone root and the composed one create the same things; only the caller
-differs. `infra/environments/deal-pipeline` stays as the standalone root for running this app alone
-against `npm run dev` with local state.
+task the §11 variables under the prefixed names together with `PIPELINE_ENABLED=true` and
+`REQUIRE_ACCESS_GROUPS=true`; with the flag off the task carries `PIPELINE_ENABLED=false` and no
+pipeline environment or grants. The plan is refused while `recon_access_group` or
+`pipeline_access_group` is blank. The module creates the same *kinds* of resources as §3, but
+**not the same names or tags**: the composed root instantiates it with
+`name_prefix = "<name_prefix>-pipeline"` (default `recon-dev-pipeline`), so the §3 names become
+`recon-dev-pipeline-emails`, `recon-dev-pipeline-assets-<account_id>`,
+`/recon-dev-pipeline/agent-model-id`, `recon_dev_pipeline_knowledge` and so on — deliberately, so a
+standalone `deal-pipeline-dev` deployment in the same account never collides with it — and the recon
+provider sets no `default_tags`, so none of those resources carries `Project = deal-pipeline-demo`;
+that tag, and the tag-search cleanup story built on it, belong to the standalone root alone. Find
+the composed root's pipeline resources by the `<name_prefix>-pipeline` prefix or through its
+Terraform state. `infra/environments/deal-pipeline` stays as the standalone root for running this
+app alone against `npm run dev` with local state.
 
 **Samples from S3 in the container.** The console image holds the built app and no `data/`, so
 the simulated inbox cannot read `data/deal-emails` there. `infra/modules/deal-pipeline` seeds the
@@ -395,7 +434,7 @@ same ids (the file or object name without `.json`), so a sample picked from the 
 environment reads back on the next request. Nothing is cached in either mode; a new sample on disk
 shows up on the next open, and a new sample in S3 after the apply that seeded it.
 
-**Decoupling.** The two apps share the auth module (`src/lib/auth/`, `src/lib/api-auth.ts`,
+**Decoupling.** The two apps share the auth module (`src/lib/auth/`, including `client-token.ts`, the one browser-side ID-token reader both `recon-auth.ts` and `pipeline-auth.ts` re-export; `src/lib/api-auth.ts`,
 `src/lib/reauth.ts`), the `src/components/ui/` primitives and a few app-agnostic helpers, and
 nothing else: no import crosses from `src/{app,components,lib,hooks}/*pipeline*` into `*recon*` or
 back. Adding a third app is one entry in `APPS` plus its own route trees.

@@ -6,16 +6,23 @@
  * proxy's 403, `/api/me`, the rail, the landing page — so its table is pinned here case by case. The
  * property that matters most is the compatibility one: an app whose access group is UNSET is open to
  * every authenticated user, because that is what every deployment did before the shell existed, and a
- * shell rollout must not lock out a desk that has not yet created the group.
+ * shell rollout must not lock out a desk that has not yet created the group. Two switches qualify it
+ * and are pinned just as carefully: `REQUIRE_ACCESS_GROUPS=true` closes an unset group to non-admins
+ * (the composed deployment, where "everyone" means two desks), and an app's `enabledEnv` at exactly
+ * "false" removes the app altogether (a recon-only console must not list an undeployed pipeline).
  */
 import { describe, expect, it } from "vitest";
 
 import {
   APPS,
+  accessGroupFor,
+  accessGroupsRequired,
+  adminGroupFor,
   allConfiguredGroups,
   appById,
   appForApiPath,
   appForPagePath,
+  isAppEnabled,
   resolveAppAccess,
 } from "@/lib/auth/apps";
 
@@ -43,6 +50,56 @@ describe("APPS registry", () => {
       expect(app.apiPrefix).toBe(`/api${app.pathPrefix}`);
       expect(app.href.startsWith(`${app.pathPrefix}/`)).toBe(true);
     }
+  });
+
+  it("makes only the pipeline an opt-in deployment", () => {
+    // Recon is the console's original app and has no switch; the pipeline is `enable_deal_pipeline`
+    // in Terraform, so its presence must be told to the process.
+    expect(appById("recon")!.enabledEnv).toBeUndefined();
+    expect(appById("pipeline")!.enabledEnv).toBe("PIPELINE_ENABLED");
+  });
+});
+
+describe("isAppEnabled", () => {
+  it("is always on for an app with no enablement variable", () => {
+    expect(isAppEnabled("recon", { PIPELINE_ENABLED: "false" })).toBe(true);
+  });
+
+  it.each([undefined, "true", "1", "", "  false ", "False", "no"])(
+    "keeps the pipeline enabled when PIPELINE_ENABLED is %j",
+    (value) => {
+      // Only the literal "false" (Terraform's tostring(false)) disables: an unset variable is every
+      // laptop and every deployment that predates it, and a typo must fail towards the visible state.
+      expect(isAppEnabled("pipeline", { PIPELINE_ENABLED: value })).toBe(true);
+    },
+  );
+
+  it("disables the pipeline on exactly false, by id or by definition", () => {
+    expect(isAppEnabled("pipeline", { PIPELINE_ENABLED: "false" })).toBe(false);
+    expect(isAppEnabled(appById("pipeline")!, { PIPELINE_ENABLED: "false" })).toBe(false);
+  });
+});
+
+describe("accessGroupsRequired", () => {
+  it("is only the literal true", () => {
+    expect(accessGroupsRequired({ REQUIRE_ACCESS_GROUPS: "true" })).toBe(true);
+    for (const value of [undefined, "", "TRUE", "1", "yes", " true"]) {
+      expect(accessGroupsRequired({ REQUIRE_ACCESS_GROUPS: value }), String(value)).toBe(false);
+    }
+  });
+});
+
+describe("accessGroupFor / adminGroupFor", () => {
+  it("return the trimmed group, by id or by definition", () => {
+    const env = { RECON_ACCESS_GROUP: "  recon-users ", RECON_ADMIN_GROUP: "recon-admin  " };
+    expect(accessGroupFor("recon", env)).toBe("recon-users");
+    expect(adminGroupFor("recon", env)).toBe("recon-admin");
+    expect(adminGroupFor(appById("recon")!, env)).toBe("recon-admin");
+  });
+
+  it("return an empty string for an unset or blank variable", () => {
+    expect(accessGroupFor("pipeline", {})).toBe("");
+    expect(adminGroupFor("pipeline", { PIPELINE_ADMIN_GROUP: "   " })).toBe("");
   });
 });
 
@@ -116,6 +173,63 @@ describe("resolveAppAccess", () => {
     expect(
       resolveAppAccess([""], { RECON_ACCESS_GROUP: "   ", RECON_ADMIN_GROUP: "" }).recon,
     ).toEqual({ access: true, admin: false });
+  });
+});
+
+describe("resolveAppAccess for a disabled app", () => {
+  const DISABLED = { ...RESTRICTED, PIPELINE_ENABLED: "false" };
+
+  it("is closed to everyone, including the app's own admins", () => {
+    // Nothing is deployed to administer, and `admin: true` would make the rail show a chip for an app it
+    // must not list.
+    expect(resolveAppAccess(["deal-desk", "deal-desk-admins"], DISABLED).pipeline).toEqual({
+      access: false,
+      admin: false,
+    });
+  });
+
+  it("is closed even when no group is configured at all", () => {
+    // The recon-only upgrade path: every group variable blank, PIPELINE_ENABLED=false from Terraform.
+    expect(resolveAppAccess(["anything"], { PIPELINE_ENABLED: "false" })).toEqual({
+      recon: { access: true, admin: false },
+      pipeline: { access: false, admin: false },
+    });
+  });
+
+  it("does not affect the other app", () => {
+    expect(resolveAppAccess(["recon-admin"], DISABLED).recon).toEqual({ access: true, admin: true });
+  });
+});
+
+describe("resolveAppAccess under REQUIRE_ACCESS_GROUPS", () => {
+  const CLOSED = { REQUIRE_ACCESS_GROUPS: "true", RECON_ADMIN_GROUP: "recon-admin" };
+
+  it("denies an app whose access group is unset to a caller who is not its admin", () => {
+    // The composed deployment: "every authenticated user" is two desks, and recon has write routes that
+    // rely on the access group as their only gate.
+    expect(resolveAppAccess(["deal-desk"], CLOSED).recon).toEqual({ access: false, admin: false });
+    expect(resolveAppAccess([], CLOSED).recon).toEqual({ access: false, admin: false });
+  });
+
+  it("treats a blank access group as unset, so it is denied too", () => {
+    expect(
+      resolveAppAccess([""], { ...CLOSED, RECON_ACCESS_GROUP: "   " }).recon,
+    ).toEqual({ access: false, admin: false });
+  });
+
+  it("still admits the app's admins: fail closed, not locked out", () => {
+    expect(resolveAppAccess(["recon-admin"], CLOSED).recon).toEqual({ access: true, admin: true });
+  });
+
+  it("changes nothing for an app whose access group IS configured", () => {
+    const env = { ...RESTRICTED, REQUIRE_ACCESS_GROUPS: "true" };
+    expect(resolveAppAccess(["recon-users"], env).recon).toEqual({ access: true, admin: false });
+    expect(resolveAppAccess(["deal-desk"], env).recon).toEqual({ access: false, admin: false });
+  });
+
+  it("is ignored unless the value is exactly true", () => {
+    expect(resolveAppAccess([], { REQUIRE_ACCESS_GROUPS: "TRUE" }).recon.access).toBe(true);
+    expect(resolveAppAccess([], { REQUIRE_ACCESS_GROUPS: "1" }).recon.access).toBe(true);
   });
 });
 

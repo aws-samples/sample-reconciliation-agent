@@ -23,7 +23,8 @@
 # local.stage_hash (backend sources + dependency set + platform + python version), not on
 # the script body. That is deliberate -- editing a comment here must not repackage and
 # redeploy both Lambdas. The rsync --exclude list below IS mirrored in main.tf
-# (local.unstaged_names): a file this script does not stage must not be hashed either.
+# (local.unstaged_names + local.unstaged_suffixes): a file this script does not stage must not be
+# hashed either, and a file that is hashed must be staged. Change both or neither.
 #
 # Usage:
 #   stage.sh <staging_dir> <backend_dir> <lambda_platform> <lambda_python_version> [dep...]
@@ -56,6 +57,12 @@ mkdir -p "$STAGING_DIR/backend"
 # backend/ is staged NESTED, as $STAGING_DIR/backend/, because archive_file puts a
 # directory's *contents* at the zip root. Handlers import `backend.<pkg>.<module>`, so the
 # zip root has to hold a backend/ package directory, not backend/'s contents.
+#
+# Every pattern here is name-only (no slash), so rsync matches it against each component of a path
+# and excludes the file or directory at any depth -- the same rule main.tf's hash applies. The OS
+# and tool droppings (.DS_Store, .mypy_cache, *.egg-info, .coverage, .hypothesis, *.swp) are
+# gitignored or untracked, so they are invisible to git status yet present on disk; excluding them
+# is what keeps a Finder visit or a coverage run from shipping in the zip.
 rsync -a --delete \
   --exclude '__pycache__' \
   --exclude '*.pyc' \
@@ -63,6 +70,12 @@ rsync -a --delete \
   --exclude '.build' \
   --exclude '.ruff_cache' \
   --exclude '.pytest_cache' \
+  --exclude '.mypy_cache' \
+  --exclude '.hypothesis' \
+  --exclude '.DS_Store' \
+  --exclude '.coverage' \
+  --exclude '*.egg-info' \
+  --exclude '*.swp' \
   "$BACKEND_DIR/" "$STAGING_DIR/backend/"
 
 # Vendored deps (none today: both Lambdas are boto3 + stdlib) go at the staging ROOT so they

@@ -159,25 +159,30 @@ variable "auth_groups_claim" {
 # ---------------------------------------------------------------------------------
 # Two apps behind one app rail: per-app ACCESS groups, and the pipeline's ADMIN group.
 #
-# The console now hosts the reconciliation app and the deal-pipeline app side by side, and the
-# proxy decides per request whether the caller may use the app the route belongs to. Same source
-# of truth as recon_admin_group: an OIDC group claim, maintained in Okta or Entra, never created
-# here. The two kinds of group deliberately fail in opposite directions:
-#   * ACCESS groups default to "" = OPEN to every authenticated user. That is exactly what every
-#     deployment had before the rail existed, so upgrading changes nobody's access; name a group to
-#     restrict an app.
+# The console hosts the reconciliation app and the deal-pipeline app side by side, and the proxy
+# decides per request whether the caller may use the app the route belongs to. Same source of truth
+# as recon_admin_group: an OIDC group claim, maintained in Okta or Entra, never created here.
 #   * ADMIN groups default to "" = NOBODY, the fail-closed reading recon_admin_group already has.
+#   * ACCESS groups default to "" = OPEN to every authenticated user -- but only while this root
+#     deploys the recon app ALONE (enable_deal_pipeline = false). That is what every deployment had
+#     before the rail existed, so a recon-only upgrade changes nobody's access.
+#   * With enable_deal_pipeline = true BOTH access groups are required: the validation on that
+#     variable refuses a blank one at plan, and the console runs with REQUIRE_ACCESS_GROUPS=true so
+#     a blank group fails CLOSED at runtime as well. "Every authenticated user" stops meaning "every
+#     recon analyst" the moment a second population signs in through the same OIDC client, and
+#     several recon write routes (system prompt, skills, harness configs, evals, case status) are
+#     gated by the access check alone, so the deal desk must not inherit them by default.
 # Admins implicitly have access, so an administrator never needs to be in both groups.
 # ---------------------------------------------------------------------------------
 
 variable "recon_access_group" {
-  description = "OIDC group whose members may use the reconciliation app. Empty (the default) leaves it open to every authenticated user."
+  description = "OIDC group whose members may use the reconciliation app. Empty (the default) leaves it open to every authenticated user in a recon-only deployment; REQUIRED (non-blank) when enable_deal_pipeline is true."
   type        = string
   default     = ""
 }
 
 variable "pipeline_access_group" {
-  description = "OIDC group whose members may use the deal-pipeline app. Empty (the default) leaves it open to every authenticated user. Only meaningful with enable_deal_pipeline = true."
+  description = "OIDC group whose members may use the deal-pipeline app. REQUIRED (non-blank) when enable_deal_pipeline is true; ignored when it is false."
   type        = string
   default     = ""
 }
@@ -197,10 +202,20 @@ variable "enable_deal_pipeline" {
     Deploy the deal-pipeline app beside the recon platform: its bucket, three tables, two AgentCore
     Memories, SSM parameter and two Lambdas (under the "<name_prefix>-pipeline" prefix), plus the
     console's environment and task-role grants for it. false (the default) leaves an existing recon
-    deployment exactly as it was; the rail then shows only the reconciliation app.
+    deployment exactly as it was: the console is told PIPELINE_ENABLED=false, so the rail shows only
+    the reconciliation app and /api/pipeline/* is refused. true REQUIRES recon_access_group and
+    pipeline_access_group to be set.
   EOT
   type        = bool
   default     = false
+
+  validation {
+    # Cross-variable validation (Terraform >= 1.9). Refused at PLAN, naming the variables the operator
+    # sets, rather than deploying a console in which the whole deal desk passes recon's access check.
+    # trimspace() because a whitespace-only group is what the console treats as blank.
+    condition     = !var.enable_deal_pipeline || (trimspace(var.recon_access_group) != "" && trimspace(var.pipeline_access_group) != "")
+    error_message = "enable_deal_pipeline = true requires both recon_access_group and pipeline_access_group to be set (non-blank). With two apps behind one OIDC client, a blank access group would admit every deal-desk user to the recon app (and every recon analyst to the pipeline), including recon's access-gated write routes. Name both groups, or set enable_deal_pipeline = false."
+  }
 }
 
 variable "pipeline_agent_model_id" {

@@ -13,9 +13,11 @@ import { resolveAppAccess, type Viewer } from "@/lib/auth/apps";
 // This route is the one BFF path the proxy admits on authentication alone (see `lib/auth/access.ts`).
 // That is deliberate: a caller who may use no app still needs to be told so, and this is where.
 //
-// Everything in the body decides only what the UI SHOWS. The proxy re-checks access on every
-// app-prefixed call and each write route re-checks its admin group, so a client that lies to itself
-// about this gets a 403 rather than data or a write.
+// Everything in the body decides only what the UI SHOWS. The proxy re-checks access (and enablement)
+// on every app-prefixed call, and the admin-gated write routes re-check their admin group for
+// themselves, so a client that lies to itself about this gets a 403 rather than data or a write. Note
+// the qualifier: recon's system-prompt, skills, harness and case writes are access-gated only, which
+// is why the access group (and `REQUIRE_ACCESS_GROUPS` on a composed console) is a real boundary.
 export const runtime = "nodejs";
 
 /**

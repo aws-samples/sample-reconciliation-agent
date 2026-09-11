@@ -457,21 +457,27 @@ variable "intake_function_arn" {
 #
 # Each app has an ACCESS group ("may use it") and an ADMIN group ("may change its configuration and
 # approve"); admins implicitly have access. Both are OIDC group claims, like recon_admin_group above:
-# nothing here creates a group. The two kinds of group fail in OPPOSITE directions on purpose --
-#   * an unset ACCESS group leaves the app open to every authenticated user, which is exactly what
-#     every deployment had before the rail existed, so adding the rail changes nobody's access;
-#   * an unset ADMIN group means nobody administers the app, the same fail-closed reading
+# nothing here creates a group.
+#   * An unset ADMIN group means nobody administers the app, the same fail-closed reading
 #     recon_admin_group has always had.
+#   * An unset ACCESS group is open to every authenticated user ONLY in a recon-only console
+#     (pipeline_enabled = false), which is exactly what every deployment had before the rail
+#     existed, so adding the rail changes nobody's access there.
+#   * With pipeline_enabled = true both access groups are REQUIRED: the validation on that variable
+#     refuses a blank one at plan, and the task runs with REQUIRE_ACCESS_GROUPS=true so a blank
+#     group fails closed at runtime as well. Two populations then sign in through one OIDC client,
+#     and recon has write routes (system prompt, skills, harness configs, evals, case status) that
+#     the access check alone gates, so the deal desk must not inherit them by default.
 # ---------------------------------------------------------------------------------
 
 variable "recon_access_group" {
-  description = "OIDC group whose members may use the reconciliation app. Empty (the default) leaves it open to every authenticated user; recon_admin_group members have access regardless."
+  description = "OIDC group whose members may use the reconciliation app. Empty leaves it open to every authenticated user in a recon-only console; REQUIRED (non-blank) when pipeline_enabled is true. recon_admin_group members have access regardless."
   type        = string
   default     = ""
 }
 
 variable "pipeline_access_group" {
-  description = "OIDC group whose members may use the deal-pipeline app. Empty (the default) leaves it open to every authenticated user; pipeline_admin_group members have access regardless."
+  description = "OIDC group whose members may use the deal-pipeline app. REQUIRED (non-blank) when pipeline_enabled is true; ignored when it is false. pipeline_admin_group members have access regardless."
   type        = string
   default     = ""
 }
@@ -494,14 +500,23 @@ variable "pipeline_admin_group" {
 # Three names are PIPELINE_-prefixed in the container (PIPELINE_ASSETS_BUCKET,
 # PIPELINE_AGENT_MODEL_PARAM, PIPELINE_SKILLS_PREFIX) because the recon BFF already reads
 # ASSETS_BUCKET, AGENT_MODEL_PARAM and SKILLS_PREFIX for ITS bucket, parameter and prefix, and one
-# process cannot hold two values under one name. The pipeline BFF reads the prefixed name first and
-# falls back to the bare one, so the standalone root's .env.local keeps working either way.
+# process cannot hold two values under one name. The pipeline BFF reads ONLY the prefixed names: a
+# fallback to the bare ones would resolve to recon's bucket and parameter in this very task, which is
+# why the standalone root's env_local output emits the prefixed names as well.
 # ---------------------------------------------------------------------------------
 
 variable "pipeline_enabled" {
-  description = "Deploy the deal-pipeline app inside this console: its environment variables and task-role grants. false (the default) is the recon-only console."
+  description = "Deploy the deal-pipeline app inside this console: its environment variables and task-role grants, PIPELINE_ENABLED=true and REQUIRE_ACCESS_GROUPS=true. false (the default) is the recon-only console: PIPELINE_ENABLED=false hides the app and refuses its API. true requires recon_access_group and pipeline_access_group."
   type        = bool
   default     = false
+
+  validation {
+    # Cross-variable validation (Terraform >= 1.9). Refused at PLAN, naming both groups, rather than
+    # deploying a console in which the whole deal desk passes recon's access check. trimspace()
+    # because a whitespace-only group is what the console treats as blank.
+    condition     = !var.pipeline_enabled || (trimspace(var.recon_access_group) != "" && trimspace(var.pipeline_access_group) != "")
+    error_message = "pipeline_enabled = true requires both recon_access_group and pipeline_access_group to be set (non-blank). With two apps behind one OIDC client, a blank access group would admit every deal-desk user to the recon app (and every recon analyst to the pipeline), including recon's access-gated write routes. Name both groups, or set pipeline_enabled = false."
+  }
 }
 
 variable "pipeline_assets_bucket" {
@@ -528,7 +543,7 @@ variable "pipeline_emails_table_arn" {
 }
 
 variable "pipeline_deals_table" {
-  description = "Deal-pipeline deals table name (DEALS_TABLE). The grant also covers its indexes: the inbox reads deals by email through the by_email GSI."
+  description = "Deal-pipeline deals table name (DEALS_TABLE). The grant covers the table alone: the BFF reads deals by GetItem and Scan, and the by_email GSI is the parser Lambda's (re-parse), not the console's."
   type        = string
   default     = ""
 }

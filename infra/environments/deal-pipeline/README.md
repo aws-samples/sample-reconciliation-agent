@@ -17,13 +17,18 @@ This root is the **local-development** shape: the pipeline's AWS resources under
 `modules/deal-pipeline` behind `enable_deal_pipeline = true`, under the `<name_prefix>-pipeline`
 prefix (so the two never collide in one account), and the recon console's ECS task serves both apps
 behind an app rail. Per-app access there is `recon_access_group` / `pipeline_access_group` /
-`pipeline_admin_group` in the recon root's tfvars.
+`pipeline_admin_group` in the recon root's tfvars; with `enable_deal_pipeline = true` both access
+groups are **required** (the plan refuses a blank one) and the task runs with
+`REQUIRE_ACCESS_GROUPS=true`, so a blank group fails closed rather than open. A recon-only console
+gets `PIPELINE_ENABLED=false`, which hides the pipeline app and 403s its API.
 
 The frontend is one process serving two apps, which is why three of the variables below carry a
 `PIPELINE_` prefix: the recon app already reads `ASSETS_BUCKET`, `AGENT_MODEL_PARAM` and
 `SKILLS_PREFIX` for *its* bucket, parameter and prefix. The pipeline BFF reads
-`PIPELINE_ASSETS_BUCKET`, `PIPELINE_AGENT_MODEL_PARAM` and `PIPELINE_SKILLS_PREFIX` first and falls
-back to the bare names, so an older `.env.local` keeps working.
+`PIPELINE_ASSETS_BUCKET`, `PIPELINE_AGENT_MODEL_PARAM` and `PIPELINE_SKILLS_PREFIX` **only** -- there
+is no fallback to the bare names, because in the composed console a fallback silently pointed the
+pipeline's Skills and Config tabs at recon's bucket and model parameter. Re-render `.env.local` from
+`env_local` if yours predates the prefix.
 
 ## Deploy
 
@@ -100,11 +105,13 @@ demo data only.
   *do* track the repo: editing `data/deal-emails/*.json` re-uploads on the next apply.
 - **The Config tab owns the model parameter.** `/deal-pipeline-dev/agent-model-id` is seeded from
   `agent_model_id` and then ignored; change the model in the UI, not in tfvars.
-- **Shared staging directory.** `lambda-package` stages into a directory under its own module path,
-  shared by every root that uses the module. Plan/apply one root at a time from a single checkout.
-  The recon root passes a longer `runtime_dependencies` list (its zip also feeds the recon Lambdas),
-  so switching between the two roots re-stages: expect `terraform_data.stage` to replace and both
-  functions' `source_code_hash` to read known-after-apply on the first plan after the other root ran.
+- **Per-root staging directory.** `lambda-package` stages into `.build/<name>/staging` under its own
+  module path, keyed by the `name` each root passes (`deal-pipeline-backend` here, the default
+  `backend` in the recon root), so the two roots keep separate staging trees and separate zips in
+  one checkout. Nothing re-stages when you switch roots; each root's `terraform_data.stage` keys on
+  its own sources, dependency list and name. The directories used to be one, and a recon plan that
+  followed an apply here zipped this root's tzdata-only tree for every recon Lambda with no replace
+  in the plan to show for it. Two roots given the *same* `name` would still collide.
 - **The whole `backend/` tree is packaged**, not just `backend/deal_pipeline`. In a checkout that also
   holds the recon backend, the zip is larger than the two handlers need; it is one shared packager
   and the cost is a few megabytes, not a behaviour difference.
@@ -114,8 +121,8 @@ demo data only.
   `terraform plan` shows the change as a replace of `module.lambda_package.terraform_data.stage`
   and both functions' `source_code_hash` as known-after-apply.
 - **If `plan` fails with "could not archive missing directory".** The gitignored
-  `infra/modules/lambda-package/.build/` is gone (for example after `git clean -fdx`) while the
-  state still records the staging as current. Rebuild it with
+  `infra/modules/lambda-package/.build/deal-pipeline-backend/staging` is gone (for example after
+  `git clean -fdx`) while the state still records the staging as current. Rebuild it with
   `terraform apply -replace=module.lambda_package.terraform_data.stage`, or run
   `infra/modules/lambda-package/stage.sh` by hand with the arguments its header lists.
 - **Parser async retries are 0.** The BFF invokes the parser with `InvocationType=Event`; the

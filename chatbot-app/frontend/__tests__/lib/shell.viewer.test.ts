@@ -1,23 +1,29 @@
 /**
  * The console viewer: the shell's one identity read.
  *
- * Three properties matter. The request must carry the same ID token the BFF verifies everywhere else;
- * a failure must surface as a readable error (the banner shows it) rather than as a silent "no apps";
- * and however many shell pieces mount, `/api/me` is asked ONCE per page load, which is what the
- * module-scope promise is for.
+ * Four properties matter. The request must carry the same ID token the BFF verifies everywhere else
+ * (through the console-level helper, not either app's); a failure must surface as a readable error (the
+ * banner shows it) rather than as a silent "no apps", and a 401 must start the same re-authentication
+ * the apps' fetch wrappers do; however many shell pieces mount, `/api/me` is asked ONCE per page load;
+ * and because the frame stays mounted for the whole session, every mounted hook must see the result of
+ * a request that a later mount or an explicit reload started — the cache is a store, not a snapshot.
  */
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Viewer } from "@/lib/auth/apps";
 
 const authHeaders = vi.fn();
-vi.mock("@/lib/pipeline-auth", () => ({ authHeaders: () => authHeaders() }));
+vi.mock("@/lib/auth/client-token", () => ({ authHeaders: () => authHeaders() }));
+const reauthenticate = vi.fn();
+vi.mock("@/lib/reauth", () => ({ reauthenticate: (...a: unknown[]) => reauthenticate(...a) }));
 
 import {
   fetchViewer,
   isShellHidden,
+  loadViewer,
   normalizeViewer,
+  reloadViewer,
   resetViewerCache,
   useViewer,
 } from "@/lib/shell/viewer";
@@ -49,6 +55,7 @@ function jsonResponse(body: unknown, status = 200) {
 beforeEach(() => {
   resetViewerCache();
   authHeaders.mockReset().mockResolvedValue({ Authorization: "Bearer id-token-1" });
+  reauthenticate.mockReset().mockResolvedValue(true);
 });
 
 describe("isShellHidden", () => {
@@ -104,7 +111,7 @@ describe("normalizeViewer", () => {
 });
 
 describe("fetchViewer", () => {
-  it("GETs /api/me with the shared ID-token header", async () => {
+  it("GETs /api/me with the console-level ID-token header", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(viewer()));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -121,6 +128,8 @@ describe("fetchViewer", () => {
       vi.fn().mockResolvedValue(jsonResponse({ error: "AUTH_PROVIDER is unset" }, 503)),
     );
     await expect(fetchViewer()).rejects.toThrow("GET /api/me failed (503): AUTH_PROVIDER is unset");
+    // A 503 is a server problem; signing in again would not fix it, so no redirect is started.
+    expect(reauthenticate).not.toHaveBeenCalled();
   });
 
   it("still names the status when the failure body is not JSON", async () => {
@@ -136,6 +145,27 @@ describe("fetchViewer", () => {
       }),
     );
     await expect(fetchViewer()).rejects.toThrow("GET /api/me failed (502): Bad Gateway");
+  });
+
+  it("starts the automatic re-authentication on a 401 and still reports the failure", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ error: "missing or malformed Authorization header" }, 401)),
+    );
+    // `/api/me` is the only request the landing page makes, so without this an expired session on `/`
+    // would sit on the error card forever while every app page re-authenticated itself.
+    await expect(fetchViewer()).rejects.toThrow("GET /api/me failed (401)");
+    expect(reauthenticate).toHaveBeenCalledWith("unauthorized");
+  });
+
+  it("does not let a refused or failed re-authentication mask the 401", async () => {
+    reauthenticate.mockRejectedValue(new Error("provider unreachable"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ error: "expired" }, 401)));
+
+    await expect(fetchViewer()).rejects.toThrow("GET /api/me failed (401): expired");
+    await waitFor(() => expect(consoleError).toHaveBeenCalled());
+    consoleError.mockRestore();
   });
 });
 
@@ -163,32 +193,107 @@ describe("useViewer", () => {
   });
 
   it("hands a later mount the settled viewer on its first render", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(viewer())));
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(viewer()));
+    vi.stubGlobal("fetch", fetchMock);
     const first = renderHook(() => useViewer());
     await waitFor(() => expect(first.result.current.loading).toBe(false));
 
     // Client-side navigation to `/` mounts the landing page after the rail already knows the answer; it
-    // must not flash a skeleton for a value that is already in hand.
+    // must not flash a skeleton for a value that is already in hand, nor ask again.
     const second = renderHook(() => useViewer());
     expect(second.result.current).toEqual({ viewer: viewer(), loading: false, error: null });
+    await act(async () => {});
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("reports a failure as an error string and lets the next mount retry", async () => {
+  it("reports a failure as an error string", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ error: "identity provider unreachable" }, 503)),
+    );
+    const { result } = renderHook(() => useViewer());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.viewer).toBeNull();
+    expect(result.current.error).toContain("503");
+    expect(result.current.error).toContain("identity provider unreachable");
+  });
+
+  it("lets a later mount retry after a failure, and the earlier mount sees the recovery too", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({ error: "identity provider unreachable" }, 503))
       .mockResolvedValueOnce(jsonResponse(viewer()));
     vi.stubGlobal("fetch", fetchMock);
 
-    const failed = renderHook(() => useViewer());
-    await waitFor(() => expect(failed.result.current.loading).toBe(false));
-    expect(failed.result.current.viewer).toBeNull();
-    expect(failed.result.current.error).toContain("503");
-    expect(failed.result.current.error).toContain("identity provider unreachable");
+    // The frame: mounted once for the whole session.
+    const frame = renderHook(() => useViewer());
+    await waitFor(() => expect(frame.result.current.loading).toBe(false));
+    expect(frame.result.current.error).toContain("503");
 
-    const retried = renderHook(() => useViewer());
-    await waitFor(() => expect(retried.result.current.loading).toBe(false));
-    expect(retried.result.current.viewer).toEqual(viewer());
+    // The landing page: mounted later by a navigation. Its mount retries, and the frame — which
+    // never remounts — must not stay on the stale failure while the page shows both app cards.
+    const landing = renderHook(() => useViewer());
+    await waitFor(() => expect(landing.result.current.viewer).toEqual(viewer()));
+    expect(frame.result.current).toEqual({ viewer: viewer(), loading: false, error: null });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("reloadViewer re-asks /api/me and moves every subscriber through loading to the new answer", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(viewer()))
+      .mockResolvedValueOnce(jsonResponse(viewer({ subject: "sub-2" })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const a = renderHook(() => useViewer());
+    const b = renderHook(() => useViewer());
+    await waitFor(() => expect(a.result.current.viewer).toEqual(viewer()));
+
+    let pending!: Promise<unknown>;
+    act(() => {
+      pending = reloadViewer();
+    });
+    // Nothing renders the old identity while the new one is on its way.
+    expect(a.result.current).toEqual({ viewer: null, loading: true, error: null });
+    expect(b.result.current).toEqual({ viewer: null, loading: true, error: null });
+
+    await act(async () => {
+      await pending;
+    });
+    expect(a.result.current.viewer?.subject).toBe("sub-2");
+    expect(b.result.current.viewer?.subject).toBe("sub-2");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("shares one request between a reload and a load that overlap", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(viewer()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = reloadViewer();
+    expect(loadViewer()).toBe(first);
+    expect(reloadViewer()).toBe(first);
+    await first;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores the answer of a request that a reset superseded", async () => {
+    let resolve!: (value: unknown) => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockReturnValue(
+        new Promise((r) => {
+          resolve = r;
+        }),
+      ),
+    );
+    const { result } = renderHook(() => useViewer());
+    expect(result.current.loading).toBe(true);
+
+    // The cache is forgotten while the request is still out; the late answer must not repopulate it.
+    act(() => resetViewerCache());
+    await act(async () => {
+      resolve(jsonResponse(viewer()));
+    });
+    expect(result.current).toEqual({ viewer: null, loading: true, error: null });
   });
 });

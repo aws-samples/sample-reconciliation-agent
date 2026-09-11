@@ -96,21 +96,25 @@ otel_layer_account = "<12-digit-account-id>"
 
 # WHO MAY USE EACH APP. The console hosts two apps behind an app rail -- Trade Reconciliation and Deal
 # Pipeline -- and the proxy checks the caller's group claim against the app a route belongs to. Same
-# rules as recon_admin_group: an IdP group, never created here. An access group left EMPTY (the
-# default) keeps that app OPEN to every authenticated user, which is what this deployment had before
-# the rail, so an upgrade changes nobody's access; name a group to restrict. Members of an app's admin
-# group have access implicitly. The pipeline admin group fails CLOSED like recon_admin_group: empty
-# means nobody can approve deals, edit skills, decide proposals or change the pipeline's model.
+# rules as recon_admin_group: an IdP group, never created here. In a RECON-ONLY deployment
+# (enable_deal_pipeline = false) an access group left EMPTY keeps that app OPEN to every authenticated
+# user, which is what this deployment had before the rail, so an upgrade changes nobody's access.
+# With enable_deal_pipeline = true BOTH access groups are REQUIRED -- the plan refuses a blank one,
+# and the console fails closed on a blank group at runtime -- because two populations then sign in
+# through one OIDC client and several recon write routes are gated by the access check alone.
+# Members of an app's admin group have access implicitly. The pipeline admin group fails CLOSED like
+# recon_admin_group: empty means nobody can approve deals, edit skills, decide proposals or change
+# the pipeline's model.
 # recon_access_group    = "recon-users"
 # pipeline_access_group = "deal-desk"
 # pipeline_admin_group  = "deal-desk-admins"
 
 # DEAL-PIPELINE APP. Off by default; true composes infra/modules/deal-pipeline into this root under
 # the "<name_prefix>-pipeline" prefix (so it cannot collide with a standalone deal-pipeline-dev
-# deployment in the same account) and wires the console to it. The model ids mirror the standalone
-# root's: the agent model seeds the pipeline's Config-tab parameter and is also what the assistant
-# chat invokes; the memory model is pinned separately so a Config-tab switch cannot change how
-# memories are extracted.
+# deployment in the same account) and wires the console to it. REQUIRES recon_access_group and
+# pipeline_access_group above. The model ids mirror the standalone root's: the agent model seeds the
+# pipeline's Config-tab parameter and is also what the assistant chat invokes; the memory model is
+# pinned separately so a Config-tab switch cannot change how memories are extracted.
 # enable_deal_pipeline     = true
 # pipeline_agent_model_id  = "us.anthropic.claude-sonnet-5"
 # pipeline_memory_model_id = "us.anthropic.claude-sonnet-5"

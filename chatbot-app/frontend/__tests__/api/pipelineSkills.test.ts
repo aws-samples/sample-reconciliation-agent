@@ -11,9 +11,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
 
 process.env.AWS_REGION = "us-east-1";
-process.env.ASSETS_BUCKET = "test-assets";
+process.env.PIPELINE_ASSETS_BUCKET = "test-assets";
 process.env.SKILL_PROPOSALS_TABLE = "test-proposals";
-process.env.SKILLS_PREFIX = "skills/";
+process.env.PIPELINE_SKILLS_PREFIX = "skills/";
 process.env.PARSER_PROMPT_KEY = "prompts/parser-system.md";
 
 const ddbSend = vi.fn();

@@ -148,9 +148,12 @@ module "frontend" {
   recon_admin_group = var.recon_admin_group
   auth_groups_claim = var.auth_groups_claim
 
-  # Per-app access behind the app rail (chatbot-app/frontend/src/lib/auth/apps.ts). Access groups
-  # default to "" = open to every authenticated user, which is what this deployment had before the
-  # rail; the pipeline admin group fails closed like recon_admin_group.
+  # Per-app access behind the app rail (chatbot-app/frontend/src/lib/auth/apps.ts). In a recon-only
+  # console an access group of "" is open to every authenticated user, which is what this deployment
+  # had before the rail. With enable_deal_pipeline both groups are required -- validated on that
+  # variable here and again on pipeline_enabled inside the module -- and the module tells the console
+  # to fail closed on a blank one (REQUIRE_ACCESS_GROUPS). The pipeline admin group fails closed like
+  # recon_admin_group.
   recon_access_group    = var.recon_access_group
   pipeline_access_group = var.pipeline_access_group
   pipeline_admin_group  = var.pipeline_admin_group

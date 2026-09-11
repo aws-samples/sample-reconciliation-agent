@@ -44,15 +44,26 @@ The apps do not import each other. What they share is the auth module (`src/lib/
 app-agnostic helpers; each keeps its own theme CSS, nav, hooks and BFF. Who may open which app comes
 from identity-provider groups — `RECON_ACCESS_GROUP` / `RECON_ADMIN_GROUP` and `PIPELINE_ACCESS_GROUP`
 / `PIPELINE_ADMIN_GROUP`, resolved by `src/lib/auth/apps.ts`. An unset access group leaves that app
-open to every authenticated user; an unset admin group means nobody can change it. Locally,
-`ALLOW_ANONYMOUS_API=true` grants everything and `ANONYMOUS_GROUPS` previews a restricted user;
-`frontend/.env.example` is the template for both apps.
+open to every authenticated user, unless `REQUIRE_ACCESS_GROUPS=true`, which the composed deployment
+sets whenever the pipeline is enabled: then a blank access group denies the app to everyone but its
+admins. An unset admin group means nobody can change it. `PIPELINE_ENABLED=false` switches the
+pipeline app off entirely (hidden from `/api/me`, 403 from the proxy); unset means enabled. Locally,
+`ALLOW_ANONYMOUS_API=true` grants everything and `ANONYMOUS_GROUPS` previews a restricted user — the
+pre-shell names `RECON_ALLOW_ANONYMOUS_API` and `PIPELINE_ALLOW_ANONYMOUS_API` still mean the same
+thing, and none of the three belongs in a deployment. `frontend/.env.example` is the template for
+both apps.
 
-Because the pipeline BFF shares the process with recon's, it reads `PIPELINE_ASSETS_BUCKET`,
-`PIPELINE_AGENT_MODEL_PARAM` and `PIPELINE_SKILLS_PREFIX` first and the bare names only as a fallback
-for the standalone `.env.local` — in the container the bare names are recon's. Its sample emails come
-from `data/deal-emails` when that directory exists and from S3 under `PIPELINE_SAMPLES_PREFIX` when it
-does not (`src/lib/pipeline/server/samples.ts`).
+Admin gating differs between the apps, and it matters for what an access group buys. Every pipeline
+write route re-checks `PIPELINE_ADMIN_GROUP`. On the recon side only `config/*`, `memory` DELETE and
+`uploads` do; `system-prompt`, `skills`, `harness/configs`, `evals/batch` and bulk `cases` writes are
+open to anyone the proxy admits, so `RECON_ACCESS_GROUP` is the real boundary on the recon agent's
+behaviour.
+
+Because the pipeline BFF shares the process with recon's, it reads only `PIPELINE_ASSETS_BUCKET`,
+`PIPELINE_AGENT_MODEL_PARAM` and `PIPELINE_SKILLS_PREFIX` — never the bare names, which in the
+container are recon's and all exist, so a fallback would silently read recon's bucket. Its sample
+emails come from `data/deal-emails` when that directory exists and from S3 under
+`PIPELINE_SAMPLES_PREFIX` when it does not (`src/lib/pipeline/server/samples.ts`).
 
 ## The BFF exists because the browser must not hold credentials
 

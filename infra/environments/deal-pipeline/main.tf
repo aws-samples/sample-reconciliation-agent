@@ -7,10 +7,10 @@
 # runtime_dependencies vendors exactly one pure-Python wheel: tzdata, the IANA database Python's
 # zoneinfo falls back to when the runtime image ships none, so Date Arrived is computed in the desk
 # time zone rather than silently in UTC. Everything else is boto3 (supplied by the Lambda runtime)
-# and the standard library. `name` gives this root its
-# own zip file name; the module's STAGING directory is still shared with any other root using
-# this module (it lives under the module source path), so do not plan or apply two roots
-# concurrently from one checkout -- the second staging run rm -rf's the first.
+# and the standard library. `name` gives this root its own zip file name AND its own staging
+# directory under the module path (.build/deal-pipeline-backend/), so this root and the recon root
+# can be planned from one checkout without staging over each other: with one shared directory, a
+# recon plan that followed an apply here zipped this root's tzdata-only tree for every recon Lambda.
 module "lambda_package" {
   source               = "../../modules/lambda-package"
   name                 = "deal-pipeline-backend"

@@ -42,23 +42,42 @@ group ("may change how it behaves"), named by four environment variables on the 
 registry that reads them is `chatbot-app/frontend/src/lib/auth/apps.ts`; adding an app is one entry
 there plus its own route trees.
 
-| Variable                | Grants                                                                                                              | Unset means                          |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| `RECON_ACCESS_GROUP`    | may open Trade Reconciliation                                                                                       | open to every authenticated user     |
-| `RECON_ADMIN_GROUP`     | may change its configuration (auto-resolve threshold, agent backend, Tier-1, contacts, templates); implies access   | nobody can change configuration      |
-| `PIPELINE_ACCESS_GROUP` | may open Deal Pipeline                                                                                              | open to every authenticated user     |
-| `PIPELINE_ADMIN_GROUP`  | may approve or reject deals, edit staged fields, write skills, prompts and memories, change the model; implies access | nobody can change the pipeline      |
+| Variable                | Grants                                                                                                                                                                                    | Unset means                                                              |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `RECON_ACCESS_GROUP`    | may open Trade Reconciliation — and, because most recon writes check nothing further, may rewrite the agent's system prompt, skills and harness configs (see below)                       | open to every authenticated user, unless `REQUIRE_ACCESS_GROUPS=true`    |
+| `RECON_ADMIN_GROUP`     | may change its configuration (auto-resolve threshold, agent backend, Tier-1, contacts, templates, workflow types), delete memory records and upload documents; implies access              | nobody can change configuration                                          |
+| `PIPELINE_ACCESS_GROUP` | may open Deal Pipeline: read, chat, simulate an email, reparse, propose a skill change                                                                                                     | open to every authenticated user, unless `REQUIRE_ACCESS_GROUPS=true`    |
+| `PIPELINE_ADMIN_GROUP`  | may approve or reject deals, edit staged fields, write skills, the parser prompt and memories, decide proposals, change the model; implies access                                          | nobody can change the pipeline                                           |
+| `REQUIRE_ACCESS_GROUPS` | `true` (exact) makes a blank access group **deny** that app to everyone but its admins, instead of opening it. The composed deployment sets it whenever the pipeline is enabled            | a blank access group is open (the recon-only behaviour from before the shell) |
+| `PIPELINE_ENABLED`      | `false` (exact) switches the Deal Pipeline app off in a running console: `/api/me` hides it and `/api/pipeline/*` answers 403. The ECS task sets it from `pipeline_enabled`               | enabled — local development needs nothing extra; recon has no such switch |
 
-An unset **access** group keeps an app open to all authenticated users, which is exactly what every
-deployment had before the shell existed; set it to restrict. An unset **admin** group fails closed,
-as it always has. Nothing in Terraform creates a group: an operator maintains membership in Okta or
-Entra and the next token carries it. The access check runs in `src/proxy.ts` for every
-`/api/recon/*` and `/api/pipeline/*` request, and each write route re-checks the admin group for
-itself, so an app hidden from the rail is a courtesy on top of the gate, not the gate.
+An unset **access** group keeps an app open to all authenticated users, which is exactly what a
+recon-only deployment had before the shell existed. That default stops being safe the moment two
+populations sign in through one OIDC client — a deal-desk user is then "authenticated" for
+`/api/recon/*` too — so the composed deployment fails closed: `REQUIRE_ACCESS_GROUPS=true` is set
+whenever the pipeline is enabled, and `infra/environments/recon` refuses to plan
+`enable_deal_pipeline = true` while either `recon_access_group` or `pipeline_access_group` is blank.
+An unset **admin** group fails closed, as it always has. Nothing in Terraform creates a group: an
+operator maintains membership in Okta or Entra and the next token carries it.
+
+The access check runs in `src/proxy.ts` for every `/api/recon/*` and `/api/pipeline/*` request. What
+happens after it differs between the apps. **Every Deal Pipeline write route re-checks
+`PIPELINE_ADMIN_GROUP`** (§9 of the design doc lists them). **Trade Reconciliation's admin group
+gates only part of its writes**: `config/*` (threshold, backend, Tier-1, contacts, templates,
+workflow types), `memory` DELETE and `uploads`; the case-decision routes (`cases/[id]`, its `draft`)
+verify the acting user. The remaining recon writes — `system-prompt`, `skills` (create, edit,
+delete), `harness/configs` and its `deploy`, `evals/batch`, `evals/recommendations`,
+`idp-extractions` and the bulk `cases` update — carry no admin check at all: anyone the proxy admits
+may call them. `RECON_ACCESS_GROUP` is therefore the real boundary around what the reconciliation
+agent does, and an app hidden from the rail is a courtesy on top of the proxy, not the gate.
 
 **Local development** runs without an identity provider. `ALLOW_ANONYMOUS_API=true` in
 `chatbot-app/frontend/.env.local` skips token verification and grants every app and both admin roles
-to the single `anonymous` subject. To preview what a restricted user sees, set `ANONYMOUS_GROUPS` to
+to the single `anonymous` subject. The BFF honours two older names for the same switch,
+`RECON_ALLOW_ANONYMOUS_API` and `PIPELINE_ALLOW_ANONYMOUS_API` (each app's pre-shell spelling); any
+one of the three being exactly `true` opens **both** BFFs, so an audit of a task definition must
+look for all three, and none of them belongs in a deployment. To preview what a restricted user
+sees, set `ANONYMOUS_GROUPS` to
 the comma-separated groups that subject should carry instead — for example
 `RECON_ACCESS_GROUP=recon-analysts`, `PIPELINE_ACCESS_GROUP=deal-desk` and
 `ANONYMOUS_GROUPS=deal-desk` shows the Deal Pipeline app alone, with no admin controls.
@@ -72,10 +91,17 @@ sample-email corpus to the pipeline bucket under `samples/` (the container ships
 BFF reads samples from S3 there and from disk under `next dev`), and hands the task the pipeline's
 variables — under `PIPELINE_`-prefixed names where a bare name would collide with recon's in the shared
 process: `PIPELINE_ASSETS_BUCKET`, `PIPELINE_AGENT_MODEL_PARAM`, `PIPELINE_SKILLS_PREFIX`,
-`PIPELINE_SAMPLES_PREFIX`. With the flag off (the default) the deployment is the recon app alone and
-the Deal Pipeline entry never appears. `infra/environments/deal-pipeline` remains the standalone root
-for running the pipeline by itself against `npm run dev`, with local state and an `env_local` output
-that renders `.env.local`. The five-step demo is §12 of the design doc.
+`PIPELINE_SAMPLES_PREFIX`. The pipeline BFF reads **only** those prefixed names — there is no fallback
+to `ASSETS_BUCKET`, `AGENT_MODEL_PARAM` or `SKILLS_PREFIX`, because in the shared container those are
+recon's and a fallback would have read recon's bucket without an error. The same apply sets
+`REQUIRE_ACCESS_GROUPS=true` and `PIPELINE_ENABLED=true` on the task, and the plan is refused while
+either access group is blank. The pipeline's resources come out under the `<name_prefix>-pipeline`
+prefix (e.g. `recon-dev-pipeline-emails`, `/recon-dev-pipeline/agent-model-id`), not the standalone
+root's `deal-pipeline-dev`, so the two roots can share an account. With the flag off (the default) the
+deployment is the recon app alone, `PIPELINE_ENABLED=false` is set, and the Deal Pipeline entry never
+appears. `infra/environments/deal-pipeline` remains the standalone root for running the pipeline by
+itself against `npm run dev`, with local state and an `env_local` output that renders `.env.local`.
+The five-step demo is §12 of the design doc.
 
 ---
 
@@ -316,17 +342,23 @@ terraform apply -var="policy_enforcement_mode=LOG_ONLY"
 pip install -r agent-blueprint/recon-agent/requirements.txt -r requirements-dev.txt
 export AWS_DEFAULT_REGION=us-east-1   # moto builds real boto3 clients; botocore needs a region
 ruff check .
-python -m pytest -q            # 1416 passed, 15 skipped, ~34s
+python -m pytest -q            # 1851 passed, 21 skipped, ~50s
 #                              # 11 of the skips are in tests/integration/ — 10 need
 #                              # RECON_GATEWAY_URL (+ dev-account creds), 1 also needs
-#                              # EMAIL_CONFIRMATION_TOKEN. The other 4 are in
-#                              # tests/skills/, one per skill that prescribes no
-#                              # required evidence steps.
+#                              # EMAIL_CONFIRMATION_TOKEN. 4 are in tests/skills/, one per
+#                              # skill that prescribes no required evidence steps. 6 are in
+#                              # tests/input_corpus/test_extraction_config.py, one per
+#                              # document class that configures no amount columns.
 
 # Frontend (chatbot-app/frontend). `npm run build` is the gate that matters — it compiles
 # every route, catching breakage both vitest and tsc miss.
 cd chatbot-app/frontend && npm ci && npx tsc --noEmit && npx vitest run && npm run build
-#                          # 62 files, 874 passed
+#                          # 107 files, 1395 passed
+
+# Terraform module tests (plan-only, mocked providers, no credentials). Both CIs run these.
+for m in deal-pipeline frontend-ecs lambda-package; do
+  (cd infra/modules/$m && terraform init -backend=false && terraform test)
+done
 ```
 
 `npm run lint` is not part of this: ESLint is broken repo-wide. `npm run verify` points at a
@@ -360,7 +392,7 @@ the same run instead of one masking the other:
 | ------------- | --------------------------------------------------------------------------------------- |
 | `python`      | `ruff check .` then `pytest -q` (full suite, nothing excluded)                          |
 | `frontend`    | `npm ci`, `tsc --noEmit`, `vitest run`, `npm run build`                                 |
-| `terraform`   | `terraform fmt -check -recursive infra/`, then `validate` in `infra/environments/recon` |
+| `terraform`   | `terraform fmt -check -recursive infra/`, `validate` in both roots (`infra/environments/recon`, `infra/environments/deal-pipeline`), then `terraform test` in `infra/modules/{deal-pipeline,frontend-ecs,lambda-package}` |
 | `secret-scan` | `gitleaks` — the working tree on GitHub, the commit history on GitLab                   |
 
 `terraform validate` only means something from the environment directory; run from `infra/` it passes
@@ -414,8 +446,8 @@ unprotected branch cannot plan, which is usually what you want and is worth know
 | `auth_provider`                           | no       | Frontend IdP: `okta` (deployed) or `entra` (var default)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `okta_issuer` / `okta_client_id`          | no       | Required when `auth_provider=okta`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `agent_backend`                           | no       | `runtime` (default) or `harness`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `enable_deal_pipeline`                    | no       | `false` (default) deploys the recon app alone. `true` composes `infra/modules/deal-pipeline` into this environment and hands the console's task the `PIPELINE_*` variables, so the Deal Pipeline app appears in the rail — see [Two applications, one console](#two-applications-one-console)                                                                                                                                                                                                                                                                                                                                  |
-| `recon_admin_group` / `recon_access_group` / `pipeline_admin_group` / `pipeline_access_group` | no | The identity-provider groups behind `RECON_ADMIN_GROUP`, `RECON_ACCESS_GROUP`, `PIPELINE_ADMIN_GROUP`, `PIPELINE_ACCESS_GROUP`. An empty access group leaves that app open to every authenticated user; an empty admin group means nobody can change it                                                                                                                                                                                                                                                                                                                                                              |
+| `enable_deal_pipeline`                    | no       | `false` (default) deploys the recon app alone. `true` composes `infra/modules/deal-pipeline` into this environment under the `<name_prefix>-pipeline` prefix and hands the console's task the `PIPELINE_*` variables plus `REQUIRE_ACCESS_GROUPS=true` and `PIPELINE_ENABLED=true`, so the Deal Pipeline app appears in the rail. The plan is **refused** while `recon_access_group` or `pipeline_access_group` is blank — see [Two applications, one console](#two-applications-one-console) |
+| `recon_admin_group` / `recon_access_group` / `pipeline_admin_group` / `pipeline_access_group` | no | The identity-provider groups behind `RECON_ADMIN_GROUP`, `RECON_ACCESS_GROUP`, `PIPELINE_ADMIN_GROUP`, `PIPELINE_ACCESS_GROUP`. With the pipeline off, an empty access group leaves recon open to every authenticated user; an empty admin group means nobody can change that app. With `enable_deal_pipeline = true` both access groups are required (the plan fails otherwise) and the task runs with `REQUIRE_ACCESS_GROUPS=true`, so a blank one would deny rather than open |
 | `harness_model_id`                        | no       | Override harness LLM (default `us.anthropic.claude-sonnet-5`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `policy_enforcement_mode`                 | no       | `ENFORCE` (default) or `LOG_ONLY` (observe only)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `interceptor_mode`                        | no       | Gateway REQUEST interceptor: `enforce` (default) or `log` (observes only, **never blocks**). The example tfvars also ships `"enforce"` explicitly; set `"log"` only for a first rollout, then remove it.                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -782,8 +814,9 @@ there is nothing on the repo side to conflict with it.
 
 ## Frontend tabs
 
-The Trade Reconciliation app's tabs. The Deal Pipeline app's screens (inbox, deals, assistant, skills,
-memory manager, config) are listed in §10 of [`docs/deal-pipeline-design.md`](docs/deal-pipeline-design.md).
+The Trade Reconciliation app's tabs. The Deal Pipeline app's screens (inbox, deals, assistant — with
+the Memory Manager as a panel inside it — skills, config) are listed in §10 of
+[`docs/deal-pipeline-design.md`](docs/deal-pipeline-design.md).
 
 | Tab             | Purpose                                                                                                                                                                                                                                                                                                                                                                                                |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -813,7 +846,9 @@ Which apps a signed-in user may open, and where they are an admin, comes from th
 (`AUTH_GROUPS_CLAIM`) matched against the four `*_ACCESS_GROUP` / `*_ADMIN_GROUP` variables — see
 [Two applications, one console](#two-applications-one-console). `ALLOW_ANONYMOUS_API=true` is the
 local-dev switch that replaces token verification with a single anonymous subject holding every
-configured group (or the ones in `ANONYMOUS_GROUPS`).
+configured group (or the ones in `ANONYMOUS_GROUPS`); `RECON_ALLOW_ANONYMOUS_API` and
+`PIPELINE_ALLOW_ANONYMOUS_API` are the same switch under each app's older name. None of the three
+may appear in a deployment.
 
 ---
 

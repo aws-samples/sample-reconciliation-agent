@@ -19,11 +19,17 @@
  * Fails closed when `RECON_ADMIN_GROUP` is unset. A deployment that loses the variable locks everyone
  * out of the Config tab, which is loud, wrong in the safe direction, and fixed by one env var — where
  * the alternative reading of "unset means unrestricted" would quietly reopen the hole this closes.
+ *
+ * The group name is read through the registry's `adminGroupFor` (trimmed, blank = unset) rather than
+ * straight from `process.env`, so this helper and `/api/me`'s `resolveAppAccess` agree byte-for-byte.
+ * Before that, a tfvars value with a trailing space made the rail show an admin chip while every
+ * write route answered 403 naming a group nobody could see the difference in.
  */
 
 import { NextResponse } from "next/server";
 
 import { authorizeRequest } from "@/lib/api-auth";
+import { adminGroupFor } from "@/lib/auth/apps";
 
 /**
  * Whether a caller's groups include the configured admin group.
@@ -36,8 +42,8 @@ export function isReconAdmin(
   groups: string[],
   env: Record<string, string | undefined> = process.env,
 ): boolean {
-  const required = env.RECON_ADMIN_GROUP;
-  if (!required) return false;
+  const required = adminGroupFor("recon", env);
+  if (required === "") return false;
   return groups.includes(required);
 }
 
@@ -68,7 +74,7 @@ export async function requireReconAdmin(
   if (!isReconAdmin(auth.groups)) {
     // The message names the group and the variable. A 403 that says only "forbidden" sends an operator
     // to read this source to find out which group they are missing.
-    const required = process.env.RECON_ADMIN_GROUP;
+    const required = adminGroupFor("recon");
     return {
       error: NextResponse.json(
         {

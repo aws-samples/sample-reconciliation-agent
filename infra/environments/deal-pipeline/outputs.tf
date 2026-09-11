@@ -10,9 +10,14 @@
 # Three names are PIPELINE_-prefixed -- PIPELINE_ASSETS_BUCKET, PIPELINE_AGENT_MODEL_PARAM,
 # PIPELINE_SKILLS_PREFIX -- because the frontend is one process serving two apps, and the recon app
 # already reads ASSETS_BUCKET, AGENT_MODEL_PARAM and SKILLS_PREFIX for ITS bucket, parameter and
-# prefix. The pipeline BFF reads the prefixed name first and falls back to the bare one, so this
-# file uses the names the ECS task definition uses (infra/modules/frontend-ecs) and a developer's
-# laptop and a deployment agree on what every variable means.
+# prefix. The pipeline BFF reads ONLY the prefixed names -- no fallback to the bare ones, because in
+# the composed console a fallback resolved to recon's bucket and parameter -- so this file uses the
+# names the ECS task definition uses (infra/modules/frontend-ecs) and a developer's laptop and a
+# deployment agree on what every variable means.
+#
+# No PIPELINE_ENABLED or REQUIRE_ACCESS_GROUPS line, on purpose: both are the composed console's
+# switches (infra/modules/frontend-ecs). Unset, the pipeline app is enabled and a blank access group
+# stays open, which is the reading local development wants.
 
 locals {
   # Anonymous API access is the local-dev mode (design §9): the BFF runs on the developer's

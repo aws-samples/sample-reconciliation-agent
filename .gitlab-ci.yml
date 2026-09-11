@@ -189,7 +189,7 @@ frontend:
     - cd chatbot-app/frontend
     - npm ci
     - npx tsc --noEmit
-    # The whole suite: 62 files, 874 tests.
+    # The whole suite: 107 files, 1395 tests.
     - npx vitest run
     # The real gate — it compiles every route, catching breakage both the unit tests and tsc
     # miss. `npm run lint` is deliberately absent (ESLint is broken repo-wide), and
@@ -521,9 +521,11 @@ sast-gate:
     # A backend block cannot read variables, so the state bucket name normally arrives through
     # the gitignored backend.hcl. Rebuild it from the CI variable.
     - printf 'bucket = "%s"\n' "$TF_STATE_BUCKET" > "$TF_ENV_DIR/backend.hcl"
-    # data.archive_file.lambda reads .build/staging at PLAN time, but the provisioner that
-    # fills it only runs at APPLY time and .build/ is gitignored — so a fresh clone cannot
-    # plan until the staging exists. stage.sh is the same script the provisioner calls.
+    # data.archive_file.lambda reads the module's .build/<name>/staging at PLAN time, but the
+    # provisioner that fills it only runs at APPLY time and .build/ is gitignored — so a fresh
+    # clone cannot plan until the staging exists. stage.sh is the same script the provisioner
+    # calls. The directory is the recon root's instance (the module's default name, "backend");
+    # the module's tests pin the default to this path so the two cannot drift apart.
     #
     # The trailing arguments mirror the recon root's `module "lambda_package"` block in
     # infra/environments/recon/main.tf (lambda_platform and lambda_python_version from the module's
@@ -533,7 +535,7 @@ sast-gate:
     # sources change and the last rebuild happened to run locally where the full list is passed.
     # tzdata is the deal pipeline's: the shared zip also feeds its parser and mock OMS Lambdas.
     - ./infra/modules/lambda-package/stage.sh
-      "infra/modules/lambda-package/.build/staging"
+      "infra/modules/lambda-package/.build/backend/staging"
       "$CI_PROJECT_DIR/backend"
       "manylinux2014_x86_64"
       "3.12"

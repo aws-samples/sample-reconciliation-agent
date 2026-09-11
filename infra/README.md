@@ -44,19 +44,25 @@ done
   location a Lambda is given is one its role can read; the sample corpus seeds under the prefix the
   module outputs.
 - **`frontend-ecs/`** — the deal-pipeline wiring: a recon-only console gets none of the pipeline
-  environment or grants, an enabled one gets exactly the documented variables and grants that match
-  them, and `pipeline_enabled` without the ARNs fails at plan.
-- **`lambda-package/`** — what changes the staging hash (every staged file, renames) and what does
-  not (bytecode caches, virtualenvs).
+  environment or grants and is told `PIPELINE_ENABLED=false`, an enabled one gets exactly the
+  documented variables and verb-per-resource grants that match what the BFF calls, and
+  `pipeline_enabled` without the ARNs -- or with a blank access group -- fails at plan.
+- **`lambda-package/`** — what changes the staging hash (every staged file, renames, the instance
+  name) and what does not (bytecode caches, virtualenvs, OS and tool droppings such as `.DS_Store`),
+  and that two instance names stage into two directories.
 
 ## Per-app access
 
 The console serves two apps behind an app rail, and the BFF proxy checks the caller's IdP group
 claim against the app a route belongs to. Three root variables carry the groups —
 `recon_access_group`, `pipeline_access_group`, `pipeline_admin_group` — beside the existing
-`recon_admin_group`. Access groups left empty leave the app **open** to every authenticated user
-(what every deployment had before the rail); admin groups left empty mean **nobody** administers
-the app. Admins have access implicitly.
+`recon_admin_group`. Admin groups left empty mean **nobody** administers the app. Access groups left
+empty leave the app **open** to every authenticated user only in a recon-only deployment (what every
+deployment had before the rail); with `enable_deal_pipeline = true` both access groups are
+**required** — the plan refuses a blank one, and the console runs with `REQUIRE_ACCESS_GROUPS=true`
+so a blank group fails closed at runtime too — because two populations then sign in through one
+OIDC client and several recon write routes are gated by the access check alone. Admins have access
+implicitly.
 
 ## ⚠️ CI owns the apply
 

@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 process.env.AWS_REGION = "us-east-1";
-process.env.AGENT_MODEL_PARAM = "/deal-pipeline-test/agent-model-id";
+process.env.PIPELINE_AGENT_MODEL_PARAM = "/deal-pipeline-test/agent-model-id";
 
 const ssmSend = vi.fn();
 const requireActor = vi.fn();
