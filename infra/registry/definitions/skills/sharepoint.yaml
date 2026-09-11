@@ -1,7 +1,0 @@
-name: sharepoint
-description: "Search SharePoint sites via Microsoft Graph (OBO)"
-skill_md_path: sharepoint/SKILL.md
-source: gateway
-sourceRecord: microsoft-graph
-tools:
-  - searchSharePointSites

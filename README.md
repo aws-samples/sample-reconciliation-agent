@@ -111,7 +111,6 @@ infra/
                         api, frontend-ecs, lambda-package, lambda-logs, deploy-actions, network,
                         observability, microsoft-graph-obo
   environments/recon/   Dev environment root (S3-backed state via a partial backend config)
-  registry/definitions/ Inherited scaffolding (a2a/, mcp/, skills/ YAML); nothing here reads it
   bootstrap/            Terraform-state bucket bootstrap (local state, import-first)
   scripts/              deploy-recon.sh, push_editable_seeds.py, gen_harness_config_json.py,
                         reset_runtime_data.py, verify_harness_surface.py,

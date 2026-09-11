@@ -1,7 +1,0 @@
-name: snowflake
-description: "Query Snowflake revenue data with Cortex Analyst (natural language → SQL). Per-user Snowflake RBAC enforced."
-skill_md_path: snowflake/SKILL.md
-source: gateway
-sourceRecord: snowflake
-tools:
-  - revenue-analyst
