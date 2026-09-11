@@ -3,17 +3,20 @@
 All infrastructure. There is no CDK in this repo.
 
 ```
-environments/recon/   the root module — the only place you run terraform
-modules/              one module per component, composed by the root
-registry/definitions/ workflow-type definitions seeded into DynamoDB
-bootstrap/            the state bucket, applied once before anything else
-scripts/              operational tooling (deploy driver, seed push, resets)
+environments/recon/          the deployed platform: recon + (optionally) the deal-pipeline app
+                             behind one console — the root CI plans and applies
+environments/deal-pipeline/  the deal pipeline ALONE, local state, for laptop development of that
+                             app (see its README); never applied by CI
+modules/                     one module per component, composed by the roots
+registry/definitions/        workflow-type definitions seeded into DynamoDB
+bootstrap/                   the state bucket, applied once before anything else
+scripts/                     operational tooling (deploy driver, seed push, resets)
 ```
 
 ## Where to run terraform
 
-**`infra/environments/recon/` is the root module.** Running `terraform validate` from `infra/` passes
-_vacuously_ — there is no configuration at that level, so it validates nothing:
+**`infra/environments/recon/` is the deployed root module.** Running `terraform validate` from
+`infra/` passes _vacuously_ — there is no configuration at that level, so it validates nothing:
 
 ```bash
 cd infra/environments/recon
@@ -21,6 +24,39 @@ terraform init -backend=false      # no credentials needed
 terraform validate
 terraform fmt -check -recursive ../..
 ```
+
+`infra/environments/deal-pipeline/` is a second, standalone root for developing the deal-pipeline
+app against real AWS resources from a laptop; the same module is composed into the recon root behind
+`enable_deal_pipeline`, under a different name prefix so the two can coexist in one account.
+
+## Module tests
+
+Three modules carry `terraform test` suites, all plan-only under mocked providers (no credentials,
+nothing created), and CI runs them beside the two validates:
+
+```bash
+for m in deal-pipeline frontend-ecs lambda-package; do
+  (cd infra/modules/$m && terraform init -backend=false && terraform test)
+done
+```
+
+- **`deal-pipeline/`** — each Lambda's role grants exactly what its handler calls, and every S3
+  location a Lambda is given is one its role can read; the sample corpus seeds under the prefix the
+  module outputs.
+- **`frontend-ecs/`** — the deal-pipeline wiring: a recon-only console gets none of the pipeline
+  environment or grants, an enabled one gets exactly the documented variables and grants that match
+  them, and `pipeline_enabled` without the ARNs fails at plan.
+- **`lambda-package/`** — what changes the staging hash (every staged file, renames) and what does
+  not (bytecode caches, virtualenvs).
+
+## Per-app access
+
+The console serves two apps behind an app rail, and the BFF proxy checks the caller's IdP group
+claim against the app a route belongs to. Three root variables carry the groups —
+`recon_access_group`, `pipeline_access_group`, `pipeline_admin_group` — beside the existing
+`recon_admin_group`. Access groups left empty leave the app **open** to every authenticated user
+(what every deployment had before the rail); admin groups left empty mean **nobody** administers
+the app. Admins have access implicitly.
 
 ## ⚠️ CI owns the apply
 

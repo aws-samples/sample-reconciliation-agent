@@ -1,17 +1,18 @@
 ####################################################################################
-# Lambda packaging for the Python backend.
+# Shared Lambda packaging for the Python backend.
 #
-# Both handlers import the shared package as `from backend.deal_pipeline...` (matching the
-# test suite). A Lambda zip must therefore contain a top-level `backend/` PACKAGE directory —
-# not backend/'s contents at the archive root.
+# Every handler imports the shared package as `from backend.<pkg>...` (matching the recon-agent
+# Docker image and the test suite). A Lambda zip must therefore contain a top-level `backend/`
+# PACKAGE directory — not backend/'s contents at the archive root.
 #
 # archive_file archives a directory's *contents* at the zip root, so we first stage
 # backend/ into <build>/staging/backend/ and archive the staging dir. The result is a zip whose
-# root holds `backend/deal_pipeline/...`, and handlers are addressed as
-# `backend.deal_pipeline.<module>.handle`.
+# root holds `backend/recon_core/...`, `backend/deal_pipeline/...`, etc., and handlers are
+# addressed as `backend.<pkg>.<module>.<fn>`.
 #
-# One zip is built and shared by the two deal-pipeline Lambdas (parser, mock OMS upload), so
-# the runtime layout matches the imports in exactly one place.
+# One zip per ROOT is built and shared by every Lambda that root deploys (recon: intake, tier1,
+# idp-hook, the API BFFs and the two deal-pipeline functions; the standalone deal-pipeline root:
+# just those two), so the runtime layout matches the imports in exactly one place.
 ####################################################################################
 
 locals {

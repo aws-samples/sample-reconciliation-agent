@@ -451,3 +451,180 @@ variable "intake_function_arn" {
   type        = string
   default     = ""
 }
+
+# ---------------------------------------------------------------------------------
+# Per-app access (src/lib/auth/apps.ts). One console, two apps behind an app rail.
+#
+# Each app has an ACCESS group ("may use it") and an ADMIN group ("may change its configuration and
+# approve"); admins implicitly have access. Both are OIDC group claims, like recon_admin_group above:
+# nothing here creates a group. The two kinds of group fail in OPPOSITE directions on purpose --
+#   * an unset ACCESS group leaves the app open to every authenticated user, which is exactly what
+#     every deployment had before the rail existed, so adding the rail changes nobody's access;
+#   * an unset ADMIN group means nobody administers the app, the same fail-closed reading
+#     recon_admin_group has always had.
+# ---------------------------------------------------------------------------------
+
+variable "recon_access_group" {
+  description = "OIDC group whose members may use the reconciliation app. Empty (the default) leaves it open to every authenticated user; recon_admin_group members have access regardless."
+  type        = string
+  default     = ""
+}
+
+variable "pipeline_access_group" {
+  description = "OIDC group whose members may use the deal-pipeline app. Empty (the default) leaves it open to every authenticated user; pipeline_admin_group members have access regardless."
+  type        = string
+  default     = ""
+}
+
+variable "pipeline_admin_group" {
+  description = "OIDC group whose members may approve deals, edit skills and the parser prompt, decide skill proposals, manage memory and change the pipeline's model. Empty means nobody can."
+  type        = string
+  default     = ""
+}
+
+# ---------------------------------------------------------------------------------
+# Deal-pipeline app wiring (modules/deal-pipeline), all optional.
+#
+# Every value defaults so a caller that deploys the recon console alone is unchanged. When
+# pipeline_enabled is true the task gets the PIPELINE_*/EMAILS_TABLE/... environment and the task
+# role gets grants on exactly these resources; a precondition on the policy insists every ARN is
+# set, because an empty Resource list is a malformed policy and a "" table name is a request to a
+# table that cannot exist.
+#
+# Three names are PIPELINE_-prefixed in the container (PIPELINE_ASSETS_BUCKET,
+# PIPELINE_AGENT_MODEL_PARAM, PIPELINE_SKILLS_PREFIX) because the recon BFF already reads
+# ASSETS_BUCKET, AGENT_MODEL_PARAM and SKILLS_PREFIX for ITS bucket, parameter and prefix, and one
+# process cannot hold two values under one name. The pipeline BFF reads the prefixed name first and
+# falls back to the bare one, so the standalone root's .env.local keeps working either way.
+# ---------------------------------------------------------------------------------
+
+variable "pipeline_enabled" {
+  description = "Deploy the deal-pipeline app inside this console: its environment variables and task-role grants. false (the default) is the recon-only console."
+  type        = bool
+  default     = false
+}
+
+variable "pipeline_assets_bucket" {
+  description = "The deal pipeline's S3 bucket (skills, prompts, security master, sample corpus, emails, staging CSVs). Rendered as PIPELINE_ASSETS_BUCKET."
+  type        = string
+  default     = ""
+}
+
+variable "pipeline_assets_bucket_arn" {
+  description = "ARN of the same bucket, for the prefix-scoped object grants and the ListBucket condition."
+  type        = string
+  default     = ""
+}
+
+variable "pipeline_emails_table" {
+  description = "Deal-pipeline emails table name (EMAILS_TABLE)."
+  type        = string
+  default     = ""
+}
+
+variable "pipeline_emails_table_arn" {
+  type    = string
+  default = ""
+}
+
+variable "pipeline_deals_table" {
+  description = "Deal-pipeline deals table name (DEALS_TABLE). The grant also covers its indexes: the inbox reads deals by email through the by_email GSI."
+  type        = string
+  default     = ""
+}
+
+variable "pipeline_deals_table_arn" {
+  type    = string
+  default = ""
+}
+
+variable "pipeline_skill_proposals_table" {
+  description = "Deal-pipeline skill-proposals table name (SKILL_PROPOSALS_TABLE)."
+  type        = string
+  default     = ""
+}
+
+variable "pipeline_skill_proposals_table_arn" {
+  type    = string
+  default = ""
+}
+
+variable "pipeline_knowledge_memory_id" {
+  description = "AgentCore Memory holding the edge_cases strategy: the assistant's save_memory writes it, the Memory Manager lists and deletes its records (KNOWLEDGE_MEMORY_ID)."
+  type        = string
+  default     = ""
+}
+
+variable "pipeline_knowledge_memory_arn" {
+  type    = string
+  default = ""
+}
+
+variable "pipeline_chat_memory_id" {
+  description = "AgentCore Memory the assistant writes chat turns to and rebuilds history from (CHAT_MEMORY_ID)."
+  type        = string
+  default     = ""
+}
+
+variable "pipeline_chat_memory_arn" {
+  type    = string
+  default = ""
+}
+
+variable "pipeline_parser_function_name" {
+  description = "Parsing-agent Lambda the BFF async-invokes on intake and reparse (PARSER_FUNCTION)."
+  type        = string
+  default     = ""
+}
+
+variable "pipeline_parser_function_arn" {
+  type    = string
+  default = ""
+}
+
+variable "pipeline_oms_upload_function_name" {
+  description = "Mock OMS validator Lambda the BFF invokes synchronously on approve (OMS_UPLOAD_FUNCTION)."
+  type        = string
+  default     = ""
+}
+
+variable "pipeline_oms_upload_function_arn" {
+  type    = string
+  default = ""
+}
+
+variable "pipeline_agent_model_param" {
+  description = "SSM parameter name holding the runtime-selected parser model; the Config tab reads and writes it (PIPELINE_AGENT_MODEL_PARAM)."
+  type        = string
+  default     = ""
+}
+
+variable "pipeline_agent_model_param_arn" {
+  description = "ARN of the same parameter. Enumerated rather than path-scoped, unlike the recon parameters: it lives under the pipeline's own prefix, and a wildcard there would hand this role every parameter added under it later."
+  type        = string
+  default     = ""
+}
+
+variable "pipeline_assistant_model_id" {
+  description = "Bedrock model (or inference-profile) id the assistant chat invokes directly (ASSISTANT_MODEL_ID)."
+  type        = string
+  default     = ""
+}
+
+variable "pipeline_samples_prefix" {
+  description = "S3 prefix of the seeded sample-email corpus the simulate dialog lists (PIPELINE_SAMPLES_PREFIX). The container has no checkout, so unlike local dev there is no SAMPLE_EMAILS_DIR fallback."
+  type        = string
+  default     = "samples/"
+}
+
+variable "pipeline_skills_prefix" {
+  description = "S3 prefix of the pipeline's editable skills (PIPELINE_SKILLS_PREFIX); also the prefix the task role may read, write and list."
+  type        = string
+  default     = "skills/"
+}
+
+variable "pipeline_parser_prompt_key" {
+  description = "S3 key of the parser system prompt the Skills tab edits in place (PARSER_PROMPT_KEY)."
+  type        = string
+  default     = "prompts/parser-system.md"
+}

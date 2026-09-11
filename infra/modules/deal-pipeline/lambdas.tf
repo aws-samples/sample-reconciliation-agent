@@ -1,8 +1,9 @@
 ####################################################################################
 # The two Python Lambdas (design §2). Both run from the ONE zip the lambda-package module
 # builds (root contains the backend/ package), so handlers are addressed as
-# backend.deal_pipeline.<module>.handle. Only boto3 + stdlib: the zip is built with an empty
-# runtime_dependencies list.
+# backend.deal_pipeline.<module>.handle. The handlers need boto3 (supplied by the runtime), the
+# standard library and tzdata; which wheels the zip vendors is the ROOT's decision, because one
+# zip may also serve other Lambdas (the recon root shares its zip with these two).
 ####################################################################################
 
 data "aws_iam_policy_document" "lambda_assume" {

@@ -74,6 +74,11 @@ output "parser_prompt_key" {
   value       = local.parser_prompt_key
 }
 
+output "samples_prefix" {
+  description = "S3 prefix of the seeded sample-email corpus (the BFF's PIPELINE_SAMPLES_PREFIX when it reads samples from S3 rather than from disk)."
+  value       = local.samples_prefix
+}
+
 output "region" {
   value = local.region
 }

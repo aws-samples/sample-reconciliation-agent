@@ -214,6 +214,24 @@ terraform:validate:
     # off 6.57.0, which corrupts request bodies under parallel refresh. Do not relax it.
     - terraform init -backend=false -input=false
     - terraform validate
+    # The standalone deal-pipeline root (local state, no backend block) is a second root module and
+    # validates on its own; the recon root composes the same module count-gated, so a break that
+    # only shows with the module instantiated would otherwise slip past.
+    - cd "$CI_PROJECT_DIR/infra/environments/deal-pipeline"
+    - terraform init -backend=false -input=false
+    - terraform validate
+    # Module tests, all plan-only under mocked providers (no credentials, nothing created). Each
+    # module pins its providers in a versions.tf, which is what lets `init` here resolve the same
+    # majors the roots do. The mock providers still need the binaries for their schemas.
+    - cd "$CI_PROJECT_DIR/infra/modules/deal-pipeline"
+    - terraform init -backend=false -input=false
+    - terraform test
+    - cd "$CI_PROJECT_DIR/infra/modules/frontend-ecs"
+    - terraform init -backend=false -input=false
+    - terraform test
+    - cd "$CI_PROJECT_DIR/infra/modules/lambda-package"
+    - terraform init -backend=false -input=false
+    - terraform test
 
 secret-scan:
   stage: verify
@@ -507,12 +525,13 @@ sast-gate:
     # fills it only runs at APPLY time and .build/ is gitignored — so a fresh clone cannot
     # plan until the staging exists. stage.sh is the same script the provisioner calls.
     #
-    # The trailing arguments mirror the defaults in
-    # infra/modules/lambda-package/variables.tf (lambda_platform, lambda_python_version, then
-    # every entry of runtime_dependencies). Keep them in step with that file: a mismatch here
-    # vendors the wrong wheels into the zip instead of failing. This list was short by PyYAML
-    # for a while, and nothing caught it, because the zip only rebuilds when the sources change
-    # and the last rebuild happened to run locally where the full list is passed.
+    # The trailing arguments mirror the recon root's `module "lambda_package"` block in
+    # infra/environments/recon/main.tf (lambda_platform and lambda_python_version from the module's
+    # defaults, then every entry of that block's runtime_dependencies). Keep them in step with that
+    # file: a mismatch here vendors the wrong wheels into the zip instead of failing. This list was
+    # short by PyYAML for a while, and nothing caught it, because the zip only rebuilds when the
+    # sources change and the last rebuild happened to run locally where the full list is passed.
+    # tzdata is the deal pipeline's: the shared zip also feeds its parser and mock OMS Lambdas.
     - ./infra/modules/lambda-package/stage.sh
       "infra/modules/lambda-package/.build/staging"
       "$CI_PROJECT_DIR/backend"
@@ -523,6 +542,7 @@ sast-gate:
       "extract-msg==0.56.1"
       "reportlab==5.0.1"
       "red-black-tree-mod==1.22"
+      "tzdata==2026.3"
 
 terraform:plan:
   extends: .terraform_aws

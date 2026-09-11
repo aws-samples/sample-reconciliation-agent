@@ -6,11 +6,67 @@
 data "aws_caller_identity" "current" {}
 
 # Single shared Lambda deployment package. Every Python Lambda (intake, tier1, idp-hook,
-# api BFFs) imports the backend as `from backend....`, so the zip must contain a top-level
-# backend/ package. This module builds it once; the Lambda modules reference the same zip.
+# api BFFs, and the deal pipeline's parser and mock OMS upload when enabled) imports the backend
+# as `from backend....`, so the zip must contain a top-level backend/ package. This module builds
+# it once; the Lambda modules reference the same zip.
+#
+# runtime_dependencies is spelled out here rather than defaulted in the module, because ONE zip
+# serves every Lambda this root deploys and the module's staging directory is shared by every
+# instance (see its variables.tf): the list has to be the union of what all of them import.
+#   pydantic          backend/intake, recon_core -- the ReconItem model and every payload schema.
+#   PyYAML            backend/recon_core/skill_meta.py parses SKILL.md frontmatter as real YAML.
+#   extract-msg,
+#   reportlab         backend/email_preprocess reads Outlook .msg containers and renders bodies to
+#                     PDF, because neither upload destination can read an email.
+#   red-black-tree-mod  imported by nothing here. extract-msg depends on it and it is published as a
+#                     source distribution only, which the platform-pinned pip in stage.sh cannot
+#                     install; stage.sh builds a wheel for any LISTED requirement that lacks one, so
+#                     a transitive sdist-only package has to be named to be reachable. Pinned inside
+#                     extract-msg 0.56.1's own >=1.20,<=1.23 range.
+#   tzdata            backend/deal_pipeline: the IANA database Python's zoneinfo falls back to when
+#                     the Lambda image ships none, so Date Arrived is computed in the desk time zone
+#                     rather than silently in UTC. Harmless for the recon Lambdas.
+#
+# ⚠️ This list is DUPLICATED in .gitlab-ci.yml's pre-plan stage.sh call and the two must agree:
+# archive_file reads the staging directory at PLAN time, so whatever CI staged is what ships, and
+# terraform_data.stage's hash will already match at apply and not re-stage to correct it.
 module "lambda_package" {
   source      = "../../modules/lambda-package"
   backend_dir = "${path.root}/../../../backend"
+  runtime_dependencies = [
+    "pydantic==2.13.0",
+    "PyYAML==6.0.3",
+    "extract-msg==0.56.1",
+    "reportlab==5.0.1",
+    "red-black-tree-mod==1.22",
+    "tzdata==2026.3",
+  ]
+}
+
+# The deal-pipeline app's own resources (bucket, tables, memories, parser + mock OMS Lambdas),
+# composed beside the recon platform so the console serves both apps behind one app rail. Off by
+# default: an existing recon deployment is unchanged until an operator flips enable_deal_pipeline.
+#
+# name_prefix is "<recon prefix>-pipeline", NOT the module's design-doc default "deal-pipeline-dev":
+# the standalone root (infra/environments/deal-pipeline) deploys that prefix into the same account
+# for local development, and two roots creating `deal-pipeline-dev-*` would fight over one bucket,
+# one set of tables and one SSM parameter.
+#
+# The module reads region and account from its own data sources, so neither is passed. The zip is
+# the shared one above (its tzdata entry is what the parser needs). content_root is spelled out for
+# the same reason the standalone root spells it out: so a reader sees where the S3 seeds come from.
+module "deal_pipeline" {
+  count  = var.enable_deal_pipeline ? 1 : 0
+  source = "../../modules/deal-pipeline"
+
+  name_prefix     = "${var.name_prefix}-pipeline"
+  agent_model_id  = var.pipeline_agent_model_id
+  memory_model_id = var.pipeline_memory_model_id
+
+  lambda_zip         = module.lambda_package.zip_path
+  lambda_source_hash = module.lambda_package.source_code_hash
+
+  content_root = "${path.root}/../../.."
 }
 
 # Default VPC for the ECS/ALB frontend. The frontend-ecs module creates its own 2-AZ public
@@ -91,6 +147,41 @@ module "frontend" {
   # Who may change platform configuration. Empty means nobody — see the variable's own note.
   recon_admin_group = var.recon_admin_group
   auth_groups_claim = var.auth_groups_claim
+
+  # Per-app access behind the app rail (chatbot-app/frontend/src/lib/auth/apps.ts). Access groups
+  # default to "" = open to every authenticated user, which is what this deployment had before the
+  # rail; the pipeline admin group fails closed like recon_admin_group.
+  recon_access_group    = var.recon_access_group
+  pipeline_access_group = var.pipeline_access_group
+  pipeline_admin_group  = var.pipeline_admin_group
+
+  # Deal-pipeline app wiring. try(..., "") because module.deal_pipeline is count-gated: with the
+  # app off there is no instance to index, and the frontend module's pipeline_* inputs default to ""
+  # -- the module then renders none of the pipeline environment and none of the pipeline grants.
+  pipeline_enabled                   = var.enable_deal_pipeline
+  pipeline_assets_bucket             = try(module.deal_pipeline[0].assets_bucket, "")
+  pipeline_assets_bucket_arn         = try(module.deal_pipeline[0].assets_bucket_arn, "")
+  pipeline_emails_table              = try(module.deal_pipeline[0].emails_table, "")
+  pipeline_emails_table_arn          = try(module.deal_pipeline[0].emails_table_arn, "")
+  pipeline_deals_table               = try(module.deal_pipeline[0].deals_table, "")
+  pipeline_deals_table_arn           = try(module.deal_pipeline[0].deals_table_arn, "")
+  pipeline_skill_proposals_table     = try(module.deal_pipeline[0].skill_proposals_table, "")
+  pipeline_skill_proposals_table_arn = try(module.deal_pipeline[0].skill_proposals_table_arn, "")
+  pipeline_knowledge_memory_id       = try(module.deal_pipeline[0].knowledge_memory_id, "")
+  pipeline_knowledge_memory_arn      = try(module.deal_pipeline[0].knowledge_memory_arn, "")
+  pipeline_chat_memory_id            = try(module.deal_pipeline[0].chat_memory_id, "")
+  pipeline_chat_memory_arn           = try(module.deal_pipeline[0].chat_memory_arn, "")
+  pipeline_parser_function_name      = try(module.deal_pipeline[0].parser_function_name, "")
+  pipeline_parser_function_arn       = try(module.deal_pipeline[0].parser_function_arn, "")
+  pipeline_oms_upload_function_name  = try(module.deal_pipeline[0].oms_upload_function_name, "")
+  pipeline_oms_upload_function_arn   = try(module.deal_pipeline[0].oms_upload_function_arn, "")
+  pipeline_agent_model_param         = try(module.deal_pipeline[0].agent_model_param, "")
+  pipeline_agent_model_param_arn     = try(module.deal_pipeline[0].agent_model_param_arn, "")
+  # The assistant has no Config-tab override, so it runs the same model the parser is seeded with.
+  pipeline_assistant_model_id = var.pipeline_agent_model_id
+  pipeline_samples_prefix     = try(module.deal_pipeline[0].samples_prefix, "samples/")
+  pipeline_skills_prefix      = try(module.deal_pipeline[0].skills_prefix, "skills/")
+  pipeline_parser_prompt_key  = try(module.deal_pipeline[0].parser_prompt_key, "prompts/parser-system.md")
 
   # BFF data access (same-origin /api/recon/* routes read these via the ECS task role).
   cases_table       = module.foundation.cases_table

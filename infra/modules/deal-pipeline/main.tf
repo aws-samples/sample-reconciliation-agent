@@ -1,13 +1,15 @@
 ####################################################################################
 # Deal-pipeline module: everything the demo needs apart from the Lambda zip.
 #
-# One S3 bucket (seeded skills, prompts, security master; runtime emails/CSVs), three
-# DynamoDB tables, two AgentCore Memories (knowledge with an edge-case extraction strategy,
-# chat with none), one SSM parameter, and two Python Lambdas (parser, mock OMS upload).
-# Contract: docs/deal-pipeline-design.md §2, §3, §8, §11.
+# One S3 bucket (seeded skills, prompts, security master and sample-email corpus; runtime
+# emails/CSVs), three DynamoDB tables, two AgentCore Memories (knowledge with an edge-case
+# extraction strategy, chat with none), one SSM parameter, and two Python Lambdas (parser, mock
+# OMS upload). Contract: docs/deal-pipeline-design.md §2, §3, §8, §11.
 #
-# There is no ECS, CloudFront, Cognito or gateway here on purpose: the Next.js BFF runs
-# locally with the developer's credentials and talks to these resources directly.
+# There is no ECS, CloudFront, Cognito or gateway here on purpose. The Next.js BFF either runs
+# locally with the developer's credentials (infra/environments/deal-pipeline) or is the recon
+# console's own container, whose task role the recon root grants access to these resources
+# (infra/environments/recon composes this module beside modules/frontend-ecs).
 ####################################################################################
 
 data "aws_caller_identity" "current" {}
@@ -24,11 +26,16 @@ locals {
   skills_dir   = "${local.content_root}/agent-blueprint/deal-pipeline-agent/skills"
   prompts_dir  = "${local.content_root}/agent-blueprint/deal-pipeline-agent/prompts"
   secmaster    = "${local.content_root}/data/security-master"
+  samples_dir  = "${local.content_root}/data/deal-emails"
 
   # "<skill-name>/SKILL.md" relative paths. fileset() returns an empty set when the directory does
   # not exist yet, so a checkout without skills plans cleanly and seeds nothing -- the check block
   # below turns that into a visible warning rather than a silent gap.
   skill_files = fileset(local.skills_dir, "*/SKILL.md")
+
+  # The simulated inbox's corpus, one JSON file per fictional email. The file name (minus .json) is
+  # the corpus id the BFF's simulate dialog sends back, so the S3 key keeps the file name verbatim.
+  sample_files = fileset(local.samples_dir, "*.json")
 
   parser_prompt_path    = "${local.prompts_dir}/parser-system.md"
   assistant_prompt_path = "${local.prompts_dir}/assistant-system.md"
@@ -45,6 +52,7 @@ locals {
   security_master_prefix = "security-master/"
   deal_csv_prefix        = "deal-csv/"
   oms_staging_prefix     = "oms-staging/"
+  samples_prefix         = "samples/"
   parser_prompt_key      = "${local.prompts_prefix}parser-system.md"
   assistant_prompt_key   = "${local.prompts_prefix}assistant-system.md"
   counterparties_key     = "${local.security_master_prefix}counterparties.csv"
@@ -158,6 +166,22 @@ resource "aws_s3_object" "security_master_seed" {
   content_type = "text/csv"
 }
 
+# The sample-email corpus behind the Inbox's "Simulate incoming email" dialog. It lives in S3 so a
+# BFF running in a container -- which has no checkout and therefore no data/deal-emails to read --
+# can list and fetch the same seven emails a developer's `next dev` reads from disk. Tracks the repo
+# like the other reference data: the corpus has no UI editor, so a re-upload on change is the only
+# way an edited or added sample reaches a deployment. No existence guard because the corpus is
+# committed; a plan against a checkout missing it seeds nothing and the check block below says so.
+resource "aws_s3_object" "sample_email_seed" {
+  for_each = local.sample_files
+
+  bucket       = aws_s3_bucket.assets.id
+  key          = "${local.samples_prefix}${each.value}"
+  source       = "${local.samples_dir}/${each.value}"
+  etag         = filemd5("${local.samples_dir}/${each.value}")
+  content_type = "application/json"
+}
+
 # A missing seed is not an error -- the tree is assembled by several hands and the module must
 # plan before every file lands -- but it must not be invisible either: a parser with no skills
 # and no system prompt "works" and produces garbage. check blocks warn at plan and apply without
@@ -174,6 +198,10 @@ check "seed_content_present" {
   assert {
     condition     = fileexists(local.assistant_prompt_path)
     error_message = "${local.assistant_prompt_path} is missing; the assistant system prompt will not be seeded."
+  }
+  assert {
+    condition     = length(local.sample_files) > 0
+    error_message = "No *.json found under ${local.samples_dir}; a deployed inbox will have nothing to simulate until the corpus exists and is applied."
   }
 }
 

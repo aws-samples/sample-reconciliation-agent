@@ -12,17 +12,26 @@ variable "name" {
 variable "runtime_dependencies" {
   description = "Third-party pip deps to vendor into the zip. boto3/botocore are provided by the Lambda runtime and must NOT be listed here."
   type        = list(string)
-  # Empty by default because the two deal-pipeline Lambdas use boto3 (supplied by the runtime)
-  # and the standard library only; with an empty list stage.sh never calls pip. A Lambda that
-  # grows a real dependency adds it here, and stage.sh installs it as a wheel for var.lambda_platform.
+  # Empty by default, DELIBERATELY: which wheels a zip needs is a property of the Lambdas a ROOT
+  # deploys, not of this module, so every root spells its own list out (see
+  # infra/environments/recon/main.tf and infra/environments/deal-pipeline/main.tf). A default that
+  # listed the recon dependencies would silently bloat the standalone demo's zip; one that listed
+  # nothing while a root relied on it would ship a zip whose imports fail at cold start. With an
+  # empty list stage.sh never calls pip.
   #
-  # One list for every Lambda, because local.staging_dir is "${path.module}/.build/staging" and
-  # path.module is the module SOURCE directory — shared by every instance. A second instance of
-  # this module with its own dependency set would stage into the same directory and rm -rf the
-  # first one's work.
+  # One list for every Lambda a root deploys, because local.staging_dir is
+  # "${path.module}/.build/staging" and path.module is the module SOURCE directory — shared by
+  # every instance. A second instance of this module with its own dependency set would stage into
+  # the same directory and rm -rf the first one's work.
   #
-  # Changing this list alters local.stage_hash, so the zip is rebuilt and both Lambdas get a new
-  # source_code_hash on the next apply — in-place updates, no deletes.
+  # The recon root's list is DUPLICATED in .gitlab-ci.yml's pre-plan staging call, which passes it
+  # as arguments to stage.sh. The two MUST agree: archive_file reads the staging directory at PLAN
+  # time, so whatever CI staged is what ships, and terraform_data.stage's hash will already match
+  # at apply time and not re-stage to correct it. They drifted once already — CI was missing
+  # PyYAML — and nothing caught it because the zip only rebuilds when the sources change.
+  #
+  # Changing a root's list alters local.stage_hash, so the zip is rebuilt and every Lambda it feeds
+  # gets a new source_code_hash on the next apply — in-place updates, no deletes.
   #
   # A dependency that is published as a source distribution only cannot be installed by the
   # platform-pinned pip in stage.sh (--platform forces --only-binary=:all:). stage.sh builds a

@@ -156,6 +156,70 @@ variable "auth_groups_claim" {
   default     = "groups"
 }
 
+# ---------------------------------------------------------------------------------
+# Two apps behind one app rail: per-app ACCESS groups, and the pipeline's ADMIN group.
+#
+# The console now hosts the reconciliation app and the deal-pipeline app side by side, and the
+# proxy decides per request whether the caller may use the app the route belongs to. Same source
+# of truth as recon_admin_group: an OIDC group claim, maintained in Okta or Entra, never created
+# here. The two kinds of group deliberately fail in opposite directions:
+#   * ACCESS groups default to "" = OPEN to every authenticated user. That is exactly what every
+#     deployment had before the rail existed, so upgrading changes nobody's access; name a group to
+#     restrict an app.
+#   * ADMIN groups default to "" = NOBODY, the fail-closed reading recon_admin_group already has.
+# Admins implicitly have access, so an administrator never needs to be in both groups.
+# ---------------------------------------------------------------------------------
+
+variable "recon_access_group" {
+  description = "OIDC group whose members may use the reconciliation app. Empty (the default) leaves it open to every authenticated user."
+  type        = string
+  default     = ""
+}
+
+variable "pipeline_access_group" {
+  description = "OIDC group whose members may use the deal-pipeline app. Empty (the default) leaves it open to every authenticated user. Only meaningful with enable_deal_pipeline = true."
+  type        = string
+  default     = ""
+}
+
+variable "pipeline_admin_group" {
+  description = "OIDC group whose members may approve deals, edit skills and the parser prompt, decide skill proposals, manage memory and change the pipeline's model. Empty means nobody can."
+  type        = string
+  default     = ""
+}
+
+# ---------------------------------------------------------------------------------
+# Deal-pipeline app, composed into this root from infra/modules/deal-pipeline.
+# ---------------------------------------------------------------------------------
+
+variable "enable_deal_pipeline" {
+  description = <<-EOT
+    Deploy the deal-pipeline app beside the recon platform: its bucket, three tables, two AgentCore
+    Memories, SSM parameter and two Lambdas (under the "<name_prefix>-pipeline" prefix), plus the
+    console's environment and task-role grants for it. false (the default) leaves an existing recon
+    deployment exactly as it was; the rail then shows only the reconciliation app.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "pipeline_agent_model_id" {
+  description = <<-EOT
+    Bedrock model (or cross-region inference-profile) id for BOTH the pipeline's parsing agent and
+    its assistant. For the parser it only SEEDS the /<name_prefix>-pipeline/agent-model-id SSM
+    parameter, which the pipeline's Config tab overwrites at runtime; for the assistant it is the
+    model the BFF invokes directly (ASSISTANT_MODEL_ID), with no runtime override.
+  EOT
+  type        = string
+  default     = "us.anthropic.claude-sonnet-5"
+}
+
+variable "pipeline_memory_model_id" {
+  description = "Bedrock model (or inference-profile) id the pipeline's AgentCore Memory uses for its edge-case extraction pass. Pinned separately from pipeline_agent_model_id so a Config-tab model switch cannot change how memories are extracted."
+  type        = string
+  default     = "us.anthropic.claude-sonnet-5"
+}
+
 # Seeds the one extraction workflow type at create time. Empty (the default) seeds only the
 # knowledge-base type, and an operator adds extraction types from the Config tab -- which is the
 # right shape here, because the configuration version names live in the document-pipeline deployment
