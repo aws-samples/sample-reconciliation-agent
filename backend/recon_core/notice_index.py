@@ -32,6 +32,8 @@ The original value is kept in a non-key attribute so a reader never has to inver
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Iterator
 
+from backend.recon_core.notices import INDEX_KEY_FIELDS
+
 # The character that separates an encoded value from the notice id inside the sort key.
 #
 # `begins_with(escaped_value + SEP)` is what makes an equality probe EXACT rather than a prefix match
@@ -172,6 +174,27 @@ def flatten_sections(sections: Any) -> dict[str, Any]:
         if isinstance(fields, dict):
             for name, value in fields.items():
                 out.setdefault(name, value)
+    return out
+
+
+def indexable_fields(row: Any) -> dict[str, Any]:
+    """Everything about a notice that should be searchable.
+
+    The embedded extraction, plus the promoted index-key attributes layered ON TOP. The attribute wins,
+    and that precedence is the whole reason this function exists rather than :func:`flatten_sections`
+    alone: those three attributes hold a NORMALISED value the raw extraction does not have. The mapper
+    resolves ``borrower`` to ``counterparty``, ``value_date`` to ``notice_date``, and a missing obligor
+    to ``"unknown"``. Indexing only the sections would leave a notice findable under ``borrower`` and
+    not under ``counterparty``, and an unattributable one findable under neither.
+
+    :param row: a notice as a mapping — a stored DynamoDB item or a dumped model.
+    :returns: field name to value, ready for :meth:`NoticeSearchIndex.reindex`.
+    """
+    out = flatten_sections(row.get("idp_sections"))
+    for name in INDEX_KEY_FIELDS:
+        value = row.get(name)
+        if value is not None:
+            out[name] = value
     return out
 
 

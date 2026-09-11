@@ -26,6 +26,7 @@ from backend.recon_core.notice_index import (
     NoticeSearchIndex,
     SEP,
     flatten_sections,
+    indexable_fields,
     postings_for,
     posting_key,
 )
@@ -144,6 +145,42 @@ def test_flatten_sections_takes_the_first_section_on_a_duplicate_key() -> None:
         {"fields": {"amount": "999.00", "cusip": "X"}},
     ]
     assert flatten_sections(sections) == {"amount": "100.00", "fund": "A", "cusip": "X"}
+
+
+def test_indexable_fields_layers_the_normalised_index_keys_over_the_sections() -> None:
+    """The promoted attribute WINS, and that precedence is the point.
+
+    Those three attributes hold a value the raw extraction does not: the mapper resolves `borrower` to
+    `counterparty`, `value_date` to `notice_date`, and a missing obligor to `"unknown"`. Indexing the
+    sections alone leaves such a notice findable under `borrower` and not under `counterparty`, and an
+    unattributable one findable under neither — invisible to the agent's primary lookup.
+    """
+    row = {
+        "counterparty": "CINDERMOOR LOGISTICS HOLDINGS, INC.",  # normalised from `borrower`
+        "notice_date": "2026-02-02",  # normalised from `value_date`
+        "idp_sections": [
+            {
+                "fields": {
+                    "borrower": "CINDERMOOR LOGISTICS",
+                    "value_date": "2026-02-02",
+                    "cusip": "X",
+                }
+            }
+        ],
+    }
+    out = indexable_fields(row)
+    assert out["counterparty"] == "CINDERMOOR LOGISTICS HOLDINGS, INC."
+    assert out["notice_date"] == "2026-02-02"
+    # The raw extraction is still indexed alongside it, so the document's own wording stays searchable.
+    assert out["borrower"] == "CINDERMOOR LOGISTICS"
+    assert out["cusip"] == "X"
+
+
+def test_indexable_fields_omits_an_index_key_the_row_does_not_carry() -> None:
+    """`reference` is genuinely absent on most classes; a None must not become a posting."""
+    out = indexable_fields({"counterparty": "X", "idp_sections": [{"fields": {"amount": "1.00"}}]})
+    assert "reference" not in out
+    assert sorted(out) == ["amount", "counterparty"]
 
 
 # --- querying ---------------------------------------------------------------------------------------

@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from backend.recon_core.notice_index import (  # noqa: E402  (path set up immediately above)
     NoticeSearchIndex,
-    flatten_sections,
+    indexable_fields,
     postings_for,
 )
 
@@ -81,7 +81,7 @@ def backfill(*, table: Any, index: NoticeSearchIndex, dry_run: bool) -> dict[str
             counts["tracking_rows"] += 1
             continue
 
-        fields = flatten_sections(row.get("idp_sections"))
+        fields = indexable_fields(row)
         if not fields:
             counts["no_fields"] += 1
             unindexable.append(notice_id)
