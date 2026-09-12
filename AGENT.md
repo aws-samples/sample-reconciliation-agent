@@ -10,7 +10,7 @@ hard way; none of it is inferable from reading the code.
 | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | `backend/`              | [Python Lambdas + libraries](backend/README.md) — recon packages plus `deal_pipeline/`                                        |
 | `agent-blueprint/`      | [the two Tier-2 agent backends](agent-blueprint/README.md), plus the Deal Pipeline's skills and prompts                        |
-| `infra/`                | [Terraform](infra/README.md) — the console's root is `infra/environments/recon`; `environments/deal-pipeline` runs the pipeline alone |
+| `infra/`                | [Terraform](infra/README.md) — one root, `infra/environments/recon`; `enable_deal_pipeline` composes the pipeline into it |
 | `tests/`                | [the Python suite](tests/README.md) — never beside the code                                                                   |
 | `scripts/`              | [generators + live-deployment tooling](scripts/README.md)                                                                     |
 | `data/`                 | [fixtures and the guidance corpus](data/README.md) — recon's notices and ledger, the pipeline's emails and security master     |
@@ -27,8 +27,8 @@ cd chatbot-app/frontend && npx tsc --noEmit  # typecheck
 cd infra/environments/recon && terraform fmt -check -recursive ../..
 # Module tests: plan-only under mocked providers, no credentials. Both CIs run them, and they are
 # the only check that notices a renamed PIPELINE_* variable or a missing task-role grant.
-for m in deal-pipeline frontend-ecs lambda-package console-settings; do
-  (cd infra/modules/$m && terraform init -backend=false && terraform test)
+for tests in infra/modules/*/tests; do
+  (cd "$(dirname "$tests")" && terraform init -backend=false && terraform test)
 done
 ```
 
@@ -143,7 +143,7 @@ Rules that follow:
   `PIPELINE_AGENT_MODEL_PARAM` are required, `PIPELINE_SKILLS_PREFIX` defaults to `skills/`, and
   there is no fallback to `ASSETS_BUCKET`, `AGENT_MODEL_PARAM` or `SKILLS_PREFIX`: in the console's
   task those bare names are recon's and all three exist, so a fallback would have read recon's
-  bucket, model parameter or skills with no error at all. The standalone root's `env_local` output
+  bucket, model parameter or skills with no error at all. The recon root's `frontend_env_local` output
   renders the prefixed names too. The Lambdas keep bare names — they are separate processes.
 - **Sample emails come from disk when `data/deal-emails` exists and from S3 (`PIPELINE_SAMPLES_PREFIX`,
   default `samples/`) when it does not.** The container ships no `data/`, so Terraform seeds the corpus

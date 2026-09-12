@@ -102,12 +102,11 @@ to `ASSETS_BUCKET`, `AGENT_MODEL_PARAM` or `SKILLS_PREFIX`, because in the share
 recon's and a fallback would have read recon's bucket without an error. The same apply sets
 `REQUIRE_ACCESS_GROUPS=true` and `PIPELINE_ENABLED=true` on the task, and the plan is refused while
 either access group is blank. The pipeline's resources come out under the `<name_prefix>-pipeline`
-prefix (e.g. `recon-dev-pipeline-emails`, `/recon-dev-pipeline/agent-model-id`), not the standalone
-root's `deal-pipeline-dev`, so the two roots can share an account. With the flag off (the default) the
-deployment is the recon app alone, `PIPELINE_ENABLED=false` is set, and the Deal Pipeline entry never
-appears. `infra/environments/deal-pipeline` remains the standalone root for running the pipeline by
-itself against `npm run dev`, with local state and an `env_local` output that renders `.env.local`.
-The five-step demo is §12 of the design doc.
+prefix (e.g. `recon-dev-pipeline-emails`, `/recon-dev-pipeline/agent-model-id`). With the flag off
+(the default) the deployment is the recon app alone, `PIPELINE_ENABLED=false` is set, and the Deal
+Pipeline entry never appears. There is one Terraform root; a laptop runs either app against a
+deployment by rendering `.env.local` with `terraform output -raw frontend_env_local` in
+`infra/environments/recon`. The five-step demo is §12 of the design doc.
 
 ### Console-wide configuration
 
@@ -139,10 +138,9 @@ Settings screen from one the task definition supplies, and see what the field wo
 the stored value were cleared. Saving sends only the fields that changed, so a value that was merely
 displayed from the environment never silently becomes a stored one.
 
-**Storage.** One SSM String parameter per setting under `CONSOLE_SETTINGS_PREFIX`. Both Terraform
-roots set `/<name_prefix>/console`: `/recon-dev/console` for the composed console, inside the
-`/<name_prefix>/*` path the task role already uses for the two Config tabs, and
-`/deal-pipeline-dev/console` for the standalone pipeline root a laptop runs against:
+**Storage.** One SSM String parameter per setting under `CONSOLE_SETTINGS_PREFIX`. The Terraform
+root sets `/<name_prefix>/console` (`/recon-dev/console`), inside the `/<name_prefix>/*` path the
+task role already uses for the two Config tabs:
 
 | Parameter                                              | Holds                                                                                               |
 | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
@@ -232,7 +230,7 @@ seeder, the reader and the task role's grant (`ssm:GetParameter`, `GetParameters
 `GetParametersByPath`, `PutParameter`, `DeleteParameter` on `parameter<prefix>` and
 `parameter<prefix>/*`) cannot drift apart. The plan-only module tests are
 `infra/modules/console-settings/tests/` and `infra/modules/frontend-ecs/tests/console_settings.tftest.hcl`.
-The standalone pipeline root renders the three `CONSOLE_*` names into its `env_local` output.
+The recon root's `frontend_env_local` output renders the three `CONSOLE_*` names for a laptop.
 
 ---
 
@@ -358,7 +356,6 @@ infra/
                         console-settings (the console-wide layer's seeded SSM parameters)
   environments/recon/   The console's root (S3-backed state via a partial backend config);
                         enable_deal_pipeline composes modules/deal-pipeline into it
-  environments/deal-pipeline/  Standalone root for the pipeline alone (local state, env_local output)
   bootstrap/            Terraform-state bucket bootstrap (local state; import-first — see
                         "Getting Started" step 1)
   scripts/              Utility scripts (deploy-recon.sh, spike_harness.py, spike_evals.md)
@@ -492,8 +489,8 @@ cd chatbot-app/frontend && npm ci && npx tsc --noEmit && npx vitest run && npm r
 #                          # 124 files, 1711 passed
 
 # Terraform module tests (plan-only, mocked providers, no credentials). Both CIs run these.
-for m in deal-pipeline frontend-ecs lambda-package; do
-  (cd infra/modules/$m && terraform init -backend=false && terraform test)
+for tests in infra/modules/*/tests; do
+  (cd "$(dirname "$tests")" && terraform init -backend=false && terraform test)
 done
 ```
 
@@ -528,7 +525,7 @@ the same run instead of one masking the other:
 | ------------- | --------------------------------------------------------------------------------------- |
 | `python`      | `ruff check .` then `pytest -q` (full suite, nothing excluded)                          |
 | `frontend`    | `npm ci`, `tsc --noEmit`, `vitest run`, `npm run build`                                 |
-| `terraform`   | `terraform fmt -check -recursive infra/`, `validate` in both roots (`infra/environments/recon`, `infra/environments/deal-pipeline`), then `terraform test` in `infra/modules/{deal-pipeline,frontend-ecs,lambda-package}` |
+| `terraform`   | `terraform fmt -check -recursive infra/`, `validate` in `infra/environments/recon`, then `terraform test` in every `infra/modules/*/tests` |
 | `secret-scan` | `gitleaks` — the working tree on GitHub, the commit history on GitLab                   |
 
 `terraform validate` only means something from the environment directory; run from `infra/` it passes

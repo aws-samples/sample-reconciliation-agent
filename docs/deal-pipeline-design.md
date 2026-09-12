@@ -31,10 +31,10 @@ mock upload with structured failures, chatbot + memory manager, skills tab with 
 ## 2. Runtime shape
 
 - **Frontend**: the existing Next.js app, run locally with `npm run dev`. Its server routes
-  (the BFF) call AWS directly with the developer's credentials. No ECS, CloudFront or identity
-  provider in the standalone shape; §13 describes the same code deployed as the second app of
-  the reconciliation console, behind its shell, identity provider and task role.
-- **Parsing agent**: Python Lambda `deal-pipeline-dev-parser`. A Bedrock Converse tool-use
+  (the BFF) call AWS directly with the developer's credentials against a deployment of the
+  reconciliation console's root; §13 describes the same code deployed as the second app of that
+  console, behind its shell, identity provider and task role.
+- **Parsing agent**: Python Lambda `<name_prefix>-pipeline-parser`. A Bedrock Converse tool-use
   loop (plain boto3, no framework) with tools `lookup_security_master` and `stage_deal`
   (structured output). Skills are loaded from S3 at each run; edge-case memories are recalled
   from AgentCore Memory before the first model call and injected as advisory context.
@@ -44,9 +44,11 @@ mock upload with structured failures, chatbot + memory manager, skills tab with 
 - **Assistant**: BFF route streaming Bedrock Converse with tools (§7). Chat turns are written
   to a short-term AgentCore Memory so a session survives reload.
 - **Storage**: one S3 bucket, three DynamoDB tables, two AgentCore Memories, one SSM parameter.
-- **Terraform**: `infra/environments/deal-pipeline` (local state) using
-  `infra/modules/deal-pipeline` and the existing `lambda-package` module. That root's provider sets
-  `default_tags = { Project = "deal-pipeline-demo" }` on every resource. The recon environment
+- **Terraform**: `infra/modules/deal-pipeline`, composed into `infra/environments/recon` behind
+  `enable_deal_pipeline`, sharing the root's `lambda-package` zip, `lambda-logs`,
+  `agentcore-memory` and `seeded-object` modules. (A standalone root with local state and a
+  `Project = deal-pipeline-demo` tag existed while the app was built alone; it was dropped in
+  2026-09 when the app joined the console.) The recon environment
   composes the same module when `enable_deal_pipeline = true`, under its own prefix and its own
   (untagged) provider (§13).
 
@@ -54,13 +56,13 @@ mock upload with structured failures, chatbot + memory manager, skills tab with 
 
 | Thing | Value |
 | --- | --- |
-| name prefix | `deal-pipeline-dev` from the standalone root; `<name_prefix>-pipeline` (e.g. `recon-dev-pipeline`) when the recon root composes the module, so every name below shifts accordingly (§13) |
+| name prefix | `<name_prefix>-pipeline` (e.g. `recon-dev-pipeline`) from the recon root's `name_prefix`; the names below are written with the historical `deal-pipeline-dev` prefix and shift accordingly (§13) |
 | S3 bucket | `deal-pipeline-dev-assets-<account_id>` |
 | DynamoDB | `deal-pipeline-dev-emails`, `deal-pipeline-dev-deals`, `deal-pipeline-dev-skill-proposals` |
 | Memories | `deal_pipeline_dev_knowledge` (strategy `edge_cases`), `deal_pipeline_dev_chat` (no strategy, 7-day expiry) |
 | Lambdas | `deal-pipeline-dev-parser`, `deal-pipeline-dev-oms-upload` |
 | SSM | `/deal-pipeline-dev/agent-model-id` (default `us.anthropic.claude-sonnet-5`; the parser reads it through `recon_core.model_select`, so a stored id outside the six-entry allowlist the BFF enforces falls back to the default) |
-| Tag | `Project = deal-pipeline-demo` on everything the standalone root creates; the module itself tags nothing, so the composed root's resources carry only what the recon provider applies (none) |
+| Tag | none: the module tags nothing and the recon provider sets no `default_tags`; find the pipeline's resources by the `<name_prefix>-pipeline` prefix or through the root's state |
 
 S3 layout:
 
@@ -332,8 +334,8 @@ PARSER_PROMPT_KEY=prompts/parser-system.md
 `PIPELINE_AGENT_MODEL_PARAM` (required), `PIPELINE_SKILLS_PREFIX` (default `skills/`) — with no
 fallback to `ASSETS_BUCKET`, `AGENT_MODEL_PARAM` or `SKILLS_PREFIX`, because in the console the
 recon BFF owns the bare names in the same process (§13) and a fallback would have read recon's
-values without an error. The standalone root's `terraform output -raw env_local` renders the
-prefixed names; the composed deployment sets the same ones on the task. `PIPELINE_SAMPLES_PREFIX`
+values without an error. The recon root's `terraform output -raw frontend_env_local` renders the
+prefixed names for a laptop; the deployment sets the same ones on the task. `PIPELINE_SAMPLES_PREFIX`
 (default `samples/`) names where the corpus lives in S3 when `SAMPLE_EMAILS_DIR` does not exist on
 the server. The Lambdas are separate processes and keep `ASSETS_BUCKET`, `AGENT_MODEL_PARAM` and
 `SKILLS_PREFIX` unprefixed.
@@ -354,8 +356,8 @@ every setting reads from the environment), `CONSOLE_ADMIN_GROUP` (who may edit c
 environment-only, unset = nobody), `CONSOLE_ORGANIZATION_LABEL` (environment fallback for the rail's
 organization label, default `Agentic Operations Console`) and `CONSOLE_DEFAULT_MODEL_ID` (environment
 fallback for the console default model id; Terraform seeds the parameter instead of setting this). The
-standalone root renders the first three into `env_local` beside this app's names, with a prefix of
-`/<name_prefix>/console`. A value stored under the prefix for `PIPELINE_ACCESS_GROUP`,
+recon root renders the first three into `frontend_env_local` beside this app's names, with a prefix
+of `/<name_prefix>/console`. A value stored under the prefix for `PIPELINE_ACCESS_GROUP`,
 `PIPELINE_ADMIN_GROUP` or `PIPELINE_ENABLED` overlays the environment value; `env.ts` is unaffected,
 because none of the names it reads is console-wide, and the only console value this app ever sees is
 the default model id its `/config` GET reports.
@@ -432,8 +434,8 @@ pipeline BFF therefore reads `PIPELINE_ASSETS_BUCKET`, `PIPELINE_AGENT_MODEL_PAR
 the composed task the bare ones exist and are recon's, so a fallback would have read recon's
 bucket, model parameter or skills without any error. A missing `PIPELINE_ASSETS_BUCKET` or
 `PIPELINE_AGENT_MODEL_PARAM` fails the first request that needs it, naming the variable;
-`PIPELINE_SKILLS_PREFIX` defaults to `skills/`. The standalone root's `env_local` output renders the
-prefixed names as well. `PIPELINE_SAMPLES_PREFIX` is new and pipeline-only.
+`PIPELINE_SKILLS_PREFIX` defaults to `skills/`. The recon root's `frontend_env_local` output renders
+the prefixed names as well. `PIPELINE_SAMPLES_PREFIX` is new and pipeline-only.
 
 **Composed Terraform.** `infra/environments/recon` gains `enable_deal_pipeline` (default `false`).
 When true it instantiates `infra/modules/deal-pipeline` beside `modules/frontend-ecs`, grants the
@@ -445,13 +447,11 @@ pipeline environment or grants. The plan is refused while `recon_access_group` o
 **not the same names or tags**: the composed root instantiates it with
 `name_prefix = "<name_prefix>-pipeline"` (default `recon-dev-pipeline`), so the §3 names become
 `recon-dev-pipeline-emails`, `recon-dev-pipeline-assets-<account_id>`,
-`/recon-dev-pipeline/agent-model-id`, `recon_dev_pipeline_knowledge` and so on — deliberately, so a
-standalone `deal-pipeline-dev` deployment in the same account never collides with it — and the recon
-provider sets no `default_tags`, so none of those resources carries `Project = deal-pipeline-demo`;
-that tag, and the tag-search cleanup story built on it, belong to the standalone root alone. Find
-the composed root's pipeline resources by the `<name_prefix>-pipeline` prefix or through its
-Terraform state. `infra/environments/deal-pipeline` stays as the standalone root for running this
-app alone against `npm run dev` with local state.
+`/recon-dev-pipeline/agent-model-id`, `recon_dev_pipeline_knowledge` and so on — so nothing the
+pipeline creates can collide with a recon name — and the recon provider sets no `default_tags`. Find
+the pipeline's resources by the `<name_prefix>-pipeline` prefix or through the root's Terraform
+state. Running this app alone against `npm run dev` means running it against such a deployment,
+with `.env.local` rendered by `terraform output -raw frontend_env_local`.
 
 **Samples from S3 in the container.** The console image holds the built app and no `data/`, so
 the simulated inbox cannot read `data/deal-emails` there. `infra/modules/deal-pipeline` seeds the
@@ -481,8 +481,7 @@ console layer never writes an app's parameter. The recon Config tab does not cha
 up into this layer only by decision, recorded here; it is not a refactor.
 
 **Storage.** AWS Systems Manager Parameter Store, one String parameter per setting under
-`CONSOLE_SETTINGS_PREFIX`. Both roots set `/<name_prefix>/console` — `/recon-dev/console` for the
-composed console, `/deal-pipeline-dev/console` for the standalone root a laptop runs against:
+`CONSOLE_SETTINGS_PREFIX`. The root sets `/<name_prefix>/console` (`/recon-dev/console`):
 
 | parameter | value | environment name it overlays |
 | --- | --- | --- |
@@ -638,9 +637,9 @@ whether or not the pipeline is deployed, and its task role gets `ssm:GetParamete
 `GetParametersByPath`, `PutParameter` and `DeleteParameter` on `parameter<prefix>` and
 `parameter<prefix>/*` (region and account literal, because a delete grant should reach no further than
 the parameters this console owns), plus `DescribeParameters`, which has no resource scope. The
-standalone root does the same for `/deal-pipeline-dev/console`, renders the three `CONSOLE_*` names
-into `env_local`, and gives `console_admin_group` a real default so a laptop run edits in anonymous
-mode. Plan-only tests: `infra/modules/console-settings/tests/parameters.tftest.hcl` (every seed lands
+root's `frontend_env_local` output renders the three `CONSOLE_*` names for a laptop, which then edits
+in anonymous mode when `CONSOLE_ADMIN_GROUP` is set. Plan-only tests:
+`infra/modules/console-settings/tests/parameters.tftest.hcl` (every seed lands
 at its contract key, a blank seed creates nothing, the two prefix shapes that break the grant are
 refused) and `infra/modules/frontend-ecs/tests/console_settings.tftest.hcl`. Nothing here creates a
 group; `console-admins` in the examples is an identity-provider group an operator maintains, like the
