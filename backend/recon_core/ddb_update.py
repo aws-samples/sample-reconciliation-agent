@@ -6,8 +6,8 @@ pipeline's two Lambdas write through these; ``ItemStore`` (``ddb.py``) and ``Cas
 (``cases.py``) predate them and keep their own expressions and timestamp formats.
 
 Deliberately separate from ``ddb.py``, which imports the pydantic ``ReconItem`` model at load:
-the deal pipeline's standalone Lambda zip ships boto3 and the standard library only, and this
-module has to import cleanly there.
+the deal pipeline's Lambdas have no recon item to model, and this module stays importable
+without one.
 """
 
 from datetime import UTC, datetime

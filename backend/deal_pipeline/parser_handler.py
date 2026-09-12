@@ -1,4 +1,4 @@
-"""Lambda ``deal-pipeline-dev-parser``: parse one received email into a staged deal.
+"""Lambda ``<name_prefix>-pipeline-parser``: parse one received email into a staged deal.
 
 Invoked asynchronously by the BFF with ``{"email_id": ...}``. The email record is moved
 RECEIVED -> PARSING -> PARSED (with a new deal record and its staging CSV) or -> PARSE_FAILED with

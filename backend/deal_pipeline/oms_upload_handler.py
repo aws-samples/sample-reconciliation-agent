@@ -1,4 +1,4 @@
-"""Lambda ``deal-pipeline-dev-oms-upload``: the mock OMS that receives an approved staging CSV.
+"""Lambda ``<name_prefix>-pipeline-oms-upload``: the mock OMS that receives an approved staging CSV.
 
 Invoked synchronously by the BFF's approve route with ``{"deal_id": ...}``. Reads the deal's CSV
 from S3, validates it with :mod:`oms_validator`, and records the outcome on the deal:

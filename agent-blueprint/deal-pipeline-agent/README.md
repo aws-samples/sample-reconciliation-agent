@@ -13,7 +13,7 @@ skills/
   bank-notice-format/SKILL.md   format: reading an arranger's term-sheet notice (incl. forwards)
   oms-csv-format/SKILL.md       reference: the staging CSV contract (column order, formats, enums)
 prompts/
-  parser-system.md              system prompt for the parsing agent (Lambda `deal-pipeline-dev-parser`)
+  parser-system.md              system prompt for the parsing agent (Lambda `<name_prefix>-pipeline-parser`)
   assistant-system.md           system prompt for the desk assistant (BFF `/api/pipeline/chat`)
 ```
 
@@ -35,7 +35,7 @@ Each `SKILL.md` opens with a small YAML block:
 ```yaml
 ---
 name: deal-parsing
-description: One line, no colons, no "---".
+description: Core rules for turning one new-issue deal email into one OMS record.
 metadata: { tier: "core", applies_to: ["news-alert", "bank-notice"] }
 ---
 ```
@@ -54,19 +54,44 @@ metadata: { tier: "core", applies_to: ["news-alert", "bank-notice"] }
   follows. `skills_used` on the parse output (design §4) records which skills a given email
   actually got.
 
-Keep the block to simple top-level `key: value` lines — the Lambda-side parser reads `name`,
-`description` and `metadata`, one line each, and it takes the block to end at the first `---`
-after the opening fence, so neither a multi-line value nor a `---` inside the block will survive.
-The `metadata` line is written in YAML flow style for the same reason: one key, one line. A bare
-`metadata:` header with `tier` and `applies_to` nested beneath it is not read, and the skill is
-then treated as having no `metadata` at all.
+The block is YAML, read by the parser both apps share (`backend/recon_core/skill_meta.py`,
+`yaml.safe_load`; the pipeline calls it through `backend/deal_pipeline/skills_loader.py`), so a
+SKILL.md means the same thing here as in the recon app. `metadata` may be written either way — the
+one-line flow style above, which the seeds use, or as a block:
+
+```yaml
+metadata:
+  tier: format
+  applies_to: [bank-notice]
+```
+
+Both parse to the same record. Three rules still apply.
+
+- The block ends at the first `---` after the opening fence wherever it sits. A value that is
+  entirely a quoted string containing `---` is rejected (the file is logged and skipped); a `---`
+  anywhere else in the block, including inside an unquoted value, cuts the block short silently —
+  everything after it becomes body text and `metadata` is lost. Never write `---` inside the block.
+- `description` is read as a YAML scalar, not as raw text, so unquoted YAML punctuation changes
+  its meaning: a ` #` (space, hash) starts a comment and silently drops the rest of the line; a
+  leading `&` or `!` is read as an anchor or tag; a `: ` (colon, space) anywhere in the value, a
+  tab, or a value that starts with `*`, `@`, `` ` ``, `[`, `{`, `|`, `>`, `%`, `,`, `- ` or `? `
+  is not valid YAML at all. Double-quote a description that contains a colon or a `#`, or that
+  starts with punctuation; a quoted string reads back verbatim. Every key needs a space after its
+  colon (`name: x`, not `name:x`).
+- A file whose block is not valid YAML, or whose `metadata` is not a mapping, is logged with its
+  key and left out of that run's catalog rather than half-read; the other skills still load. When
+  a saved skill does not show up in `skills_used`, the parser Lambda's CloudWatch log names the
+  file and the YAML error.
+
+A file with no block at all is not an error: it loads with an empty description and no `metadata`,
+named after its folder.
 
 ## How the files reach S3
 
 Terraform (`infra/modules/deal-pipeline`) seeds this directory into the assets bucket under the
-layout in design §3. The bucket is `deal-pipeline-dev-assets-<account_id>` from the standalone root
-and `<name_prefix>-pipeline-assets-<account_id>` (e.g. `recon-dev-pipeline-assets-...`) when the
-recon root composes the module:
+layout in design §3. The bucket is `<name_prefix>-pipeline-assets-<account_id>` (e.g.
+`recon-dev-pipeline-assets-...`), created when the recon root (`infra/environments/recon`) composes
+the module behind `enable_deal_pipeline`:
 
 ```
 skills/<name>/SKILL.md     ← skills/<name>/SKILL.md          (Lambda: SKILLS_PREFIX=skills/; BFF: PIPELINE_SKILLS_PREFIX)
@@ -84,8 +109,8 @@ prompts/assistant-system.md← prompts/assistant-system.md      (fixed key, no v
   never reverted — which also means a rule you fix under `skills/` here does **not** reach a
   running environment on the next apply. It gets there either through the Skills tab or by
   forcing a reseed (`terraform taint` the object, or delete it in S3 and apply). The single owner
-  of this rule, with the full attribute list, is "Things to know before you edit" in
-  `infra/environments/deal-pipeline/README.md`.
+  of this rule, with the full attribute list, is the comment on `aws_s3_object.skill_seed` in
+  `infra/modules/deal-pipeline/main.tf`.
 - **`prompts/assistant-system.md` is the opposite.** It has no UI editor, so it tracks the repo: a
   committed change re-uploads on the next apply, and a hand edit made only in S3 is reverted by
   the next apply, even one that changes nothing else.

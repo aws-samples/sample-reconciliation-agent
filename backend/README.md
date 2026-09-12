@@ -10,16 +10,17 @@ function signatures and it ships inside whichever Lambda zips it.
 
 `deal_pipeline/` is the one exception to the `handler.py` rule: it is a library **and** two entry
 points (`parser_handler.py`, `oms_upload_handler.py`), both deployed by `infra/modules/deal-pipeline`
-from a single zip. Any file in `backend/` redeploys both.
+from the one zip the recon root builds for every Lambda it deploys (`module.lambda_package` in
+`infra/environments/recon/main.tf`). Any file in `backend/` redeploys both.
 
 ## Libraries
 
 | Package          | What it owns                                                                                                                                                 |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `recon_core/`    | The domain. Schemas, the notice store, evidence-completeness scoring, email policy, proposal assembly. The **only** place a reconciliation rule should live. Also the boto3-only plumbing both apps share: `memory` (AgentCore Memory recall), `model_select` (the SSM model-id read with its allowlist), `ddb_update` (`UpdateItem` helpers), `s3_text` (optional-object reads). |
+| `recon_core/`    | The domain. Schemas, the notice store, evidence-completeness scoring, email policy, proposal assembly. The **only** place a reconciliation rule should live. Also the plumbing both apps share: `memory` (AgentCore Memory recall), `model_select` (the SSM model-id read with its allowlist), `ddb_update` (`UpdateItem` helpers), `s3_text` (optional-object reads) and `skill_meta` (the SKILL.md frontmatter parser and the cached S3 catalog read). |
 | `cases/`         | Case lifecycle transitions and the resolution notification.                                                                                                  |
 | `harness_agent/` | The harness backend's invoke loop and stream→trace assembly. Its sibling is `agent-blueprint/recon-agent/`, the container backend.                           |
-| `deal_pipeline/` | The Deal Pipeline app, library and Lambdas in one package: `oms_schema` + `oms_fields.json` (the staging-CSV contract, mirrored in the frontend and asserted equal), `oms_validator` (one stable error code per rule), `security_master`, `skills_loader`, `memory_recall`, `coerce`, and the `agent` tool loop. Its plumbing comes from `recon_core/` — `memory.retrieve_records`, `model_select.get_agent_model_id`, `ddb_update`, `s3_text.read_text` — but never `recon_core.ddb` or `recon_core.schema`: those need pydantic, and the standalone pipeline zip vendors only `tzdata` (`tests/deal_pipeline/test_runtime_dependencies.py` pins this). |
+| `deal_pipeline/` | The Deal Pipeline app, library and Lambdas in one package: `oms_schema` + `oms_fields.json` (the staging-CSV contract, mirrored in the frontend and asserted equal), `oms_validator` (one stable error code per rule), `security_master`, `skills_loader`, `memory_recall`, `coerce`, and the `agent` tool loop. Its plumbing comes from `recon_core/` — `memory.retrieve_records`, `model_select.get_agent_model_id`, `ddb_update`, `s3_text.read_text` and `skill_meta.read_s3_skills`, the SKILL.md parser both apps share (the pipeline passes `name_fallback="directory"` and `ttl_seconds=0`; recon passes neither, and its behaviour is the default). The pipeline Lambdas run from the recon root's zip, whose `runtime_dependencies` already vendor pydantic and PyYAML, so a `recon_core` import that needs either is fine here. |
 
 ## Lambdas
 

@@ -1,7 +1,10 @@
 """Shared SKILL.md frontmatter parsing and S3-backed live skill loading.
 
 Read by the Tier-2 agent's skill loader (``agent-blueprint/recon-agent/skills_loader.py``) and by
-the harness backend's catalog reader, so both Tier-2 backends see one parse of one catalog.
+the harness backend's catalog reader, so both Tier-2 backends see one parse of one catalog. The deal
+pipeline's ``backend/deal_pipeline/skills_loader.py`` reads its own S3 catalog through
+``read_s3_skills`` too, with two options (``name_fallback``, ``ttl_seconds``) that default to recon's
+behaviour, so one SKILL.md means one thing in both apps.
 
 Tier-1 does NOT read this module. It classifies with a plain-Python rule table
 (``backend/tier1/classify.py``) that never touches the catalog, so a catalog edit cannot change
@@ -13,6 +16,7 @@ on an untrusted-input path: ``yaml.safe_load``, never ``yaml.load``.
 """
 
 import logging
+import posixpath
 
 import yaml
 
@@ -224,8 +228,16 @@ def parse_skill(md: str) -> dict:
 _S3_CACHE: dict[str, tuple[float, list[dict]]] = {}
 S3_TTL_SECONDS = 60
 
+# The one ``name_fallback`` value ``read_s3_skills`` accepts besides None. Names a skill that declares
+# no ``name`` after the directory its object sits in (``skills/deal-parsing/SKILL.md`` ->
+# ``deal-parsing``), which is what the deal pipeline's ``skills/<name>/SKILL.md`` layout wants; recon
+# passes nothing and keeps dropping nameless skills.
+NAME_FALLBACK_DIRECTORY = "directory"
 
-def _parse_s3_skill(*, bucket: str, key: str, md: str) -> dict | None:
+
+def _parse_s3_skill(
+    *, bucket: str, key: str, md: str, name_fallback: str | None = None
+) -> dict | None:
     """Parse one skill object read from S3, or return None when it is unusable.
 
     Skills in S3 are editable from the UI, so one typo in one file must not take the catalog down
@@ -236,11 +248,16 @@ def _parse_s3_skill(*, bucket: str, key: str, md: str) -> dict | None:
     still raise, because those are deploy-time artifacts the test suite covers.
 
     A record with no ``name`` is dropped for the same reason — the classifier matches on name, so a
-    nameless skill is one no caller can ever select, and leaving it in only pads the prompt.
+    nameless skill is one no caller can ever select, and leaving it in only pads the prompt. The
+    deal pipeline selects by ``metadata`` rather than by name and promises that a file saved without
+    frontmatter still loads, so it passes ``name_fallback="directory"`` and the record is named after
+    its directory instead; a key with no directory to fall back to is still dropped.
 
-    :param bucket: bucket the object came from (used in the log line only).
-    :param key: object key (used in the log line only).
+    :param bucket: bucket the object came from (used in the log line and the directory fallback).
+    :param key: object key (used in the log line and the directory fallback).
     :param md: the raw SKILL.md text.
+    :param name_fallback: ``"directory"`` to name a nameless skill after the directory its object
+        sits in; None (the default) drops it.
     :returns: the parsed skill record, or None when it cannot be parsed or declares no name.
     """
     try:
@@ -248,13 +265,23 @@ def _parse_s3_skill(*, bucket: str, key: str, md: str) -> dict | None:
     except ValueError:
         _LOG.exception("skipping unparseable skill s3://%s/%s", bucket, key)
         return None
+    if not skill["name"] and name_fallback == NAME_FALLBACK_DIRECTORY:
+        skill["name"] = posixpath.basename(posixpath.dirname(key))
     if not skill["name"]:
         _LOG.error("skipping skill s3://%s/%s: frontmatter declares no `name`", bucket, key)
         return None
     return skill
 
 
-def read_s3_skills(bucket: str, prefix: str, *, now, s3=None) -> list[dict]:
+def read_s3_skills(
+    bucket: str,
+    prefix: str,
+    *,
+    now,
+    s3=None,
+    name_fallback: str | None = None,
+    ttl_seconds: int | None = None,
+) -> list[dict]:
     """Return every parsed SKILL.md under the S3 prefix, cached for ``S3_TTL_SECONDS``.
 
     The scan is recursive over the prefix, so both the flat ``skills/<name>.md`` layout and the
@@ -269,18 +296,42 @@ def read_s3_skills(bucket: str, prefix: str, *, now, s3=None) -> list[dict]:
     Objects that will not parse, or that declare no ``name``, are logged and skipped rather than
     raised — see ``_parse_s3_skill`` for why the S3 path differs from the repo path here.
 
+    Two options exist for the deal pipeline, whose skills carry the same frontmatter but are
+    consumed differently. Both default to recon's behaviour, so a caller that passes neither reads
+    exactly what it read before the options existed:
+
+    - ``name_fallback="directory"`` keeps a skill that declares no ``name`` by naming it after the
+      directory its object sits in (``skills/deal-parsing/SKILL.md`` -> ``deal-parsing``), so a file
+      saved without frontmatter still loads. None (the default) drops it, as above. A fallback read
+      is cached under its own key, so it and a default read of the same prefix never serve each
+      other's list.
+    - ``ttl_seconds`` overrides the cache TTL. ``0`` bypasses the cache entirely — the prefix is
+      listed and every object read on each call, and nothing is stored — for a caller that has
+      promised its users an edit is live on the very next run. None (the default) is
+      ``S3_TTL_SECONDS``.
+
     :param bucket: assets bucket holding the live skills.
     :param prefix: key prefix (e.g. ``"skills/"``).
     :param now: monotonic clock callable (injected in tests).
     :param s3: boto3 S3 client (injected in tests); built lazily when None.
+    :param name_fallback: None (drop nameless skills) or ``"directory"``; see above.
+    :param ttl_seconds: cache TTL override; None for ``S3_TTL_SECONDS``, ``0`` to bypass the cache.
     :returns: parsed skill records (incl. bodies), skipping the unusable ones.
+    :raises ValueError: when ``name_fallback`` is neither None nor ``"directory"`` — a misspelt
+        option must not silently degrade to "drop the skill".
     """
     import boto3
 
-    key = f"{bucket}/{prefix}"
-    hit = _S3_CACHE.get(key)
-    if hit and now() < hit[0]:
-        return hit[1]
+    if name_fallback not in (None, NAME_FALLBACK_DIRECTORY):
+        raise ValueError(
+            f"unknown name_fallback {name_fallback!r}: expected None or {NAME_FALLBACK_DIRECTORY!r}"
+        )
+    ttl = S3_TTL_SECONDS if ttl_seconds is None else ttl_seconds
+    key = f"{bucket}/{prefix}" if name_fallback is None else f"{bucket}/{prefix}#{name_fallback}"
+    if ttl > 0:
+        hit = _S3_CACHE.get(key)
+        if hit and now() < hit[0]:
+            return hit[1]
     s3 = s3 or boto3.client("s3")
     parsed, token = [], None
     while True:
@@ -291,11 +342,14 @@ def read_s3_skills(bucket: str, prefix: str, *, now, s3=None) -> list[dict]:
         for obj in resp.get("Contents", []):
             if obj["Key"].endswith(".md"):
                 body = s3.get_object(Bucket=bucket, Key=obj["Key"])["Body"].read().decode()
-                skill = _parse_s3_skill(bucket=bucket, key=obj["Key"], md=body)
+                skill = _parse_s3_skill(
+                    bucket=bucket, key=obj["Key"], md=body, name_fallback=name_fallback
+                )
                 if skill:
                     parsed.append(skill)
         if not resp.get("IsTruncated"):
             break
         token = resp.get("NextContinuationToken")
-    _S3_CACHE[key] = (now() + S3_TTL_SECONDS, parsed)
+    if ttl > 0:
+        _S3_CACHE[key] = (now() + ttl, parsed)
     return parsed

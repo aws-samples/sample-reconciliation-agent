@@ -2,103 +2,31 @@
 
 Skills live at ``s3://<assets>/skills/<name>/SKILL.md`` and are edited from the Skills tab (via
 approved proposals), so they are read fresh on every parse: an approved skill change must apply
-to the very next email. The frontmatter parser here is deliberately tiny -- flat ``key: value``
-lines, plus the one-line flow mapping ``metadata: { tier: "...", applies_to: [...] }`` -- because
-the Lambda ships with boto3 and the standard library alone, and nothing else in a SKILL.md header
-is read by the pipeline. ``metadata.tier`` and ``metadata.applies_to`` decide which skills an
-email gets (:func:`select_skills`); a skill without them is always loaded.
+to the very next email. The frontmatter is parsed by ``backend.recon_core.skill_meta`` -- the same
+``yaml.safe_load`` parser the recon app uses -- so one SKILL.md means one thing in both apps. Flat
+``key: value`` lines, the one-line flow mapping ``metadata: { tier: "...", applies_to: [...] }``
+the seed skills use and the block form of the same ``metadata`` all parse to the same record.
+Values are YAML scalars, not raw text: an unquoted ``description`` is cut at a `` #`` (a YAML
+comment) with nothing logged, and one with a ``: `` in it, or opening with ``* @ ` [ { | > %``, is
+not valid YAML at all. A file whose frontmatter is not valid YAML is logged and left out of the
+catalog rather than half-read; the authoring rule (double-quote such a description) is in
+``agent-blueprint/deal-pipeline-agent/README.md``, "Skill frontmatter". ``metadata.tier`` and
+``metadata.applies_to`` decide which skills an email gets (:func:`select_skills`); a skill
+without them is always loaded.
 """
 
-import logging
-import posixpath
+import time
 
 from backend.recon_core.s3_text import read_text
-
-logger = logging.getLogger(__name__)
+from backend.recon_core.skill_meta import NAME_FALLBACK_DIRECTORY, read_s3_skills
 
 FORMAT_TIER = "format"
 # Source kinds that load every skill: nobody has said which format a manual email follows.
 LOAD_ALL_SOURCE_KINDS = ("manual",)
-
-
-def _unquote(value: str) -> str:
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-        return value[1:-1]
-    return value
-
-
-def _split_top_level(text: str) -> list[str]:
-    """Split on commas that are outside brackets and quotes (``a: [x, y], b: "p, q"`` -> 2 items)."""
-    parts, current, depth, quote = [], [], 0, None
-    for ch in text:
-        if quote:
-            current.append(ch)
-            if ch == quote:
-                quote = None
-            continue
-        if ch in "'\"":
-            quote = ch
-        elif ch in "[{":
-            depth += 1
-        elif ch in "]}":
-            depth -= 1
-        if ch == "," and depth == 0:
-            parts.append("".join(current))
-            current = []
-        else:
-            current.append(ch)
-    if "".join(current).strip():
-        parts.append("".join(current))
-    return parts
-
-
-def _parse_flow_mapping(text: str) -> dict[str, str | list[str]]:
-    """Read a one-line YAML flow mapping of scalars and scalar lists; anything else is dropped."""
-    out: dict[str, str | list[str]] = {}
-    for item in _split_top_level(text.strip()[1:-1]):
-        key, sep, value = item.partition(":")
-        if not sep or not key.strip():
-            continue
-        value = value.strip()
-        if value.startswith("[") and value.endswith("]"):
-            out[key.strip()] = [_unquote(v) for v in _split_top_level(value[1:-1]) if v.strip()]
-        else:
-            out[key.strip()] = _unquote(value)
-    return out
-
-
-def parse_frontmatter(md: str) -> tuple[dict, str]:
-    """Split ``--- <key: value lines> --- <body>`` into ``(meta, body)``.
-
-    Only top-level ``key: value`` lines are read; indented lines (nested block mappings) and list
-    items are skipped rather than misread. A value written as a one-line flow mapping
-    (``metadata: { tier: "format", applies_to: ["bank-notice"] }``) becomes a nested dict of
-    strings and string lists. Other values lose surrounding quotes. Text without an opening fence
-    is all body with empty meta.
-
-    :param md: the SKILL.md text.
-    :returns: the frontmatter mapping and the body with surrounding whitespace stripped.
-    """
-    if not md.startswith("---"):
-        return {}, md.strip()
-    lines = md.splitlines()
-    meta: dict = {}
-    for index, line in enumerate(lines[1:], start=1):
-        if line.strip() == "---":
-            return meta, "\n".join(lines[index + 1 :]).strip()
-        if not line or line[0].isspace() or line.lstrip().startswith("#") or ":" not in line:
-            continue
-        key, _, value = line.partition(":")
-        value = value.strip()
-        if not value:
-            continue  # "metadata:" with nothing inline opens a nested block, which is skipped
-        if value.startswith("{") and value.endswith("}"):
-            meta[key.strip()] = _parse_flow_mapping(value)
-        else:
-            meta[key.strip()] = _unquote(value)
-    # Unterminated fence: treat the whole file as body so a half-edited skill still reaches the model.
-    return {}, md.strip()
+# The part of a parsed skill record the parsing agent reads (``select_skills`` and
+# ``agent.build_user_message``). The recon-only keys (``tools``, ``model``, ``evidence_steps``,
+# ``result``) stop here so nothing downstream comes to depend on them.
+_SKILL_KEYS = ("name", "description", "metadata", "body")
 
 
 def select_skills(skills: list[dict], source_kind: str | None) -> list[dict]:
@@ -132,46 +60,27 @@ def select_skills(skills: list[dict], source_kind: str | None) -> list[dict]:
 def list_skills(s3, bucket: str, prefix: str) -> list[dict]:
     """Return every SKILL.md under the prefix as ``{name, description, metadata, body}``, by name.
 
-    A skill with no ``name`` in its frontmatter takes the name of the directory it sits in
-    (``skills/deal-parsing/SKILL.md`` -> ``deal-parsing``), so a file saved without frontmatter
-    still loads. Objects that are not Markdown are ignored.
+    Delegates to :func:`backend.recon_core.skill_meta.read_s3_skills` with the two options recon
+    leaves at their defaults. ``name_fallback="directory"``: a skill with no ``name`` in its
+    frontmatter takes the name of the directory it sits in (``skills/deal-parsing/SKILL.md`` ->
+    ``deal-parsing``), so a file saved without frontmatter still loads. ``ttl_seconds=0``: the
+    shared 60 s catalog cache is bypassed, so an approved Skills-tab edit is visible on the very
+    next parse. Objects that are not Markdown are ignored; a Markdown object whose frontmatter is
+    not valid YAML is logged at ERROR and skipped, and the remaining skills still load.
 
     :param s3: boto3 S3 client.
     :param bucket: assets bucket.
     :param prefix: key prefix, e.g. ``skills/``.
     """
-    skills = []
-    token = None
-    while True:
-        kwargs = {"Bucket": bucket, "Prefix": prefix}
-        if token:
-            kwargs["ContinuationToken"] = token
-        resp = s3.list_objects_v2(**kwargs)
-        for obj in resp.get("Contents", []):
-            key = obj["Key"]
-            if not key.lower().endswith(".md"):
-                continue
-            md = s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
-            meta, body = parse_frontmatter(md)
-            name = meta.get("name") or posixpath.basename(posixpath.dirname(key))
-            if not name:
-                logger.warning(
-                    "skipping skill s3://%s/%s: no name in frontmatter or path", bucket, key
-                )
-                continue
-            metadata = meta.get("metadata")
-            skills.append(
-                {
-                    "name": name,
-                    "description": meta.get("description", ""),
-                    "metadata": metadata if isinstance(metadata, dict) else {},
-                    "body": body,
-                }
-            )
-        if not resp.get("IsTruncated"):
-            break
-        token = resp.get("NextContinuationToken")
-    return sorted(skills, key=lambda s: s["name"])
+    skills = read_s3_skills(
+        bucket,
+        prefix,
+        now=time.monotonic,
+        s3=s3,
+        name_fallback=NAME_FALLBACK_DIRECTORY,
+        ttl_seconds=0,
+    )
+    return sorted(({k: s[k] for k in _SKILL_KEYS} for s in skills), key=lambda s: s["name"])
 
 
 def load_text(s3, bucket: str, key: str, default: str) -> str:
