@@ -4,7 +4,8 @@ import { requireActor } from "@/lib/api-auth";
 import { requireAppAdmin } from "@/lib/auth/app-admin";
 import { validateSkill } from "@/lib/skillFrontmatter";
 import { jsonError, readJsonObject, stringField } from "@/lib/server/http";
-import { getSkill, listSkills, putSkill } from "@/lib/pipeline/server/skillsStore";
+import { isSkillExists } from "@/lib/server/skillsStore";
+import { createSkill, listSkills } from "@/lib/pipeline/server/skillsStore";
 
 // The parsing agent's skills catalog: live SKILL.md objects under `skills/<name>/` in the assets
 // bucket. GET lists and parses them; PUT creates a new skill. The parser reads the same prefix on
@@ -39,12 +40,16 @@ export async function PUT(req: Request) {
   const invalid = validateSkill(content, name);
   if (invalid) return jsonError(400, invalid);
   try {
-    if ((await getSkill(name)) !== null) {
-      return jsonError(409, `skill ${name} already exists; update it with PUT /api/pipeline/skills/${name}`);
-    }
-    await putSkill(name, content);
+    // The store refuses an existing skill (`createConflicts`); the 409 is this route's wording.
+    await createSkill(name, content);
     return NextResponse.json({ name }, { status: 201 });
   } catch (err) {
+    if (isSkillExists(err)) {
+      return jsonError(
+        409,
+        `skill ${name} already exists; update it with PUT /api/pipeline/skills/${name}`,
+      );
+    }
     return jsonError(500, `skill create failed: ${(err as Error).message}`);
   }
 }

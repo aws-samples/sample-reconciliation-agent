@@ -1,84 +1,81 @@
 /**
- * The parsing agent's skills and system prompt, as live objects in the assets bucket.
+ * The parsing agent's skills and system prompt, as live objects in the pipeline's assets bucket, bound
+ * over the shared store in `@/lib/server/skillsStore`.
  *
  * Layout is directory-per-skill: `skills/<name>/SKILL.md`. The parser Lambda loads the same prefix
  * on every run, so a write here changes the next parse without a redeploy — which is exactly what
  * the learning loop demonstrates when a skill proposal is approved.
+ *
+ * What is the pipeline's own and therefore stays here: which environment variables name the bucket,
+ * prefix and prompt key (read at call time, as every pipeline environment value is), the process-wide
+ * SDK client from `./aws`, the assistant's second prompt object, and the option set the pipeline
+ * chose where it differs from recon — only `<name>/SKILL.md` objects are skills and the directory
+ * names them, a missing object is `NoSuchKey`/`NotFound` and nothing else, a create refuses to clobber
+ * an existing skill, no skill is undeletable, and the parser prompt may not be blank.
  */
 
-import { ListObjectsV2Command, DeleteObjectCommand } from "@aws-sdk/client-s3";
-
-import { parseSkill, type SkillMeta } from "@/lib/skillFrontmatter";
-import { getText, putText, s3 } from "./aws";
+import {
+  createSkillsStore,
+  type SkillCatalogueEntry,
+  type SkillsStoreOptions,
+} from "@/lib/server/skillsStore";
+import { getText, s3 } from "./aws";
 import { ASSISTANT_PROMPT_KEY, env } from "./env";
 
-/** Skill names double as S3 path segments; this is the same pattern `validateSkill` enforces. */
-export const SKILL_NAME = /^[a-z0-9-]+$/;
+export { SKILL_NAME } from "@/lib/server/skillsStore";
 
-/** One catalog entry: frontmatter metadata plus the S3 directory it lives in. */
-export interface SkillCatalogEntry extends SkillMeta {
-  key: string;
-}
+/** The pipeline's option set: every point on which it differs from recon's defaults. */
+export const PIPELINE_SKILLS_OPTIONS: SkillsStoreOptions = {
+  catalogue: "skill-md-per-directory",
+  missingAsNotFound: "not-found-codes",
+  createConflicts: true,
+  protectedNames: [],
+  emptyPromptAllowed: false,
+};
+
+const store = createSkillsStore({
+  bucket: env.assetsBucket,
+  prefix: env.skillsPrefix,
+  promptKey: env.parserPromptKey,
+  client: s3,
+  options: PIPELINE_SKILLS_OPTIONS,
+});
 
 export function skillKey(name: string): string {
-  return `${env.skillsPrefix()}${name}/SKILL.md`;
+  return store.skillKey(name);
 }
 
-/** Directory name between the prefix and `/SKILL.md`, or null for objects that are not skills. */
-function skillNameFromKey(key: string): string | null {
-  const prefix = env.skillsPrefix();
-  if (!key.startsWith(prefix) || !key.endsWith("/SKILL.md")) return null;
-  const name = key.slice(prefix.length, -"/SKILL.md".length);
-  return name && !name.includes("/") ? name : null;
-}
-
-/**
- * Every skill under the prefix, with its frontmatter parsed.
- *
- * The directory name wins over the frontmatter `name` when they disagree: the parser resolves skills
- * by directory, so that is the name an operator must use to edit or delete the object.
- */
-export async function listSkills(): Promise<SkillCatalogEntry[]> {
-  const listed = await s3().send(
-    new ListObjectsV2Command({
-      Bucket: env.assetsBucket(),
-      Prefix: env.skillsPrefix(),
-    }),
-  );
-  const out: SkillCatalogEntry[] = [];
-  for (const obj of listed.Contents ?? []) {
-    const name = obj.Key ? skillNameFromKey(obj.Key) : null;
-    if (!name || !obj.Key) continue;
-    const content = (await getText(obj.Key)) ?? "";
-    const { body: _body, ...meta } = parseSkill(content);
-    out.push({ ...meta, name, key: obj.Key });
-  }
-  return out.sort((a, b) => a.name.localeCompare(b.name));
+/** Every skill under the prefix, named by directory, with its frontmatter and key, sorted by name. */
+export function listSkills(): Promise<SkillCatalogueEntry[]> {
+  return store.listSkills();
 }
 
 /** Full SKILL.md, or null when no such skill exists. */
-export async function getSkill(name: string): Promise<string | null> {
-  return getText(skillKey(name));
+export function getSkill(name: string): Promise<string | null> {
+  return store.getSkill(name);
+}
+
+/** Create a SKILL.md; throws `SkillExistsError` (see `isSkillExists`) when the skill already exists. */
+export function createSkill(name: string, content: string): Promise<void> {
+  return store.createSkill(name, content);
 }
 
 /** Create or replace a SKILL.md. Callers validate the frontmatter first. */
-export async function putSkill(name: string, content: string): Promise<void> {
-  await putText(skillKey(name), content, "text/markdown");
+export function putSkill(name: string, content: string): Promise<void> {
+  return store.putSkill(name, content);
 }
 
-export async function deleteSkill(name: string): Promise<void> {
-  await s3().send(
-    new DeleteObjectCommand({ Bucket: env.assetsBucket(), Key: skillKey(name) }),
-  );
+export function deleteSkill(name: string): Promise<void> {
+  return store.deleteSkill(name);
 }
 
 /** The parser's system prompt, or null when it has not been seeded. */
-export async function getParserPrompt(): Promise<string | null> {
-  return getText(env.parserPromptKey());
+export function getParserPrompt(): Promise<string | null> {
+  return store.getPrompt();
 }
 
-export async function putParserPrompt(content: string): Promise<void> {
-  await putText(env.parserPromptKey(), content, "text/markdown");
+export function putParserPrompt(content: string): Promise<void> {
+  return store.putPrompt(content);
 }
 
 /** The assistant's system prompt, or null when it has not been seeded (the BFF then uses its built-in). */

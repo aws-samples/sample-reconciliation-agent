@@ -24,7 +24,26 @@ frontend/src/proxy.ts             the gate in front of both BFFs
 frontend/src/app/app-theme.css    the shared "instrument" theme every app renders under (.app-root,
                                   rc-* classes, --rc-* tokens)
 frontend/src/components/app-ui/   chrome and primitives shared by the apps: AppChrome (header, AppNav,
-                                  UserMenu), DataTable, ui.tsx (Panel, Pill, Modal, Notice, buttons)
+                                  UserMenu), DataTable, ui.tsx (Panel, Pill, Modal, Notice, buttons),
+                                  ModelSelectPanel (the model row both Config tabs mount),
+                                  MemoryPanel (records, strategy card and confirmed delete over an app's
+                                  memory routes; recon's Lessons tab and the pipeline's Memory Manager
+                                  mount it), SkillsCatalog + SkillEditor + PromptEditorPage (the skills
+                                  catalogue, one-skill editor and system-prompt page both Skills tabs
+                                  mount; recon edits in place on the catalogue, the pipeline on its
+                                  skills/[name] route)
+frontend/src/lib/server/          helpers both BFFs share: http (the error envelope), ssm (readParam /
+                                  writeParam: the Parameter Store read and write behind both Config
+                                  routes and recon's prompt and eval helpers), agentModels (the model
+                                  allowlist), memoryRequests,
+                                  memoryClient (createMemoryClient: the one AgentCore Memory client;
+                                  recon binds RECON_MEMORY_ID in lib/reconMemory.ts, the pipeline its
+                                  two ids in lib/pipeline/server/memoryClient.ts),
+                                  skillsStore (createSkillsStore: the one S3 skills + system-prompt
+                                  store, parameterised by bucket, prefix, prompt key and five options
+                                  whose defaults are recon's behaviour; recon binds ASSETS_BUCKET /
+                                  SKILLS_PREFIX / SYSTEM_PROMPT_KEY in lib/reconSkills.ts, the pipeline
+                                  its PIPELINE_ names in lib/pipeline/server/skillsStore.ts)
 frontend/src/hooks/useAppSubject.ts
                                   the viewer for one app (subject, groups, isAdmin), projected from the
                                   viewer store; useReconSubject.ts is its recon-named binding
@@ -61,9 +80,12 @@ one.
 The apps do not import each other. What they share is the auth module (`src/lib/auth/`,
 `src/lib/api-auth.ts`, `src/lib/reauth.ts`), the console's instrument theme (`src/app/app-theme.css`)
 and the chrome and primitives built on it (`src/components/app-ui/`: the header with its nav and user
-menu, the column-preferences table, the panel/pill/modal primitives), the `src/components/ui/`
-primitives and a couple of app-agnostic helpers; each keeps its own nav links, status vocabulary,
-hooks and BFF. Who may open which app comes
+menu, the column-preferences table, the panel/pill/modal primitives, the model-selection row both
+Config tabs mount, the skills catalogue, editor and prompt page both Skills tabs mount), the
+`src/components/ui/` primitives and the server helpers in `src/lib/server/` (the error envelope, the
+Parameter Store read/write behind both Config routes, the model allowlist, the S3 skills store behind
+both Skills tabs);
+each keeps its own nav links, status vocabulary, hooks and BFF. Who may open which app comes
 from identity-provider groups — `RECON_ACCESS_GROUP` / `RECON_ADMIN_GROUP` and `PIPELINE_ACCESS_GROUP`
 / `PIPELINE_ADMIN_GROUP`, resolved by `src/lib/auth/apps.ts`. An unset access group leaves that app
 open to every authenticated user, unless `REQUIRE_ACCESS_GROUPS=true`, which the composed deployment
@@ -90,7 +112,9 @@ Admin gating differs between the apps, and it matters for what an access group b
 write route re-checks `PIPELINE_ADMIN_GROUP`. On the recon side only `config/*`, `memory` DELETE and
 `uploads` do; `system-prompt`, `skills`, `harness/configs`, `evals/batch` and bulk `cases` writes are
 open to anyone the proxy admits, so `RECON_ACCESS_GROUP` is the real boundary on the recon agent's
-behaviour.
+behaviour. Both Skills tabs read and write through the one shared store (`src/lib/server/skillsStore.ts`)
+with per-app options, and the recon skills and system-prompt routes staying ungated is a recorded
+decision (`docs/shared-spine-proposal.md` §8a, option 1), not something the sharing left behind.
 
 The shell also has a **Settings** screen (`/console/settings`, from the Settings entry in the rail's
 footer) for what belongs to the console rather than to one app, in five `?tab=` sections: **Access**
