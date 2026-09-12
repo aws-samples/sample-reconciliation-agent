@@ -1,14 +1,14 @@
 import { NextResponse } from "next/server";
 import { DynamoDBClient, ScanCommand } from "@aws-sdk/client-dynamodb";
 import { unmarshall } from "@aws-sdk/util-dynamodb";
-import {
-  BatchDeleteMemoryRecordsCommand,
-  BedrockAgentCoreClient,
-  RetrieveMemoryRecordsCommand,
-} from "@aws-sdk/client-bedrock-agentcore";
 
 import { authorizeRequest } from "@/lib/api-auth";
 import { requireReconAdmin } from "@/lib/reconAdmin";
+import { reconMemoryClient } from "@/lib/reconMemory";
+import type {
+  MemoryClient,
+  MemoryRecord as ConsolidatedRecord,
+} from "@/lib/server/memoryClient";
 import { parseMemoryDeleteIds } from "@/lib/server/memoryRequests";
 
 // Re-exported because __tests__/api/reconMemoryDelete.test.ts reads the parser from this route.
@@ -20,22 +20,21 @@ export { parseMemoryDeleteIds };
 // decisions into retrievable records under namespace reconciliation/lessons/{domain}; this route
 // enumerates the recon domains (from the lessons ledger), retrieves those records for the Lessons
 // tab, and deletes the ones an operator selects.
+//
+// The SDK calls go through the shared client (lib/server/memoryClient.ts) bound to RECON_MEMORY_ID
+// by lib/reconMemory.ts. What stays here is recon's own: the domain enumeration, the per-domain
+// semantic retrieve and its best-effort degradation, and the `domain` on every record.
 export const runtime = "nodejs";
 
 const REGION = process.env.AWS_REGION ?? "us-east-1";
-const RECON_MEMORY_ID = process.env.RECON_MEMORY_ID ?? "";
 const LESSONS_TABLE = process.env.LESSONS_TABLE ?? "recon-lessons";
 // Mirrors backend recon_core.lessons_recall: the actorId segment of the lessons namespace.
 const DEFAULT_DOMAIN = "lending";
 // Consolidated lessons per domain — a generous top_k so the tab shows the full recalled set.
 const TOP_K = 25;
 
-interface MemoryRecord {
-  id: string;
+interface MemoryRecord extends ConsolidatedRecord {
   domain: string;
-  namespace: string;
-  content: string;
-  createdAt: string;
 }
 
 // Scan the lessons ledger for the distinct `domain` values that back the memory namespaces.
@@ -53,30 +52,16 @@ async function listDomains(ddb: DynamoDBClient): Promise<string[]> {
 // Retrieve the consolidated long-term memory records for one domain. Best-effort: a single
 // failing domain (throttle, empty namespace) must not fail the whole route.
 async function retrieveForDomain(
-  agentcore: BedrockAgentCoreClient,
+  memory: MemoryClient,
   domain: string,
 ): Promise<MemoryRecord[]> {
   const namespace = `reconciliation/lessons/${domain}`;
   try {
     // Mirrors backend retrieve_memory_records: memoryId + namespace + searchCriteria. A
     // non-empty query is required, so we pass the domain name to surface its records.
-    const resp = await agentcore.send(
-      new RetrieveMemoryRecordsCommand({
-        memoryId: RECON_MEMORY_ID,
-        namespace,
-        searchCriteria: { searchQuery: domain, topK: TOP_K },
-      }),
-    );
-    return (resp.memoryRecordSummaries ?? [])
-      .map((r) => ({
-        id: r.memoryRecordId ?? "",
-        domain,
-        namespace,
-        // MemoryContent is a union member { text: ... }; unwrap the same field the backend reads.
-        content: r.content && "text" in r.content ? (r.content.text ?? "") : "",
-        createdAt: r.createdAt ? new Date(r.createdAt).toISOString() : "",
-      }))
-      .filter((r) => r.content);
+    const records = await memory.retrieveRecords(namespace, domain, TOP_K);
+    // `namespace` is restated as the one asked for, so the wire shape stays exactly what it was.
+    return records.map((r) => ({ ...r, domain, namespace }));
   } catch (err) {
     console.warn(
       `recon memory retrieve failed (domain ${domain}):`,
@@ -95,13 +80,13 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: auth.message }, { status: auth.status });
   }
   // Feature-gated: no configured memory -> empty list (same contract as reconMemory.ts).
-  if (!RECON_MEMORY_ID) return NextResponse.json([]);
+  const memory = reconMemoryClient();
+  if (!memory.configured) return NextResponse.json([]);
   try {
     const ddb = new DynamoDBClient({ region: REGION });
-    const agentcore = new BedrockAgentCoreClient({ region: REGION });
     const domains = await listDomains(ddb);
     const perDomain = await Promise.all(
-      domains.map((d) => retrieveForDomain(agentcore, d)),
+      domains.map((d) => retrieveForDomain(memory, d)),
     );
     return NextResponse.json(perDomain.flat());
   } catch (err) {
@@ -142,7 +127,8 @@ export async function DELETE(req: Request) {
   // Unlike GET, an unconfigured memory is an error here. Answering 200 to a delete that deleted
   // nothing would tell the operator their records are gone when they are not — and if the variable is
   // missing, GET returned `[]`, so there was nothing on screen to select in the first place.
-  if (!RECON_MEMORY_ID) {
+  const memory = reconMemoryClient();
+  if (!memory.configured) {
     return NextResponse.json(
       {
         error:
@@ -153,22 +139,8 @@ export async function DELETE(req: Request) {
   }
 
   try {
-    const agentcore = new BedrockAgentCoreClient({ region: REGION });
-    const resp = await agentcore.send(
-      new BatchDeleteMemoryRecordsCommand({
-        memoryId: RECON_MEMORY_ID,
-        records: ids.map((id) => ({ memoryRecordId: id })),
-      }),
-    );
-    return NextResponse.json({
-      deleted: (resp.successfulRecords ?? []).map(
-        (r) => r.memoryRecordId ?? "",
-      ),
-      failed: (resp.failedRecords ?? []).map((r) => ({
-        id: r.memoryRecordId ?? "",
-        error: r.errorMessage ?? "unknown error",
-      })),
-    });
+    const outcome = await memory.batchDelete(ids);
+    return NextResponse.json(outcome);
   } catch (err) {
     return NextResponse.json(
       { error: (err as Error).message },

@@ -1,5 +1,6 @@
 /**
- * AgentCore Memory access for the two memories the pipeline uses (design §8).
+ * AgentCore Memory access for the two memories the pipeline uses (design §8), bound over the shared
+ * client in `@/lib/server/memoryClient`.
  *
  * - The KNOWLEDGE memory holds situational parsing rules. Written as USER events (the `edge_cases`
  *   strategy extracts and consolidates them into records under
@@ -9,53 +10,56 @@
  *   no strategy.
  *
  * Both are optional deployments. When an id is unset every read returns empty and every write is a
- * no-op that reports `false`, so the rest of the BFF and the UI work without them; the ROUTES decide
- * whether a no-op write should be a 409 (it is — a delete that deleted nothing must not look like a
- * success).
+ * no-op that reports `false` or `null`, so the rest of the BFF and the UI work without them; the
+ * ROUTES decide whether a no-op write should be a 409 (it is — a delete that deleted nothing must
+ * not look like a success).
+ *
+ * What is the pipeline's own and therefore stays here: which environment variable names each
+ * memory, the desk actor and its namespace, the wording of a rule event, and the process-wide SDK
+ * clients from `./aws` (built once, so a route hit once a second does not re-resolve credentials).
+ * The ids are read at call time, as every pipeline environment value is.
  */
 
-import {
-  BatchDeleteMemoryRecordsCommand,
-  CreateEventCommand,
-  ListEventsCommand,
-  ListMemoryRecordsCommand,
-  RetrieveMemoryRecordsCommand,
-  type MemoryRecordSummary,
-} from "@aws-sdk/client-bedrock-agentcore";
-import { GetMemoryCommand } from "@aws-sdk/client-bedrock-agentcore-control";
-
 import type { ChatMessage, MemoryRecord } from "@/lib/pipeline/types";
+import type { MemoryStrategyResponse } from "@/lib/memoryStrategy";
+import {
+  createMemoryClient,
+  type BatchDeleteOutcome,
+  type MemoryClient,
+} from "@/lib/server/memoryClient";
+import { memorySafeId } from "@/lib/server/memoryRequests";
 import { agentcore, agentcoreControl } from "./aws";
 import { env } from "./env";
-import { toStrategyInfo, type MemoryStrategyResponse } from "@/lib/memoryStrategy";
-import { memorySafeId } from "@/lib/server/memoryRequests";
 
 /** The desk is one actor: every edge-case rule is shared by everyone who reviews deals. */
 export const KNOWLEDGE_ACTOR_ID = "deal-desk";
 /** Where the `edge_cases` strategy files consolidated records for that actor. */
 export const EDGE_CASES_NAMESPACE = `deal-pipeline/edge-cases/${KNOWLEDGE_ACTOR_ID}`;
-// One page is plenty for the panel; a desk with more than this many edge cases has outgrown the demo.
-const PAGE_SIZE = 100;
+
+export type { BatchDeleteOutcome };
+
+/** The process-wide SDK clients, handed to the shared client as thunks so an unset id builds none. */
+const CLIENTS = { agentcore, agentcoreControl };
+
+/** The knowledge memory, bound at call time to `KNOWLEDGE_MEMORY_ID` (empty when not deployed). */
+export function knowledgeMemory(): MemoryClient {
+  return createMemoryClient({
+    memoryId: env.knowledgeMemoryId(),
+    clients: CLIENTS,
+  });
+}
+
+/** The chat memory, bound at call time to `CHAT_MEMORY_ID` (empty when not deployed). */
+export function chatMemory(): MemoryClient {
+  return createMemoryClient({ memoryId: env.chatMemoryId(), clients: CLIENTS });
+}
 
 export function isKnowledgeMemoryConfigured(): boolean {
-  return env.knowledgeMemoryId() !== "";
+  return knowledgeMemory().configured;
 }
 
 export function isChatMemoryConfigured(): boolean {
-  return env.chatMemoryId() !== "";
-}
-
-/** Project an SDK record summary onto the wire type, dropping records with no text. */
-function toRecord(r: MemoryRecordSummary, namespace: string): MemoryRecord | null {
-  // MemoryContent is a union member { text: ... }; the pipeline only ever writes text.
-  const content = r.content && "text" in r.content ? (r.content.text ?? "") : "";
-  if (!content) return null;
-  return {
-    id: r.memoryRecordId ?? "",
-    namespace: r.namespaces?.[0] ?? namespace,
-    content,
-    createdAt: r.createdAt ? new Date(r.createdAt).toISOString() : "",
-  };
+  return chatMemory().configured;
 }
 
 /**
@@ -63,23 +67,12 @@ function toRecord(r: MemoryRecordSummary, namespace: string): MemoryRecord | nul
  *
  * @returns up to `topK` records ranked by relevance; `[]` when the memory is not configured.
  */
-export async function retrieveRecords(
+export function retrieveRecords(
   namespace: string,
   query: string,
   topK: number,
 ): Promise<MemoryRecord[]> {
-  const memoryId = env.knowledgeMemoryId();
-  if (!memoryId) return [];
-  const resp = await agentcore().send(
-    new RetrieveMemoryRecordsCommand({
-      memoryId,
-      namespace,
-      searchCriteria: { searchQuery: query, topK },
-    }),
-  );
-  return (resp.memoryRecordSummaries ?? [])
-    .map((r) => toRecord(r, namespace))
-    .filter((r): r is MemoryRecord => r !== null);
+  return knowledgeMemory().retrieveRecords(namespace, query, topK);
 }
 
 /**
@@ -88,29 +81,10 @@ export async function retrieveRecords(
  * `ListMemoryRecords` rather than a search with a dummy query: the panel is an inventory, and a
  * search returns a relevance-ranked subset that hides whatever the query happened not to match.
  */
-export async function listRecords(
+export function listRecords(
   namespace: string = EDGE_CASES_NAMESPACE,
 ): Promise<MemoryRecord[]> {
-  const memoryId = env.knowledgeMemoryId();
-  if (!memoryId) return [];
-  const out: MemoryRecord[] = [];
-  let nextToken: string | undefined;
-  do {
-    const resp = await agentcore().send(
-      new ListMemoryRecordsCommand({
-        memoryId,
-        namespace,
-        maxResults: PAGE_SIZE,
-        nextToken,
-      }),
-    );
-    for (const r of resp.memoryRecordSummaries ?? []) {
-      const rec = toRecord(r, namespace);
-      if (rec) out.push(rec);
-    }
-    nextToken = resp.nextToken;
-  } while (nextToken);
-  return out.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return knowledgeMemory().listRecords(namespace);
 }
 
 /**
@@ -122,32 +96,20 @@ export async function listRecords(
  *
  * @returns the event id, or null when the knowledge memory is not configured.
  */
-export async function createRuleEvent(
+export function createRuleEvent(
   rule: string,
   rationale: string,
   sessionId: string,
 ): Promise<string | null> {
-  const memoryId = env.knowledgeMemoryId();
-  if (!memoryId) return null;
   const text = rationale.trim()
     ? `Deal-parsing rule: ${rule.trim()}\nRationale: ${rationale.trim()}`
     : `Deal-parsing rule: ${rule.trim()}`;
-  const resp = await agentcore().send(
-    new CreateEventCommand({
-      memoryId,
-      actorId: KNOWLEDGE_ACTOR_ID,
-      sessionId: memorySafeId(sessionId),
-      eventTimestamp: new Date(),
-      payload: [{ conversational: { role: "USER", content: { text } } }],
-    }),
-  );
-  return resp.event?.eventId ?? "";
-}
-
-/** Outcome of a batch delete, per record, so the panel can say which ones survived. */
-export interface BatchDeleteOutcome {
-  deleted: string[];
-  failed: { id: string; error: string }[];
+  return knowledgeMemory().createEvent({
+    actorId: KNOWLEDGE_ACTOR_ID,
+    sessionId: memorySafeId(sessionId),
+    role: "USER",
+    text,
+  });
 }
 
 /**
@@ -156,41 +118,13 @@ export interface BatchDeleteOutcome {
  * @returns per-record outcome, or null when the knowledge memory is not configured (the route turns
  *   that into a 409 rather than an empty success).
  */
-export async function batchDelete(
-  ids: string[],
-): Promise<BatchDeleteOutcome | null> {
-  const memoryId = env.knowledgeMemoryId();
-  if (!memoryId) return null;
-  const resp = await agentcore().send(
-    new BatchDeleteMemoryRecordsCommand({
-      memoryId,
-      records: ids.map((id) => ({ memoryRecordId: id })),
-    }),
-  );
-  return {
-    deleted: (resp.successfulRecords ?? []).map((r) => r.memoryRecordId ?? ""),
-    failed: (resp.failedRecords ?? []).map((r) => ({
-      id: r.memoryRecordId ?? "",
-      error: r.errorMessage ?? "unknown error",
-    })),
-  };
+export function batchDelete(ids: string[]): Promise<BatchDeleteOutcome | null> {
+  return knowledgeMemory().batchDelete(ids);
 }
 
-/**
- * The knowledge memory's strategy configuration (control plane), projected for the panel.
- *
- * Read-only by design: the strategy is owned by Terraform, and changing its `type` replaces the
- * strategy and deletes every extracted record with it.
- */
-export async function getStrategy(): Promise<MemoryStrategyResponse> {
-  const memoryId = env.knowledgeMemoryId();
-  if (!memoryId) return { configured: false, memoryStatus: null, strategies: [] };
-  const resp = await agentcoreControl().send(new GetMemoryCommand({ memoryId }));
-  return {
-    configured: true,
-    memoryStatus: resp.memory?.status ?? null,
-    strategies: (resp.memory?.strategies ?? []).map(toStrategyInfo),
-  };
+/** The knowledge memory's strategy configuration (control plane), projected for the panel. */
+export function getStrategy(): Promise<MemoryStrategyResponse> {
+  return knowledgeMemory().getStrategy();
 }
 
 /**
@@ -199,31 +133,13 @@ export async function getStrategy(): Promise<MemoryStrategyResponse> {
  * @param actorId the verified caller's subject — sessions are private to the person who had them.
  * @returns true when written, false when the chat memory is not configured.
  */
-export async function appendChatEvent(
+export function appendChatEvent(
   sessionId: string,
   role: ChatMessage["role"],
   text: string,
   actorId: string,
 ): Promise<boolean> {
-  const memoryId = env.chatMemoryId();
-  if (!memoryId || !text.trim()) return false;
-  await agentcore().send(
-    new CreateEventCommand({
-      memoryId,
-      actorId: memorySafeId(actorId),
-      sessionId: memorySafeId(sessionId),
-      eventTimestamp: new Date(),
-      payload: [
-        {
-          conversational: {
-            role: role === "user" ? "USER" : "ASSISTANT",
-            content: { text },
-          },
-        },
-      ],
-    }),
-  );
-  return true;
+  return chatMemory().appendChatEvent(sessionId, role, text, actorId);
 }
 
 /**
@@ -231,41 +147,9 @@ export async function appendChatEvent(
  *
  * @returns `[]` when the chat memory is not configured or the session has no events.
  */
-export async function listChatEvents(
+export function listChatEvents(
   sessionId: string,
   actorId: string,
 ): Promise<ChatMessage[]> {
-  const memoryId = env.chatMemoryId();
-  if (!memoryId) return [];
-  const out: ChatMessage[] = [];
-  let nextToken: string | undefined;
-  do {
-    const resp = await agentcore().send(
-      new ListEventsCommand({
-        memoryId,
-        actorId: memorySafeId(actorId),
-        sessionId: memorySafeId(sessionId),
-        includePayloads: true,
-        maxResults: PAGE_SIZE,
-        nextToken,
-      }),
-    );
-    for (const event of resp.events ?? []) {
-      const at = event.eventTimestamp
-        ? new Date(event.eventTimestamp).toISOString()
-        : "";
-      for (const item of event.payload ?? []) {
-        const turn = "conversational" in item ? item.conversational : undefined;
-        const text = turn?.content && "text" in turn.content ? turn.content.text : "";
-        if (!turn || !text) continue;
-        out.push({
-          role: turn.role === "ASSISTANT" ? "assistant" : "user",
-          content: text,
-          at,
-        });
-      }
-    }
-    nextToken = resp.nextToken;
-  } while (nextToken);
-  return out.sort((a, b) => a.at.localeCompare(b.at));
+  return chatMemory().listChatEvents(sessionId, actorId);
 }

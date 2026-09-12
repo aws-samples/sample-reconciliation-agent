@@ -1,7 +1,7 @@
 import {
-  BedrockAgentCoreClient,
-  CreateEventCommand,
-} from "@aws-sdk/client-bedrock-agentcore";
+  createMemoryClient,
+  type MemoryClient,
+} from "@/lib/server/memoryClient";
 
 // Writes analyst decisions into the recon AgentCore Memory as conversational events. The
 // memory's `lessons_learned` strategy — CUSTOM with a SEMANTIC_OVERRIDE extraction prompt, namespace
@@ -11,9 +11,28 @@ import {
 //
 // RECON_MEMORY_ID is distinct from the chatbot app's MEMORY_ID. Empty -> feature disabled.
 // Best-effort by design: a memory failure must never block or fail the analyst's decision.
+//
+// The SDK plumbing is the shared client in lib/server/memoryClient.ts; what stays here is recon's
+// binding to RECON_MEMORY_ID, its actor/session naming and the wording of a lesson event.
 
 const REGION = process.env.AWS_REGION ?? "us-east-1";
-const RECON_MEMORY_ID = process.env.RECON_MEMORY_ID ?? "";
+
+/**
+ * The recon memory, bound to `RECON_MEMORY_ID`.
+ *
+ * The id is read when this is called, not when the module loads, so the memory routes and this
+ * module agree with every other call-time environment read in the console. For a process whose
+ * environment is fixed at start (ECS) the two are indistinguishable. One SDK client pair per call —
+ * i.e. per request — as the recon routes always built.
+ *
+ * @returns a client whose `configured` is false when the variable is unset or empty.
+ */
+export function reconMemoryClient(): MemoryClient {
+  return createMemoryClient({
+    memoryId: process.env.RECON_MEMORY_ID ?? "",
+    region: REGION,
+  });
+}
 
 export interface LessonEvent {
   item_id: string;
@@ -57,7 +76,8 @@ export function hasDerivableLesson(f: LessonEvent): boolean {
 }
 
 export async function recordLessonMemoryEvent(f: LessonEvent): Promise<void> {
-  if (!RECON_MEMORY_ID) return;
+  const memory = reconMemoryClient();
+  if (!memory.configured) return;
   if (!hasDerivableLesson(f)) return;
   const lines = [
     `Analyst decision for reconciliation item ${f.item_id}` +
@@ -70,22 +90,12 @@ export async function recordLessonMemoryEvent(f: LessonEvent): Promise<void> {
     f.user_comment ? `Analyst comment: ${f.user_comment}` : "",
   ].filter(Boolean);
   try {
-    await new BedrockAgentCoreClient({ region: REGION }).send(
-      new CreateEventCommand({
-        memoryId: RECON_MEMORY_ID,
-        actorId: sanitizeId(f.domain ?? "unknown"),
-        sessionId: sanitizeId(`lesson-${f.item_id}`),
-        eventTimestamp: new Date(),
-        payload: [
-          {
-            conversational: {
-              role: "USER",
-              content: { text: lines.join("\n") },
-            },
-          },
-        ],
-      }),
-    );
+    await memory.createEvent({
+      actorId: sanitizeId(f.domain ?? "unknown"),
+      sessionId: sanitizeId(`lesson-${f.item_id}`),
+      role: "USER",
+      text: lines.join("\n"),
+    });
   } catch (err) {
     // Advisory memory only — log and move on; the DynamoDB ledger already has the lesson.
     console.warn("recon memory event failed:", (err as Error).message);

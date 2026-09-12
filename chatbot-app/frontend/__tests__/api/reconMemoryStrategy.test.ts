@@ -7,9 +7,15 @@
  * memory answers `configured: false` rather than erroring, and the response is the flattened
  * projection rather than the raw SDK union — the panel renders these fields directly.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-process.env.RECON_MEMORY_ID = "recon_test_memory-abc123";
+import { scopedEnv } from "../helpers/env";
+
+const MEMORY_ID = "recon_test_memory-abc123";
+// Set before the route is imported and reset before every case, so the unset case below cannot leak
+// into a neighbour whatever order the cases run in, and nothing leaks into a sibling file.
+const env = scopedEnv({ RECON_MEMORY_ID: MEMORY_ID });
+afterAll(() => env.restore());
 
 const controlSend = vi.fn();
 // The gate itself is covered by api-auth's own tests; mocked here so these stay about the route's
@@ -59,6 +65,7 @@ function get() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  env.set({ RECON_MEMORY_ID: MEMORY_ID });
   authorizeRequest.mockResolvedValue({ ok: true, subject: "analyst" });
 });
 
@@ -89,7 +96,7 @@ describe("GET /api/recon/memory/strategy", () => {
     expect(controlSend).toHaveBeenCalledWith(
       expect.objectContaining({
         __cmd: "GetMemory",
-        memoryId: "recon_test_memory-abc123",
+        memoryId: MEMORY_ID,
       }),
     );
   });
@@ -111,7 +118,10 @@ describe("GET /api/recon/memory/strategy", () => {
     );
     const res = await get();
     expect(res.status).toBe(500);
-    expect((await res.json()).error).toContain("AccessDeniedException");
+    const body = await res.json();
+    expect(body.error).toContain("AccessDeniedException");
+    // The message is the SDK's own, unwrapped: `{ error: <raw message> }` is what the panel shows.
+    expect(body).toEqual({ error: "AccessDeniedException: GetMemory" });
   });
 
   it("tolerates a memory with no strategies", async () => {
@@ -121,15 +131,12 @@ describe("GET /api/recon/memory/strategy", () => {
   });
 
   it("answers configured:false when RECON_MEMORY_ID is unset", async () => {
-    // Re-imported with the variable cleared: the route reads it at module scope, matching the
-    // feature-gate contract of the records route beside it.
-    vi.resetModules();
-    process.env.RECON_MEMORY_ID = "";
-    const { GET: freshGet } =
-      await import("@/app/api/recon/memory/strategy/route");
-    const body = await (
-      await freshGet(new Request("http://x/api/recon/memory/strategy"))
-    ).json();
+    // The variable is read when the request arrives (the shared client binds it per call), so the
+    // already-imported route sees the cleared value — the same feature-gate contract as the records
+    // route beside it. Before the shared client the id was captured at module load and this case
+    // re-imported the route; that is the one accepted change of the extraction.
+    env.set({ RECON_MEMORY_ID: "" });
+    const body = await (await get()).json();
 
     expect(body).toEqual({
       configured: false,
@@ -137,6 +144,5 @@ describe("GET /api/recon/memory/strategy", () => {
       strategies: [],
     });
     expect(controlSend).not.toHaveBeenCalled();
-    process.env.RECON_MEMORY_ID = "recon_test_memory-abc123";
   });
 });

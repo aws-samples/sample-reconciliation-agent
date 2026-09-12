@@ -134,4 +134,29 @@ describe("MemoryManagerPanel", () => {
     expect(success.style.color).toContain("--rc-cyan");
     expect(screen.queryByRole("alert")).toBeNull();
   });
+
+  it("lists the records under a select-all header, with Refresh and the proposals link, for an admin", async () => {
+    render(<MemoryManagerPanel isAdmin />);
+
+    expect(await screen.findByText(RECORD.content)).toBeTruthy();
+    expect(screen.getByText("Consolidated records")).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: "Select all memory records" })).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: "Select memory record mem-1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Proposals" })).toBeTruthy();
+  });
+
+  it("names the memory variable when there is nothing to show, in one line rather than a box", async () => {
+    api.listMemory.mockResolvedValue([]);
+    api.getMemoryStrategy.mockResolvedValue({ configured: false, memoryStatus: null, strategies: [] });
+    render(<MemoryManagerPanel isAdmin={false} />);
+
+    expect(
+      await screen.findByText("No consolidated memory yet — or KNOWLEDGE_MEMORY_ID not configured."),
+    ).toBeTruthy();
+    // The panel's notes are inline here — a sidebar has no room for a dashed box per note.
+    const note = screen.getByText("KNOWLEDGE_MEMORY_ID not configured — no strategy to show.");
+    expect(note.tagName).toBe("P");
+    expect(note).not.toHaveAttribute("data-kind");
+  });
 });
