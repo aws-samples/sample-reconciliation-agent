@@ -20,9 +20,9 @@ hard way; none of it is inferable from reading the code.
 ## Commands that are actually the gate
 
 ```bash
-python3 -m pytest tests/ -q                  # 1851 passed, 21 skipped, ~50s
+python3 -m pytest tests/ -q                  # 1874 passed, 21 skipped, ~50s
 python3 -m ruff check backend/ tests/        # lint
-cd chatbot-app/frontend && npx vitest run    # 120 files, 1677 tests
+cd chatbot-app/frontend && npx vitest run    # 124 files, 1711 tests
 cd chatbot-app/frontend && npx tsc --noEmit  # typecheck
 cd infra/environments/recon && terraform fmt -check -recursive ../..
 # Module tests: plan-only under mocked providers, no credentials. Both CIs run them, and they are

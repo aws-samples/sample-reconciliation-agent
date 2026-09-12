@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { clearAuthEnv, restoreAuthEnv, setAuthEnv, snapshotAuthEnv } from "./testEnv";
+import { AUTH_ENV_NAMES, scopedEnv } from "../../helpers/env";
 
 // The anonymous local identity must hold the group names the console's STORED layer uses, not only
 // the environment's: an admin who renames a group on the Settings screen would otherwise lose that
@@ -11,16 +11,16 @@ vi.mock("@/lib/console/settings", () => ({ effectiveEnv: (...args: unknown[]) =>
 
 const { authorizeRequest } = await import("@/lib/api-auth");
 
-const saved = snapshotAuthEnv();
+const authEnv = scopedEnv(AUTH_ENV_NAMES);
 beforeEach(() => {
-  clearAuthEnv();
+  authEnv.clear();
   effectiveEnv.mockReset();
 });
-afterAll(() => restoreAuthEnv(saved));
+afterAll(() => authEnv.restore());
 
 describe("authorizeRequest in anonymous mode", () => {
   it("derives the anonymous groups from the overlaid environment", async () => {
-    setAuthEnv({ ALLOW_ANONYMOUS_API: "true", RECON_ADMIN_GROUP: "env-admins" });
+    authEnv.set({ ALLOW_ANONYMOUS_API: "true", RECON_ADMIN_GROUP: "env-admins" });
     effectiveEnv.mockResolvedValue({ ...process.env, RECON_ADMIN_GROUP: "stored-admins" });
     const result = await authorizeRequest(new Request("http://x/api/me"));
     expect(result.ok).toBe(true);
@@ -32,7 +32,7 @@ describe("authorizeRequest in anonymous mode", () => {
   });
 
   it("still honours ANONYMOUS_GROUPS as the whole list", async () => {
-    setAuthEnv({ ALLOW_ANONYMOUS_API: "true", ANONYMOUS_GROUPS: "deal-desk" });
+    authEnv.set({ ALLOW_ANONYMOUS_API: "true", ANONYMOUS_GROUPS: "deal-desk" });
     effectiveEnv.mockResolvedValue({ ...process.env, RECON_ADMIN_GROUP: "stored-admins" });
     const result = await authorizeRequest(new Request("http://x/api/me"));
     expect(result.ok && result.groups).toEqual(["deal-desk"]);

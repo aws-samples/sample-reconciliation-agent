@@ -37,6 +37,8 @@ vi.mock("@/lib/reauth", () => ({ reauthenticate: vi.fn().mockResolvedValue(true)
 
 import { AppShell } from "@/components/shell/AppShell";
 
+import { fakeResponse } from "../helpers/http";
+
 function viewer(over: Partial<Viewer> = {}): Viewer {
   return {
     subject: "ana.ferreira",
@@ -50,13 +52,9 @@ function viewer(over: Partial<Viewer> = {}): Viewer {
   };
 }
 
-function jsonResponse(body: unknown, status = 200) {
-  return { ok: status < 300, status, statusText: "", json: async () => body };
-}
-
 /** Stub `/api/me`; returns the mock so a test can assert on call counts. */
 function serveMe(body: unknown, status = 200) {
-  const fetchMock = vi.fn().mockResolvedValue(jsonResponse(body, status));
+  const fetchMock = vi.fn().mockResolvedValue(fakeResponse(status, body));
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
 }
@@ -307,9 +305,9 @@ describe("AppShell content gating", () => {
     pathname = "/pipeline/inbox";
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(jsonResponse({ error: "upstream connect error" }, 502))
+      .mockResolvedValueOnce(fakeResponse(502, { error: "upstream connect error" }))
       .mockResolvedValueOnce(
-        jsonResponse(viewer({ apps: { recon: { access: true, admin: false }, pipeline: { access: false, admin: false } } })),
+        fakeResponse(200, viewer({ apps: { recon: { access: true, admin: false }, pipeline: { access: false, admin: false } } })),
       );
     vi.stubGlobal("fetch", fetchMock);
     render(page("secret page"));

@@ -7,14 +7,23 @@
  * the directory-per-skill key, must refuse content the parser could not load, and must not run
  * twice.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
+import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 
-process.env.AWS_REGION = "us-east-1";
-process.env.PIPELINE_ASSETS_BUCKET = "test-assets";
-process.env.SKILL_PROPOSALS_TABLE = "test-proposals";
-process.env.PIPELINE_SKILLS_PREFIX = "skills/";
-process.env.PARSER_PROMPT_KEY = "prompts/parser-system.md";
+import { dynamoDbModule, s3Module } from "../helpers/awsMocks";
+import { scopedEnv } from "../helpers/env";
+import { createFakeTable } from "../helpers/fakeDdb";
+import { createFakeS3 } from "../helpers/fakeS3";
+import { admitted, refused } from "../helpers/gates";
+import { jsonRequest, routeParams } from "../helpers/http";
+
+const env = scopedEnv({
+  AWS_REGION: "us-east-1",
+  PIPELINE_ASSETS_BUCKET: "test-assets",
+  SKILL_PROPOSALS_TABLE: "test-proposals",
+  PIPELINE_SKILLS_PREFIX: "skills/",
+  PARSER_PROMPT_KEY: "prompts/parser-system.md",
+});
+afterAll(() => env.restore());
 
 const ddbSend = vi.fn();
 const s3Send = vi.fn();
@@ -23,19 +32,8 @@ const requireAppAdmin = vi.fn();
 
 vi.mock("@/lib/api-auth", () => ({ requireActor }));
 vi.mock("@/lib/auth/app-admin", () => ({ requireAppAdmin }));
-vi.mock("@aws-sdk/client-dynamodb", () => ({
-  DynamoDBClient: vi.fn().mockImplementation(() => ({ send: ddbSend })),
-  GetItemCommand: vi.fn().mockImplementation((i) => ({ __cmd: "GetItem", ...i })),
-  PutItemCommand: vi.fn().mockImplementation((i) => ({ __cmd: "PutItem", ...i })),
-  ScanCommand: vi.fn().mockImplementation((i) => ({ __cmd: "Scan", ...i })),
-}));
-vi.mock("@aws-sdk/client-s3", () => ({
-  S3Client: vi.fn().mockImplementation(() => ({ send: s3Send })),
-  GetObjectCommand: vi.fn().mockImplementation((i) => ({ __cmd: "GetObject", ...i })),
-  PutObjectCommand: vi.fn().mockImplementation((i) => ({ __cmd: "PutObject", ...i })),
-  ListObjectsV2Command: vi.fn().mockImplementation((i) => ({ __cmd: "List", ...i })),
-  DeleteObjectCommand: vi.fn().mockImplementation((i) => ({ __cmd: "Delete", ...i })),
-}));
+vi.mock("@aws-sdk/client-dynamodb", () => dynamoDbModule(ddbSend));
+vi.mock("@aws-sdk/client-s3", () => s3Module(s3Send));
 
 const skills = await import("@/app/api/pipeline/skills/route");
 const skillByName = await import("@/app/api/pipeline/skills/[name]/route");
@@ -54,49 +52,12 @@ Loan records always carry Covenant Status #; cov-lite is 3.
 Arranger names use the OMS canonical counterparty list.`;
 
 /** In-memory S3 objects and proposals table behind the mocks. */
-let objects: Record<string, string>;
-let table: Record<string, SkillProposal>;
-function installFakes() {
-  objects = {};
-  table = {};
-  s3Send.mockImplementation(async (cmd: { __cmd: string; Key: string; Body?: string; Prefix?: string }) => {
-    if (cmd.__cmd === "GetObject") {
-      if (!(cmd.Key in objects)) throw Object.assign(new Error("nsk"), { name: "NoSuchKey" });
-      return { Body: { transformToString: async () => objects[cmd.Key] } };
-    }
-    if (cmd.__cmd === "PutObject") {
-      objects[cmd.Key] = cmd.Body ?? "";
-      return {};
-    }
-    if (cmd.__cmd === "Delete") {
-      delete objects[cmd.Key];
-      return {};
-    }
-    if (cmd.__cmd === "List") {
-      return {
-        Contents: Object.keys(objects)
-          .filter((k) => k.startsWith(cmd.Prefix ?? ""))
-          .map((Key) => ({ Key })),
-      };
-    }
-    throw new Error(`unexpected ${cmd.__cmd}`);
-  });
-  ddbSend.mockImplementation(async (cmd: { __cmd: string; Key?: never; Item?: never }) => {
-    if (cmd.__cmd === "GetItem") {
-      const key = unmarshall(cmd.Key!).proposal_id as string;
-      return { Item: table[key] ? marshall(table[key], { removeUndefinedValues: true }) : undefined };
-    }
-    if (cmd.__cmd === "PutItem") {
-      const item = unmarshall(cmd.Item!) as SkillProposal;
-      table[item.proposal_id] = item;
-      return {};
-    }
-    if (cmd.__cmd === "Scan") {
-      return { Items: Object.values(table).map((i) => marshall(i, { removeUndefinedValues: true })) };
-    }
-    throw new Error(`unexpected ${cmd.__cmd}`);
-  });
-}
+const bucket = createFakeS3();
+const objects = bucket.objects;
+const proposalsTable = createFakeTable<SkillProposal>({ keyAttr: "proposal_id" });
+const table = proposalsTable.rows;
+s3Send.mockImplementation(bucket.send);
+ddbSend.mockImplementation(proposalsTable.send);
 
 function pending(): SkillProposal {
   return {
@@ -112,25 +73,18 @@ function pending(): SkillProposal {
   };
 }
 
-const params = (v: string, key = "id") => ({ params: Promise.resolve({ [key]: v }) as never });
-function json(method: string, url: string, body?: unknown) {
-  return new Request(url, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-}
 const decide = (id: string, decision: unknown) =>
-  proposalById.POST(json("POST", `http://x/api/pipeline/skills/proposals/${id}`, { decision }), params(id));
+  proposalById.POST(jsonRequest("POST", `http://x/api/pipeline/skills/proposals/${id}`, { decision }), routeParams({ id }));
 
 beforeEach(() => {
   vi.clearAllMocks();
-  installFakes();
+  bucket.reset();
+  proposalsTable.reset();
   objects["skills/deal-parsing/SKILL.md"] = CURRENT;
   objects["skills/README.md"] = "not a skill";
   table.sp_1 = pending();
-  requireActor.mockResolvedValue({ actor: "reviewer" });
-  requireAppAdmin.mockResolvedValue({ actor: "admin-1" });
+  requireActor.mockResolvedValue(admitted("reviewer"));
+  requireAppAdmin.mockResolvedValue(admitted("admin-1"));
 });
 
 describe("POST /api/pipeline/skills/proposals/[id]", () => {
@@ -211,10 +165,7 @@ describe("POST /api/pipeline/skills/proposals/[id]", () => {
   it("400s a bad decision, 404s an unknown id, and honours the admin gate", async () => {
     expect((await decide("sp_1", "maybe")).status).toBe(400);
     expect((await decide("sp_9", "approve")).status).toBe(404);
-    const { NextResponse } = await import("next/server");
-    requireAppAdmin.mockResolvedValue({
-      error: NextResponse.json({ error: "not an admin" }, { status: 403 }),
-    });
+    requireAppAdmin.mockResolvedValue(refused(403, "not an admin"));
     expect((await decide("sp_1", "approve")).status).toBe(403);
   });
 });
@@ -222,16 +173,16 @@ describe("POST /api/pipeline/skills/proposals/[id]", () => {
 describe("/api/pipeline/skills/proposals", () => {
   it("lists newest first and reads one", async () => {
     table.sp_2 = { ...pending(), proposal_id: "sp_2", created_at: "2026-08-14T10:10:00Z" };
-    const list = await (await proposals.GET(json("GET", "http://x/api/pipeline/skills/proposals"))).json();
+    const list = await (await proposals.GET(jsonRequest("GET", "http://x/api/pipeline/skills/proposals"))).json();
     expect(list.map((p: SkillProposal) => p.proposal_id)).toEqual(["sp_2", "sp_1"]);
-    const one = await proposalById.GET(json("GET", "http://x/x"), params("sp_1"));
+    const one = await proposalById.GET(jsonRequest("GET", "http://x/x"), routeParams({ id: "sp_1" }));
     expect((await one.json()).proposal_id).toBe("sp_1");
-    expect((await proposalById.GET(json("GET", "http://x/x"), params("sp_9"))).status).toBe(404);
+    expect((await proposalById.GET(jsonRequest("GET", "http://x/x"), routeParams({ id: "sp_9" }))).status).toBe(404);
   });
 
   it("creates a manual proposal with a snapshot of the current skill", async () => {
     const resp = await proposals.POST(
-      json("POST", "http://x/api/pipeline/skills/proposals", {
+      jsonRequest("POST", "http://x/api/pipeline/skills/proposals", {
         skill_name: "deal-parsing",
         summary: "Bond records are Fixed",
         proposed_content: PROPOSED,
@@ -251,7 +202,7 @@ describe("/api/pipeline/skills/proposals", () => {
 
   it("refuses a manual proposal that could never be approved", async () => {
     const resp = await proposals.POST(
-      json("POST", "http://x/api/pipeline/skills/proposals", {
+      jsonRequest("POST", "http://x/api/pipeline/skills/proposals", {
         skill_name: "deal-parsing",
         summary: "s",
         proposed_content: "---\nname: other\ndescription: d\n---\nbody",
@@ -265,7 +216,7 @@ describe("/api/pipeline/skills/proposals", () => {
 describe("/api/pipeline/skills and /skills/[name]", () => {
   it("lists only SKILL.md objects, naming each by its directory", async () => {
     objects["skills/left-agent-names/SKILL.md"] = "---\nname: wrong-name\ndescription: Canonical arrangers.\n---\n";
-    const body = await (await skills.GET(json("GET", "http://x/api/pipeline/skills"))).json();
+    const body = await (await skills.GET(jsonRequest("GET", "http://x/api/pipeline/skills"))).json();
     expect(body.map((s: { name: string }) => s.name)).toEqual(["deal-parsing", "left-agent-names"]);
     expect(body[0]).toMatchObject({
       description: "Stage new-issue deal emails as OMS records.",
@@ -277,31 +228,31 @@ describe("/api/pipeline/skills and /skills/[name]", () => {
 
   it("creates a new skill once, then refuses to clobber it", async () => {
     const content = "---\nname: bond-rules\ndescription: Bonds are Fixed.\n---\nBody";
-    const create = await skills.PUT(json("PUT", "http://x/api/pipeline/skills", { name: "bond-rules", content }));
+    const create = await skills.PUT(jsonRequest("PUT", "http://x/api/pipeline/skills", { name: "bond-rules", content }));
     expect(create.status).toBe(201);
     expect(objects["skills/bond-rules/SKILL.md"]).toBe(content);
-    const again = await skills.PUT(json("PUT", "http://x/api/pipeline/skills", { name: "bond-rules", content }));
+    const again = await skills.PUT(jsonRequest("PUT", "http://x/api/pipeline/skills", { name: "bond-rules", content }));
     expect(again.status).toBe(409);
-    const bad = await skills.PUT(json("PUT", "http://x/api/pipeline/skills", { name: "Bad Name", content }));
+    const bad = await skills.PUT(jsonRequest("PUT", "http://x/api/pipeline/skills", { name: "Bad Name", content }));
     expect(bad.status).toBe(400);
   });
 
   it("reads, replaces and deletes one skill, validating the name and frontmatter", async () => {
-    const got = await skillByName.GET(json("GET", "http://x/x"), params("deal-parsing", "name"));
+    const got = await skillByName.GET(jsonRequest("GET", "http://x/x"), routeParams({ name: "deal-parsing" }));
     expect(await got.json()).toEqual({ name: "deal-parsing", content: CURRENT });
-    expect((await skillByName.GET(json("GET", "http://x/x"), params("nope", "name"))).status).toBe(404);
-    expect((await skillByName.GET(json("GET", "http://x/x"), params("../etc", "name"))).status).toBe(400);
+    expect((await skillByName.GET(jsonRequest("GET", "http://x/x"), routeParams({ name: "nope" }))).status).toBe(404);
+    expect((await skillByName.GET(jsonRequest("GET", "http://x/x"), routeParams({ name: "../etc" }))).status).toBe(400);
 
     const mismatch = await skillByName.PUT(
-      json("PUT", "http://x/x", { content: PROPOSED }),
-      params("other-skill", "name"),
+      jsonRequest("PUT", "http://x/x", { content: PROPOSED }),
+      routeParams({ name: "other-skill" }),
     );
     expect(mismatch.status).toBe(400);
-    const ok = await skillByName.PUT(json("PUT", "http://x/x", { content: PROPOSED }), params("deal-parsing", "name"));
+    const ok = await skillByName.PUT(jsonRequest("PUT", "http://x/x", { content: PROPOSED }), routeParams({ name: "deal-parsing" }));
     expect(ok.status).toBe(200);
     expect(objects["skills/deal-parsing/SKILL.md"]).toBe(PROPOSED);
 
-    const del = await skillByName.DELETE(json("DELETE", "http://x/x"), params("deal-parsing", "name"));
+    const del = await skillByName.DELETE(jsonRequest("DELETE", "http://x/x"), routeParams({ name: "deal-parsing" }));
     expect(await del.json()).toEqual({ deleted: "deal-parsing" });
     expect(objects["skills/deal-parsing/SKILL.md"]).toBeUndefined();
   });
@@ -309,14 +260,14 @@ describe("/api/pipeline/skills and /skills/[name]", () => {
 
 describe("/api/pipeline/skills/system-prompt", () => {
   it("404s until seeded, then round-trips the prompt", async () => {
-    expect((await prompt.GET(json("GET", "http://x/x"))).status).toBe(404);
-    const put = await prompt.PUT(json("PUT", "http://x/x", { content: "You stage deals." }));
+    expect((await prompt.GET(jsonRequest("GET", "http://x/x"))).status).toBe(404);
+    const put = await prompt.PUT(jsonRequest("PUT", "http://x/x", { content: "You stage deals." }));
     expect(await put.json()).toEqual({ key: "prompts/parser-system.md" });
     expect(objects["prompts/parser-system.md"]).toBe("You stage deals.");
-    expect(await (await prompt.GET(json("GET", "http://x/x"))).json()).toEqual({
+    expect(await (await prompt.GET(jsonRequest("GET", "http://x/x"))).json()).toEqual({
       key: "prompts/parser-system.md",
       content: "You stage deals.",
     });
-    expect((await prompt.PUT(json("PUT", "http://x/x", {}))).status).toBe(400);
+    expect((await prompt.PUT(jsonRequest("PUT", "http://x/x", {}))).status).toBe(400);
   });
 });

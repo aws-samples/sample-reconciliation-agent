@@ -24,12 +24,8 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AppId } from "@/lib/auth/apps";
 
-import {
-  clearAuthEnv,
-  restoreAuthEnv,
-  setAuthEnv,
-  snapshotAuthEnv,
-} from "./testEnv";
+import { AUTH_ENV_NAMES, scopedEnv } from "../../helpers/env";
+import { jsonRequest } from "../../helpers/http";
 
 const authorizeRequest = vi.fn();
 vi.mock("@/lib/api-auth", () => ({ authorizeRequest }));
@@ -65,9 +61,7 @@ const CASES: Case[] = [
   },
 ];
 
-function req(path: string): Request {
-  return new Request(`https://app.example${path}`, { method: "POST" });
-}
+const req = (path: string): Request => jsonRequest("POST", `https://app.example${path}`);
 
 function signedIn(subject: string, groups: string[]): void {
   authorizeRequest.mockResolvedValue({
@@ -90,12 +84,12 @@ async function refusal(
   };
 }
 
-const saved = snapshotAuthEnv();
+const authEnv = scopedEnv(AUTH_ENV_NAMES);
 beforeEach(() => {
   authorizeRequest.mockReset();
-  clearAuthEnv();
+  authEnv.clear();
 });
-afterAll(() => restoreAuthEnv(saved));
+afterAll(() => authEnv.restore());
 
 describe.each(CASES)("isAppAdmin($app)", ({ app, variable, group }) => {
   it("admits a member of the configured group", () => {
@@ -129,7 +123,7 @@ describe.each(CASES)("isAppAdmin($app)", ({ app, variable, group }) => {
   });
 
   it("reads the process environment when none is given", () => {
-    setAuthEnv({ [variable]: group });
+    authEnv.set({ [variable]: group });
     expect(isAppAdmin(app, [group])).toBe(true);
   });
 });
@@ -149,7 +143,7 @@ describe.each(CASES)(
   ({ app, variable, group, path }) => {
     // The chat route's shape: every verified caller is admitted, and the flag says which tools the
     // session may be offered. The 403 is not this function's job — a non-admin can still chat.
-    beforeEach(() => setAuthEnv({ [variable]: group }));
+    beforeEach(() => authEnv.set({ [variable]: group }));
 
     it("admits an admin with isAdmin true", async () => {
       signedIn("sub-reviewer-1", [group]);
@@ -168,7 +162,7 @@ describe.each(CASES)(
     });
 
     it("reports isAdmin false for everyone when the admin group is unset", async () => {
-      clearAuthEnv();
+      authEnv.clear();
       signedIn("sub-reviewer-1", [group]);
       expect(await requireAppActor(app, req(path))).toEqual({
         actor: "sub-reviewer-1",
@@ -193,7 +187,7 @@ describe.each(CASES)(
 describe.each(CASES)(
   "requireAppAdmin($app)",
   ({ app, variable, group, unconfigured, path }) => {
-    beforeEach(() => setAuthEnv({ [variable]: group }));
+    beforeEach(() => authEnv.set({ [variable]: group }));
 
     it("names the verified subject for an admin", async () => {
       signedIn("sub-reviewer-1", [group]);
@@ -214,7 +208,7 @@ describe.each(CASES)(
     });
 
     it("names the trimmed group in the 403, not the padded value", async () => {
-      setAuthEnv({ [variable]: `${group} ` });
+      authEnv.set({ [variable]: `${group} ` });
       signedIn("sub-analyst-2", ["desk-readers"]);
       const { error } = await refusal(await requireAppAdmin(app, req(path)));
       expect(error).toContain(`"${group}" group`);
@@ -222,7 +216,7 @@ describe.each(CASES)(
     });
 
     it("403s everyone when the admin group is blank, naming the variable in the app's own words", async () => {
-      setAuthEnv({ [variable]: "  " });
+      authEnv.set({ [variable]: "  " });
       signedIn("sub-reviewer-1", [group, "  "]);
       expect(await refusal(await requireAppAdmin(app, req(path)))).toEqual({
         status: 403,
@@ -231,7 +225,7 @@ describe.each(CASES)(
     });
 
     it("403s everyone when the admin group is unset, naming the variable", async () => {
-      clearAuthEnv();
+      authEnv.clear();
       signedIn("sub-reviewer-1", [group]);
       expect(await refusal(await requireAppAdmin(app, req(path)))).toEqual({
         status: 403,
@@ -255,7 +249,7 @@ describe.each(CASES)(
 );
 
 it("gates each app on its own group: a pipeline admin is admitted by the pipeline and refused by recon", async () => {
-  setAuthEnv({
+  authEnv.set({
     RECON_ADMIN_GROUP: "recon-admin",
     PIPELINE_ADMIN_GROUP: "deal-desk-admins",
   });

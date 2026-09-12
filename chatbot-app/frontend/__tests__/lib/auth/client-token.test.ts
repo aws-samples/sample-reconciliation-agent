@@ -8,26 +8,15 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const account = { homeAccountId: "acct-1" };
-const acquireTokenSilent = vi.fn();
-const getActiveAccount = vi.fn(() => account as unknown);
+import { fakeMsal } from "../../helpers/msal";
 
-vi.mock("@/lib/msal-config", () => ({
-  HAS_ENTRA_CONFIG: true,
-  msalConfig: { auth: { clientId: "c", authority: "https://login" } },
-  tokenRequest: { scopes: ["openid"] },
-  ENTRA_OBO_SCOPE: "",
-}));
+const msal = fakeMsal();
+const { account, acquireTokenSilent, getActiveAccount } = msal;
+vi.mock("@/lib/msal-config", () => msal.configModule);
+vi.mock("@azure/msal-browser", () => msal.browserModule);
 
-vi.mock("@azure/msal-browser", () => ({
-  PublicClientApplication: class {
-    getActiveAccount = getActiveAccount;
-    getAllAccounts = () => [account];
-    acquireTokenSilent = acquireTokenSilent;
-  },
-}));
-
-import { authHeaders, idToken } from "@/lib/auth/client-token";
+// Loaded after the mocks are registered so the factories above never run before `msal` exists.
+const { authHeaders, idToken } = await import("@/lib/auth/client-token");
 
 describe("client-token", () => {
   beforeEach(() => {
@@ -37,7 +26,10 @@ describe("client-token", () => {
   });
 
   it("reads the ID token (not the access token) from the signed-in account", async () => {
-    acquireTokenSilent.mockResolvedValue({ idToken: "id-token-1", accessToken: "access-token-1" });
+    acquireTokenSilent.mockResolvedValue({
+      idToken: "id-token-1",
+      accessToken: "access-token-1",
+    });
     expect(await idToken()).toBe("id-token-1");
   });
 

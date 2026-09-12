@@ -1,9 +1,10 @@
 /**
- * An in-memory stand-in for the four Parameter Store calls the console layer makes.
+ * An in-memory stand-in for the four Parameter Store calls the console layer and the pipeline's
+ * config route make.
  *
- * The tests mock `@aws-sdk/client-ssm` so that every command constructor returns a plain object
- * tagged with `__cmd` (the same pattern `pipelineConfig.test.ts` uses), and route `send` here. The
- * fake keeps a `Map` of parameter names to values and honours the two behaviours the code under test
+ * Moved from `__tests__/lib/console/fakeSsm.ts`; the module factory it used to carry
+ * (`ssmCommandMocks`) is now `awsMocks.ssmModule`. Route the mocked client's `send` here. The fake
+ * keeps a `Map` of parameter names to values and honours the two behaviours the code under test
  * depends on: `GetParametersByPath` paginates (with a configurable page size, so a test can force a
  * second page without storing eleven parameters) and `GetParameter`/`DeleteParameter` throw an error
  * named `ParameterNotFound` for an absent name, because the code distinguishes that from any other
@@ -35,17 +36,6 @@ export interface FakeSsm {
 /** An error shaped the way the SDK shapes a missing parameter. */
 export function parameterNotFound(): Error {
   return Object.assign(new Error("ParameterNotFound"), { name: "ParameterNotFound" });
-}
-
-/** The mock module factory body shared by every console test: constructors return tagged inputs. */
-export function ssmCommandMocks(fn: <T>(impl: T) => T) {
-  const tag = (cmd: FakeSsmCommand["__cmd"]) => fn((input: object) => ({ __cmd: cmd, ...input }));
-  return {
-    GetParameterCommand: tag("Get"),
-    GetParametersByPathCommand: tag("GetByPath"),
-    PutParameterCommand: tag("Put"),
-    DeleteParameterCommand: tag("Delete"),
-  };
 }
 
 /**

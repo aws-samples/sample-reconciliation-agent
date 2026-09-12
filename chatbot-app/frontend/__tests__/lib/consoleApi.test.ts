@@ -21,19 +21,10 @@ import {
   updateConsoleSettings,
 } from "@/lib/consoleApi";
 
-/** A minimal Response stand-in: the client reads `ok`, `status`, `json()` and `text()`. */
-function response(status: number, body: unknown, opts: { raw?: boolean } = {}): Response {
-  const text = opts.raw ? String(body) : body === undefined ? "" : JSON.stringify(body);
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => JSON.parse(text),
-    text: async () => text,
-  } as unknown as Response;
-}
+import { fakeResponse } from "../helpers/http";
 
 function serve(status: number, body: unknown, opts: { raw?: boolean } = {}) {
-  const fetchMock = vi.fn().mockResolvedValue(response(status, body, opts));
+  const fetchMock = vi.fn().mockResolvedValue(fakeResponse(status, body, opts));
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
 }

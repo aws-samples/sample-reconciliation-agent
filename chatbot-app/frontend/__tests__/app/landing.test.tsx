@@ -10,6 +10,8 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { fakeResponse } from "../helpers/http";
+
 import type { Viewer } from "@/lib/auth/apps";
 import { resetViewerCache } from "@/lib/shell/viewer";
 
@@ -41,10 +43,7 @@ function viewer(apps: Viewer["apps"], over: Partial<Viewer> = {}): Viewer {
 }
 
 function serveMe(body: unknown, status = 200) {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn().mockResolvedValue({ ok: status < 300, status, statusText: "", json: async () => body }),
-  );
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(fakeResponse(status, body)));
 }
 
 const NONE: Viewer["apps"] = { recon: { access: false, admin: false }, pipeline: { access: false, admin: false } };

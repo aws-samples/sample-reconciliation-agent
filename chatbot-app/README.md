@@ -42,7 +42,8 @@ frontend/src/components/pipeline/ the pipeline app's own components
 frontend/src/lib/pipeline/        wire types, the OMS schema mirror, and server/ (env, aws, stores,
                                   samples, the chat agent)
 
-frontend/__tests__/               vitest, mirroring the trees above
+frontend/__tests__/               vitest, mirroring the trees above; helpers/ holds the shared
+                                  test doubles (AWS SDK mocks, in-memory DynamoDB/S3/SSM, env scope)
 ```
 
 ```bash

@@ -13,14 +13,12 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AccessCheckResult } from "@/lib/console/types";
 
-import { clearAuthEnv, restoreAuthEnv, setAuthEnv, snapshotAuthEnv } from "../lib/auth/testEnv";
-import { createFakeSsm, ssmCommandMocks, type FakeSsm, type FakeSsmCommand } from "../lib/console/fakeSsm";
+import { ssmModule } from "../helpers/awsMocks";
+import { AUTH_ENV_NAMES, scopedEnv } from "../helpers/env";
+import { createFakeSsm, type FakeSsm, type FakeSsmCommand } from "../helpers/fakeSsm";
 
 const ssmSend = vi.hoisted(() => vi.fn());
-vi.mock("@aws-sdk/client-ssm", () => ({
-  SSMClient: vi.fn().mockImplementation(() => ({ send: ssmSend })),
-  ...ssmCommandMocks((impl) => vi.fn().mockImplementation(impl as never) as never),
-}));
+vi.mock("@aws-sdk/client-ssm", () => ssmModule(ssmSend));
 
 const { GET } = await import("@/app/api/console/access-check/route");
 const { invalidate } = await import("@/lib/console/settings");
@@ -30,16 +28,16 @@ const PREFIX = "/recon-test/console";
 const ADMIN = { ALLOW_ANONYMOUS_API: "true", CONSOLE_ADMIN_GROUP: "console-admins" };
 
 let fake: FakeSsm;
-const saved = snapshotAuthEnv();
+const authEnv = scopedEnv(AUTH_ENV_NAMES);
 
 beforeEach(() => {
-  clearAuthEnv();
+  authEnv.clear();
   fake = createFakeSsm();
   ssmSend.mockReset();
   ssmSend.mockImplementation((cmd: FakeSsmCommand) => fake.send(cmd));
   invalidate();
 });
-afterAll(() => restoreAuthEnv(saved));
+afterAll(() => authEnv.restore());
 
 function get(query = "", headers: Record<string, string> = {}): Promise<Response> {
   return GET(new Request(`https://app.example/api/console/access-check${query}`, { headers }));
@@ -59,7 +57,7 @@ describe("parseGroupList", () => {
 
 describe("GET /api/console/access-check", () => {
   it("401s without a token", async () => {
-    setAuthEnv({
+    authEnv.set({
       AUTH_PROVIDER: "okta",
       OKTA_ISSUER: "https://integrator-1234567.okta.com/oauth2/default",
       OKTA_CLIENT_ID: "0oaTESTclientid",
@@ -68,14 +66,14 @@ describe("GET /api/console/access-check", () => {
   });
 
   it("403s a non-admin, naming CONSOLE_ADMIN_GROUP", async () => {
-    setAuthEnv({ ...ADMIN, ANONYMOUS_GROUPS: "recon-users" });
+    authEnv.set({ ...ADMIN, ANONYMOUS_GROUPS: "recon-users" });
     const res = await get("?groups=x");
     expect(res.status).toBe(403);
     expect(((await res.json()) as { error: string }).error).toContain("CONSOLE_ADMIN_GROUP");
   });
 
   it("predicts per-app access from the environment, with no-store", async () => {
-    setAuthEnv({
+    authEnv.set({
       ...ADMIN,
       RECON_ACCESS_GROUP: "recon-users",
       RECON_ADMIN_GROUP: "recon-admin",
@@ -95,7 +93,7 @@ describe("GET /api/console/access-check", () => {
   });
 
   it("answers for a user in no groups", async () => {
-    setAuthEnv({ ...ADMIN, RECON_ACCESS_GROUP: "recon-users" });
+    authEnv.set({ ...ADMIN, RECON_ACCESS_GROUP: "recon-users" });
     const body = (await (await get()).json()) as AccessCheckResult;
     expect(body.groups).toEqual([]);
     expect(body.apps.recon).toEqual({ access: false, admin: false });
@@ -104,7 +102,7 @@ describe("GET /api/console/access-check", () => {
   });
 
   it("uses the stored overlay: a stored access group denies what the environment would admit", async () => {
-    setAuthEnv({ ...ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ...ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX });
     fake.seed(PREFIX, { "access/recon/access-group": "recon-users", "apps/pipeline/enabled": "false" });
     const body = (await (await get("?groups=deal-desk")).json()) as AccessCheckResult;
     expect(body.apps).toEqual({
@@ -116,7 +114,7 @@ describe("GET /api/console/access-check", () => {
   });
 
   it("reports console-admin status from the environment only", async () => {
-    setAuthEnv({ ...ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ...ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX });
     // A stored parameter spelled like the variable must not count.
     fake.store.set(`${PREFIX}/access/CONSOLE_ADMIN_GROUP`, "deal-desk");
     expect(((await (await get("?groups=console-admins")).json()) as AccessCheckResult).consoleAdmin).toBe(true);

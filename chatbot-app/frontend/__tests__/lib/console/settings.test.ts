@@ -14,14 +14,12 @@
  */
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { clearAuthEnv, restoreAuthEnv, setAuthEnv, snapshotAuthEnv } from "../auth/testEnv";
-import { createFakeSsm, ssmCommandMocks, type FakeSsm, type FakeSsmCommand } from "./fakeSsm";
+import { ssmModule } from "../../helpers/awsMocks";
+import { AUTH_ENV_NAMES, scopedEnv } from "../../helpers/env";
+import { createFakeSsm, type FakeSsm, type FakeSsmCommand } from "../../helpers/fakeSsm";
 
 const ssmSend = vi.hoisted(() => vi.fn());
-vi.mock("@aws-sdk/client-ssm", () => ({
-  SSMClient: vi.fn().mockImplementation(() => ({ send: ssmSend })),
-  ...ssmCommandMocks((impl) => vi.fn().mockImplementation(impl as never) as never),
-}));
+vi.mock("@aws-sdk/client-ssm", () => ssmModule(ssmSend));
 
 const {
   ConsoleNotConfiguredError,
@@ -46,10 +44,10 @@ const { ConsoleValidationError } = await import("@/lib/console/validation");
 const PREFIX = "/recon-test/console";
 
 let fake: FakeSsm;
-const saved = snapshotAuthEnv();
+const authEnv = scopedEnv(AUTH_ENV_NAMES);
 
 beforeEach(() => {
-  clearAuthEnv();
+  authEnv.clear();
   fake = createFakeSsm();
   ssmSend.mockReset();
   ssmSend.mockImplementation((cmd: FakeSsmCommand) => fake.send(cmd));
@@ -58,7 +56,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
 });
-afterAll(() => restoreAuthEnv(saved));
+afterAll(() => authEnv.restore());
 
 /** The `GetParametersByPath` calls made so far, by path. */
 function pathReads(): string[] {
@@ -102,7 +100,7 @@ describe("isConsoleAdmin", () => {
 
 describe("effectiveEnv when the layer is disabled", () => {
   it("returns process.env itself and never touches SSM", async () => {
-    setAuthEnv({ RECON_ACCESS_GROUP: "env-users" });
+    authEnv.set({ RECON_ACCESS_GROUP: "env-users" });
     expect(await effectiveEnv()).toBe(process.env);
     expect(await loadOverlay()).toEqual({});
     expect(ssmSend).not.toHaveBeenCalled();
@@ -143,10 +141,10 @@ describe("overlayFromStored", () => {
 });
 
 describe("effectiveEnv with a configured layer", () => {
-  beforeEach(() => setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX }));
+  beforeEach(() => authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX }));
 
   it("lets a stored group beat the environment", async () => {
-    setAuthEnv({ RECON_ACCESS_GROUP: "env-users", RECON_ADMIN_GROUP: "env-admin" });
+    authEnv.set({ RECON_ACCESS_GROUP: "env-users", RECON_ADMIN_GROUP: "env-admin" });
     fake.seed(PREFIX, { "access/recon/access-group": "stored-users" });
     const env = await effectiveEnv();
     expect(env.RECON_ACCESS_GROUP).toBe("stored-users");
@@ -157,7 +155,7 @@ describe("effectiveEnv with a configured layer", () => {
   });
 
   it("lets a blank stored value fall back to the environment", async () => {
-    setAuthEnv({ RECON_ACCESS_GROUP: "env-users" });
+    authEnv.set({ RECON_ACCESS_GROUP: "env-users" });
     fake.seed(PREFIX, { "access/recon/access-group": "   ", "access/recon/admin-group": "" });
     const env = await effectiveEnv();
     expect(env.RECON_ACCESS_GROUP).toBe("env-users");
@@ -213,7 +211,7 @@ describe("effectiveEnv with a configured layer", () => {
 });
 
 describe("the overlay cache", () => {
-  beforeEach(() => setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX }));
+  beforeEach(() => authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX }));
 
   it("serves repeated reads from one snapshot within the TTL", async () => {
     fake.seed(PREFIX, { "access/recon/access-group": "v1" });
@@ -261,7 +259,7 @@ describe("the overlay cache", () => {
 });
 
 describe("effectiveEnv when SSM fails", () => {
-  beforeEach(() => setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX, RECON_ACCESS_GROUP: "env-users" }));
+  beforeEach(() => authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX, RECON_ACCESS_GROUP: "env-users" }));
 
   it("falls back to the environment and warns once per TTL window", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -322,7 +320,7 @@ describe("effectiveEnv when SSM fails", () => {
 
 describe("getConsoleSettings", () => {
   it("reports everything from env or default when the layer is disabled", async () => {
-    setAuthEnv({
+    authEnv.set({
       RECON_ACCESS_GROUP: " recon-users ",
       PIPELINE_ENABLED: "false",
       REQUIRE_ACCESS_GROUPS: "true",
@@ -351,7 +349,7 @@ describe("getConsoleSettings", () => {
   });
 
   it("reports each field's source: stored beats env beats default", async () => {
-    setAuthEnv({
+    authEnv.set({
       CONSOLE_SETTINGS_PREFIX: PREFIX,
       RECON_ACCESS_GROUP: "env-users",
       RECON_ADMIN_GROUP: "env-admin",
@@ -382,7 +380,7 @@ describe("getConsoleSettings", () => {
   });
 
   it("normalises a stored enablement flag to true/false and defaults to enabled", async () => {
-    setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX });
     fake.seed(PREFIX, { "apps/pipeline/enabled": "yes" });
     // Only the literal "false" disables (the registry's rule), so "yes" reads as enabled, from stored.
     expect((await getConsoleSettings()).apps.pipeline!.enabled).toEqual({
@@ -400,14 +398,14 @@ describe("getConsoleSettings", () => {
   });
 
   it("survives an unparseable meta/updated rather than failing the screen", async () => {
-    setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX });
     fake.seed(PREFIX, { "meta/updated": "not json" });
     const s = await getConsoleSettings();
     expect(s.updatedAt).toBeUndefined();
   });
 
   it("does NOT fail open: an admin must see the read error", async () => {
-    setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX });
     ssmSend.mockRejectedValue(new Error("AccessDeniedException"));
     await expect(getConsoleSettings()).rejects.toThrow("AccessDeniedException");
   });
@@ -422,7 +420,7 @@ describe("updateConsoleSettings", () => {
   });
 
   it("writes nothing when any field is invalid", async () => {
-    setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX });
     await expect(
       updateConsoleSettings(
         { access: { recon: { accessGroup: "ok-group", adminGroup: "bad;group" } } },
@@ -435,7 +433,7 @@ describe("updateConsoleSettings", () => {
   it("puts present fields, deletes cleared ones, records who and when, and refreshes the cache", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-11T12:34:56.000Z"));
-    setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX, RECON_ADMIN_GROUP: "env-admin" });
+    authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX, RECON_ADMIN_GROUP: "env-admin" });
     fake.seed(PREFIX, { "access/recon/admin-group": "old-admin", "defaults/model-id": "old.model" });
     // Prime the cache so the test proves the write invalidates it.
     expect((await effectiveEnv()).RECON_ADMIN_GROUP).toBe("old-admin");
@@ -486,14 +484,14 @@ describe("updateConsoleSettings", () => {
   });
 
   it("treats deleting an absent parameter as success", async () => {
-    setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX });
     // Nothing stored; clearing must still succeed (the setting is already "from env").
     const result = await updateConsoleSettings({ access: { recon: { accessGroup: "" } } }, "actor");
     expect(result.access.recon.accessGroup.source).toBe("default");
   });
 
   it("propagates any other delete failure", async () => {
-    setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX });
     ssmSend.mockImplementation(async (cmd: FakeSsmCommand) => {
       if (cmd.__cmd === "Delete") throw Object.assign(new Error("denied"), { name: "AccessDeniedException" });
       return fake.send(cmd);
@@ -507,11 +505,11 @@ describe("organizationLabel and consoleDefaultModelId", () => {
     expect(await organizationLabel()).toBe("Agentic Operations Console");
     expect(await consoleDefaultModelId()).toBeNull();
 
-    setAuthEnv({ CONSOLE_ORGANIZATION_LABEL: " Env Label ", CONSOLE_DEFAULT_MODEL_ID: "env.model" });
+    authEnv.set({ CONSOLE_ORGANIZATION_LABEL: " Env Label ", CONSOLE_DEFAULT_MODEL_ID: "env.model" });
     expect(await organizationLabel()).toBe("Env Label");
     expect(await consoleDefaultModelId()).toBe("env.model");
 
-    setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX });
     fake.seed(PREFIX, { "defaults/organization-label": "Northwind Capital", "defaults/model-id": "us.example.model-v2:0" });
     invalidate();
     expect(await organizationLabel()).toBe("Northwind Capital");
@@ -519,7 +517,7 @@ describe("organizationLabel and consoleDefaultModelId", () => {
   });
 
   it("come from the same cached snapshot as the overlay", async () => {
-    setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX });
     fake.seed(PREFIX, { "defaults/organization-label": "Northwind Capital" });
     await effectiveEnv();
     const calls = ssmSend.mock.calls.length;
@@ -546,14 +544,14 @@ describe("preferences", () => {
   });
 
   it("reads {} for a subject with no row, and for a row that is not JSON", async () => {
-    setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX });
     expect(await getPreferences("00uALICE")).toEqual({});
     fake.store.set(preferencesParameterName("00uALICE", PREFIX), "{not json");
     expect(await getPreferences("00uALICE")).toEqual({});
   });
 
   it("drops fields it does not understand on read rather than failing", async () => {
-    setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX });
     fake.store.set(
       preferencesParameterName("00uALICE", PREFIX),
       JSON.stringify({ defaultApp: "nope", railCollapsed: "yes", theme: "dark", future: 1 }),
@@ -562,7 +560,7 @@ describe("preferences", () => {
   });
 
   it("propagates a read failure other than not-found", async () => {
-    setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX });
     ssmSend.mockRejectedValue(Object.assign(new Error("denied"), { name: "AccessDeniedException" }));
     await expect(getPreferences("00uALICE")).rejects.toThrow("denied");
   });
@@ -573,7 +571,7 @@ describe("preferences", () => {
   });
 
   it("validates strictly on write", async () => {
-    setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX });
     await expect(putPreferences("00uALICE", { defaultApp: "nope" })).rejects.toBeInstanceOf(ConsoleValidationError);
     await expect(putPreferences("00uALICE", { theme: "sepia" })).rejects.toBeInstanceOf(ConsoleValidationError);
     await expect(putPreferences("00uALICE", { future: true })).rejects.toBeInstanceOf(ConsoleValidationError);
@@ -581,7 +579,7 @@ describe("preferences", () => {
   });
 
   it("stores JSON at the hashed name and keeps subjects apart", async () => {
-    setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX });
     const alice = { defaultApp: "pipeline" as const, railCollapsed: true, theme: "dark" as const };
     expect(await putPreferences("00uALICE", alice)).toEqual(alice);
     expect(JSON.parse(fake.store.get(preferencesParameterName("00uALICE", PREFIX))!)).toEqual(alice);
@@ -597,7 +595,7 @@ describe("preferences", () => {
   });
 
   it("replaces the whole document on write", async () => {
-    setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX });
     await putPreferences("00uALICE", { theme: "dark", railCollapsed: true });
     await putPreferences("00uALICE", { theme: "light" });
     expect(await getPreferences("00uALICE")).toEqual({ theme: "light" });
@@ -614,7 +612,7 @@ describe("deployment truth for app enablement", () => {
   });
 
   it("reports the environment as the source when it says not deployed, even with a stored value", async () => {
-    setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX, PIPELINE_ENABLED: "false" });
+    authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX, PIPELINE_ENABLED: "false" });
     fake.seed(PREFIX, { "apps/pipeline/enabled": "true" });
     expect((await getConsoleSettings()).apps.pipeline!.enabled).toEqual({
       value: "false",
@@ -624,7 +622,7 @@ describe("deployment truth for app enablement", () => {
   });
 
   it("refuses to enable an app the deployment does not have, writing nothing", async () => {
-    setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX, PIPELINE_ENABLED: "false" });
+    authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX, PIPELINE_ENABLED: "false" });
     await expect(
       updateConsoleSettings({ apps: { pipeline: { enabled: true } } }, "actor"),
     ).rejects.toThrow(/not deployed on this console/);
@@ -637,7 +635,7 @@ describe("effectiveEnv keeps the last snapshot when a later read fails", () => {
     vi.useFakeTimers();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
-      setAuthEnv({ CONSOLE_SETTINGS_PREFIX: PREFIX, RECON_ACCESS_GROUP: "env-users" });
+      authEnv.set({ CONSOLE_SETTINGS_PREFIX: PREFIX, RECON_ACCESS_GROUP: "env-users" });
       fake.seed(PREFIX, { "access/recon/access-group": "stored-users" });
       expect((await effectiveEnv()).RECON_ACCESS_GROUP).toBe("stored-users");
       // The snapshot expires and Parameter Store is down: the restriction that lives only in the

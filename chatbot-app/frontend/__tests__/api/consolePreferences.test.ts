@@ -12,14 +12,13 @@
  */
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { clearAuthEnv, restoreAuthEnv, setAuthEnv, snapshotAuthEnv } from "../lib/auth/testEnv";
-import { createFakeSsm, ssmCommandMocks, type FakeSsm, type FakeSsmCommand } from "../lib/console/fakeSsm";
+import { ssmModule } from "../helpers/awsMocks";
+import { AUTH_ENV_NAMES, scopedEnv } from "../helpers/env";
+import { createFakeSsm, type FakeSsm, type FakeSsmCommand } from "../helpers/fakeSsm";
+import { jsonRequest } from "../helpers/http";
 
 const ssmSend = vi.hoisted(() => vi.fn());
-vi.mock("@aws-sdk/client-ssm", () => ({
-  SSMClient: vi.fn().mockImplementation(() => ({ send: ssmSend })),
-  ...ssmCommandMocks((impl) => vi.fn().mockImplementation(impl as never) as never),
-}));
+vi.mock("@aws-sdk/client-ssm", () => ssmModule(ssmSend));
 
 const { GET, PUT } = await import("@/app/api/console/preferences/route");
 const { invalidate, preferencesParameterName } = await import("@/lib/console/settings");
@@ -29,29 +28,23 @@ const PREFIX = "/recon-test/console";
 const USER = { ALLOW_ANONYMOUS_API: "true", ANONYMOUS_GROUPS: "deal-desk" };
 
 let fake: FakeSsm;
-const saved = snapshotAuthEnv();
+const authEnv = scopedEnv(AUTH_ENV_NAMES);
 
 beforeEach(() => {
-  clearAuthEnv();
+  authEnv.clear();
   fake = createFakeSsm();
   ssmSend.mockReset();
   ssmSend.mockImplementation((cmd: FakeSsmCommand) => fake.send(cmd));
   invalidate();
 });
-afterAll(() => restoreAuthEnv(saved));
+afterAll(() => authEnv.restore());
 
 function get(headers: Record<string, string> = {}): Promise<Response> {
   return GET(new Request("https://app.example/api/console/preferences", { headers }));
 }
 
 function put(body: unknown, raw = false): Promise<Response> {
-  return PUT(
-    new Request("https://app.example/api/console/preferences", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: raw ? (body as string) : JSON.stringify(body),
-    }),
-  );
+  return PUT(jsonRequest("PUT", "https://app.example/api/console/preferences", body, { raw }));
 }
 
 
@@ -66,7 +59,7 @@ function ssmWrites(): unknown[] {
 
 describe("GET /api/console/preferences", () => {
   it("401s without a token", async () => {
-    setAuthEnv({
+    authEnv.set({
       AUTH_PROVIDER: "okta",
       OKTA_ISSUER: "https://integrator-1234567.okta.com/oauth2/default",
       OKTA_CLIENT_ID: "0oaTESTclientid",
@@ -75,7 +68,7 @@ describe("GET /api/console/preferences", () => {
   });
 
   it("answers {} without touching SSM when the layer is not configured", async () => {
-    setAuthEnv(USER);
+    authEnv.set(USER);
     const res = await get();
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
@@ -84,12 +77,12 @@ describe("GET /api/console/preferences", () => {
   });
 
   it("answers {} for a user with no row", async () => {
-    setAuthEnv({ ...USER, CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ...USER, CONSOLE_SETTINGS_PREFIX: PREFIX });
     expect(await (await get()).json()).toEqual({});
   });
 
   it("returns the caller's own row and nobody else's", async () => {
-    setAuthEnv({ ...USER, CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ...USER, CONSOLE_SETTINGS_PREFIX: PREFIX });
     // The anonymous subject is literally "anonymous"; another user's row sits beside it.
     fake.store.set(preferencesParameterName("anonymous", PREFIX), JSON.stringify({ theme: "dark" }));
     fake.store.set(preferencesParameterName("00uSOMEONE", PREFIX), JSON.stringify({ theme: "light", railCollapsed: true }));
@@ -97,7 +90,7 @@ describe("GET /api/console/preferences", () => {
   });
 
   it("500s when Parameter Store fails for a reason other than not-found", async () => {
-    setAuthEnv({ ...USER, CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ...USER, CONSOLE_SETTINGS_PREFIX: PREFIX });
     ssmSend.mockRejectedValue(Object.assign(new Error("denied"), { name: "AccessDeniedException" }));
     expect((await get()).status).toBe(500);
   });
@@ -105,7 +98,7 @@ describe("GET /api/console/preferences", () => {
 
 describe("PUT /api/console/preferences", () => {
   it("401s without a token", async () => {
-    setAuthEnv({
+    authEnv.set({
       AUTH_PROVIDER: "okta",
       OKTA_ISSUER: "https://integrator-1234567.okta.com/oauth2/default",
       OKTA_CLIENT_ID: "0oaTESTclientid",
@@ -114,7 +107,7 @@ describe("PUT /api/console/preferences", () => {
   });
 
   it("409s when the layer is not configured, so the UI keeps using the browser", async () => {
-    setAuthEnv(USER);
+    authEnv.set(USER);
     const res = await put({ theme: "dark" });
     expect(res.status).toBe(409);
     expect(((await res.json()) as { error: string }).error).toContain("browser");
@@ -122,7 +115,7 @@ describe("PUT /api/console/preferences", () => {
   });
 
   it("400s a body that is not JSON, and an invalid body, writing nothing", async () => {
-    setAuthEnv({ ...USER, CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ...USER, CONSOLE_SETTINGS_PREFIX: PREFIX });
     expect((await put("{oops", true)).status).toBe(400);
     const res = await put({ defaultApp: "billing" });
     expect(res.status).toBe(400);
@@ -133,7 +126,7 @@ describe("PUT /api/console/preferences", () => {
   });
 
   it("stores the caller's row under the hashed name and echoes it back", async () => {
-    setAuthEnv({ ...USER, CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ...USER, CONSOLE_SETTINGS_PREFIX: PREFIX });
     const prefs = { defaultApp: "pipeline", railCollapsed: true, theme: "dark" };
     const res = await put(prefs);
     expect(res.status).toBe(200);
@@ -147,7 +140,7 @@ describe("PUT /api/console/preferences", () => {
   });
 
   it("cannot be steered to another user's row by the body", async () => {
-    setAuthEnv({ ...USER, CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ...USER, CONSOLE_SETTINGS_PREFIX: PREFIX });
     // There is no field for it, so the strict validator refuses the attempt outright.
     expect((await put({ subject: "00uSOMEONE", theme: "dark" })).status).toBe(400);
     expect(fake.store.size).toBe(0);

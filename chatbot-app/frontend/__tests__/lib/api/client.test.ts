@@ -7,45 +7,28 @@ import { describe, expect, it } from "vitest";
 
 import { jsonInit, listOf, parseJsonResponse } from "@/lib/api/client";
 
-/** A minimal Response stand-in: the reader only ever touches `ok`, `status`, `json()` and `text()`. */
-function response(
-  status: number,
-  body: unknown,
-  opts: { raw?: boolean } = {},
-): Response {
-  const text = opts.raw
-    ? String(body)
-    : body === undefined
-      ? ""
-      : JSON.stringify(body);
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => JSON.parse(text),
-    text: async () => text,
-  } as unknown as Response;
-}
+import { fakeResponse } from "../../helpers/http";
 
 describe("parseJsonResponse()", () => {
   it("returns the parsed body on success", async () => {
     expect(
-      await parseJsonResponse(response(200, { a: 1 }), "recon API"),
+      await parseJsonResponse(fakeResponse(200, { a: 1 }), "recon API"),
     ).toEqual({ a: 1 });
   });
 
   it("resolves to undefined on an empty 2xx body rather than failing to parse", async () => {
     expect(
-      await parseJsonResponse(response(204, "", { raw: true }), "pipeline API"),
+      await parseJsonResponse(fakeResponse(204, "", { raw: true }), "pipeline API"),
     ).toBeUndefined();
     expect(
-      await parseJsonResponse(response(204, undefined), "console API"),
+      await parseJsonResponse(fakeResponse(204, undefined), "console API"),
     ).toBeUndefined();
   });
 
   it("throws the server's own error message when the body carries one", async () => {
     await expect(
       parseJsonResponse(
-        response(403, {
+        fakeResponse(403, {
           error:
             'this endpoint requires membership of the "deal-desk-admins" group',
         }),
@@ -54,7 +37,7 @@ describe("parseJsonResponse()", () => {
     ).rejects.toThrow('requires membership of the "deal-desk-admins" group');
     await expect(
       parseJsonResponse(
-        response(403, {
+        fakeResponse(403, {
           error: "console settings require the console-admins group",
         }),
         "console API",
@@ -68,7 +51,7 @@ describe("parseJsonResponse()", () => {
       // A proxy error page or an empty 502 must still produce a readable message, not "Unexpected token".
       await expect(
         parseJsonResponse(
-          response(502, "<html>bad gateway</html>", { raw: true }),
+          fakeResponse(502, "<html>bad gateway</html>", { raw: true }),
           label,
         ),
       ).rejects.toThrow(`${label} error 502`);
@@ -77,17 +60,17 @@ describe("parseJsonResponse()", () => {
 
   it("falls back to the status when the JSON error body has no `error` string", async () => {
     await expect(
-      parseJsonResponse(response(500, { message: "nope" }), "pipeline API"),
+      parseJsonResponse(fakeResponse(500, { message: "nope" }), "pipeline API"),
     ).rejects.toThrow("pipeline API error 500");
     await expect(
-      parseJsonResponse(response(500, { detail: "x" }), "console API"),
+      parseJsonResponse(fakeResponse(500, { detail: "x" }), "console API"),
     ).rejects.toThrow("console API error 500");
     // An `error` that is present but not a string must not become "[object Object]" or "42".
     await expect(
-      parseJsonResponse(response(500, { error: { code: 42 } }), "recon API"),
+      parseJsonResponse(fakeResponse(500, { error: { code: 42 } }), "recon API"),
     ).rejects.toThrow("recon API error 500");
     await expect(
-      parseJsonResponse(response(500, { error: "" }), "recon API"),
+      parseJsonResponse(fakeResponse(500, { error: "" }), "recon API"),
     ).rejects.toThrow("recon API error 500");
   });
 });

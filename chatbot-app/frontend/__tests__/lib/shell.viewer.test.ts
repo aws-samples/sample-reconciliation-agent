@@ -29,6 +29,8 @@ import {
   type ConsoleViewer,
 } from "@/lib/shell/viewer";
 
+import { fakeResponse } from "../helpers/http";
+
 /** A viewer as `/api/me` returns it, console fields included. */
 function viewer(over: Partial<ConsoleViewer> = {}): ConsoleViewer {
   return {
@@ -42,16 +44,6 @@ function viewer(over: Partial<ConsoleViewer> = {}): ConsoleViewer {
     console: { ...DEFAULT_CONSOLE_FIELDS },
     preferences: {},
     ...over,
-  };
-}
-
-/** A fetch stub in the shape the code reads (`ok`, `status`, `json`). */
-function jsonResponse(body: unknown, status = 200) {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    statusText: status === 503 ? "Service Unavailable" : "",
-    json: async () => body,
   };
 }
 
@@ -151,7 +143,7 @@ describe("normalizeViewer", () => {
 
 describe("updateViewerPreferences", () => {
   it("publishes a new viewer with the preferences replaced, to every subscriber", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(viewer())));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(fakeResponse(200, viewer())));
     const a = renderHook(() => useViewer());
     const b = renderHook(() => useViewer());
     await waitFor(() => expect(a.result.current.viewer).toEqual(viewer()));
@@ -178,7 +170,7 @@ describe("updateViewerPreferences", () => {
 
 describe("fetchViewer", () => {
   it("GETs /api/me with the console-level ID-token header", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(viewer()));
+    const fetchMock = vi.fn().mockResolvedValue(fakeResponse(200, viewer()));
     vi.stubGlobal("fetch", fetchMock);
 
     expect(await fetchViewer()).toEqual(viewer());
@@ -191,7 +183,7 @@ describe("fetchViewer", () => {
   it("throws with the status and the server's reason on a failure", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(jsonResponse({ error: "AUTH_PROVIDER is unset" }, 503)),
+      vi.fn().mockResolvedValue(fakeResponse(503, { error: "AUTH_PROVIDER is unset" }, { statusText: "Service Unavailable" })),
     );
     await expect(fetchViewer()).rejects.toThrow("GET /api/me failed (503): AUTH_PROVIDER is unset");
     // A 503 is a server problem; signing in again would not fix it, so no redirect is started.
@@ -216,7 +208,7 @@ describe("fetchViewer", () => {
   it("starts the automatic re-authentication on a 401 and still reports the failure", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(jsonResponse({ error: "missing or malformed Authorization header" }, 401)),
+      vi.fn().mockResolvedValue(fakeResponse(401, { error: "missing or malformed Authorization header" })),
     );
     // `/api/me` is the only request the landing page makes, so without this an expired session on `/`
     // would sit on the error card forever while every app page re-authenticated itself.
@@ -227,7 +219,7 @@ describe("fetchViewer", () => {
   it("does not let a refused or failed re-authentication mask the 401", async () => {
     reauthenticate.mockRejectedValue(new Error("provider unreachable"));
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ error: "expired" }, 401)));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(fakeResponse(401, { error: "expired" })));
 
     await expect(fetchViewer()).rejects.toThrow("GET /api/me failed (401): expired");
     await waitFor(() => expect(consoleError).toHaveBeenCalled());
@@ -237,7 +229,7 @@ describe("fetchViewer", () => {
 
 describe("useViewer", () => {
   it("starts loading and resolves to the viewer", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(viewer())));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(fakeResponse(200, viewer())));
     const { result } = renderHook(() => useViewer());
     expect(result.current).toEqual({ viewer: null, loading: true, error: null });
 
@@ -247,7 +239,7 @@ describe("useViewer", () => {
   });
 
   it("fetches once however many components mount it", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(viewer()));
+    const fetchMock = vi.fn().mockResolvedValue(fakeResponse(200, viewer()));
     vi.stubGlobal("fetch", fetchMock);
 
     const a = renderHook(() => useViewer());
@@ -259,7 +251,7 @@ describe("useViewer", () => {
   });
 
   it("hands a later mount the settled viewer on its first render", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(viewer()));
+    const fetchMock = vi.fn().mockResolvedValue(fakeResponse(200, viewer()));
     vi.stubGlobal("fetch", fetchMock);
     const first = renderHook(() => useViewer());
     await waitFor(() => expect(first.result.current.loading).toBe(false));
@@ -275,7 +267,7 @@ describe("useViewer", () => {
   it("reports a failure as an error string", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(jsonResponse({ error: "identity provider unreachable" }, 503)),
+      vi.fn().mockResolvedValue(fakeResponse(503, { error: "identity provider unreachable" }, { statusText: "Service Unavailable" })),
     );
     const { result } = renderHook(() => useViewer());
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -287,8 +279,8 @@ describe("useViewer", () => {
   it("lets a later mount retry after a failure, and the earlier mount sees the recovery too", async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(jsonResponse({ error: "identity provider unreachable" }, 503))
-      .mockResolvedValueOnce(jsonResponse(viewer()));
+      .mockResolvedValueOnce(fakeResponse(503, { error: "identity provider unreachable" }, { statusText: "Service Unavailable" }))
+      .mockResolvedValueOnce(fakeResponse(200, viewer()));
     vi.stubGlobal("fetch", fetchMock);
 
     // The frame: mounted once for the whole session.
@@ -307,8 +299,8 @@ describe("useViewer", () => {
   it("reloadViewer re-asks /api/me and moves every subscriber through loading to the new answer", async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(jsonResponse(viewer()))
-      .mockResolvedValueOnce(jsonResponse(viewer({ subject: "sub-2" })));
+      .mockResolvedValueOnce(fakeResponse(200, viewer()))
+      .mockResolvedValueOnce(fakeResponse(200, viewer({ subject: "sub-2" })));
     vi.stubGlobal("fetch", fetchMock);
 
     const a = renderHook(() => useViewer());
@@ -332,7 +324,7 @@ describe("useViewer", () => {
   });
 
   it("shares one request between a reload and a load that overlap", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(viewer()));
+    const fetchMock = vi.fn().mockResolvedValue(fakeResponse(200, viewer()));
     vi.stubGlobal("fetch", fetchMock);
 
     const first = reloadViewer();
@@ -358,7 +350,7 @@ describe("useViewer", () => {
     // The cache is forgotten while the request is still out; the late answer must not repopulate it.
     act(() => resetViewerCache());
     await act(async () => {
-      resolve(jsonResponse(viewer()));
+      resolve(fakeResponse(200, viewer()));
     });
     expect(result.current).toEqual({ viewer: null, loading: true, error: null });
   });

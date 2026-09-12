@@ -10,20 +10,22 @@
  */
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 
-process.env.AWS_REGION = "us-east-1";
+import { s3Module } from "../helpers/awsMocks";
+import { scopedEnv } from "../helpers/env";
+import { createFakeS3 } from "../helpers/fakeS3";
+import { admitted, refused } from "../helpers/gates";
+
+const env = scopedEnv(["SAMPLE_EMAILS_DIR", "PIPELINE_SAMPLES_PREFIX", "PIPELINE_ASSETS_BUCKET"], {
+  AWS_REGION: "us-east-1",
+});
+afterAll(() => env.restore());
 
 const s3Send = vi.fn();
 const requireActor = vi.fn();
 vi.mock("@/lib/api-auth", () => ({ requireActor }));
-vi.mock("@aws-sdk/client-s3", () => ({
-  S3Client: vi.fn().mockImplementation(() => ({ send: s3Send })),
-  GetObjectCommand: vi.fn().mockImplementation((i) => ({ __cmd: "GetObject", ...i })),
-  PutObjectCommand: vi.fn().mockImplementation((i) => ({ __cmd: "PutObject", ...i })),
-  ListObjectsV2Command: vi.fn().mockImplementation((i) => ({ __cmd: "List", ...i })),
-  DeleteObjectCommand: vi.fn().mockImplementation((i) => ({ __cmd: "Delete", ...i })),
-}));
+vi.mock("@aws-sdk/client-s3", () => s3Module(s3Send));
 
 const { GET } = await import("@/app/api/pipeline/samples/route");
 const { getSample, listSamples, resolveSamplesSource, samplesDir } = await import(
@@ -44,28 +46,7 @@ const NO_SUCH_DIR = "./__no_such_samples_dir__";
  * many ListObjectsV2 pages so pagination is exercised with a corpus far smaller than 1000 keys.
  */
 function installBucket(objects: Record<string, string>, pages = 1) {
-  s3Send.mockImplementation(
-    async (cmd: { __cmd: string; Key?: string; Prefix?: string; ContinuationToken?: string }) => {
-      if (cmd.__cmd === "GetObject") {
-        const key = cmd.Key ?? "";
-        if (!(key in objects)) throw Object.assign(new Error("nsk"), { name: "NoSuchKey" });
-        return { Body: { transformToString: async () => objects[key] } };
-      }
-      if (cmd.__cmd === "List") {
-        const keys = Object.keys(objects).filter((k) => k.startsWith(cmd.Prefix ?? ""));
-        const size = Math.ceil(keys.length / pages);
-        const start = Number(cmd.ContinuationToken ?? "0");
-        const slice = keys.slice(start, start + size);
-        const next = start + size;
-        return {
-          Contents: slice.map((Key) => ({ Key })),
-          IsTruncated: next < keys.length,
-          NextContinuationToken: next < keys.length ? String(next) : undefined,
-        };
-      }
-      throw new Error(`unexpected S3 command ${cmd.__cmd}`);
-    },
-  );
+  s3Send.mockImplementation(createFakeS3(objects, { pages }).send);
 }
 
 function sample(id: string, extra: Record<string, unknown> = {}): string {
@@ -83,10 +64,12 @@ function sample(id: string, extra: Record<string, unknown> = {}): string {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  delete process.env.SAMPLE_EMAILS_DIR;
-  delete process.env.PIPELINE_SAMPLES_PREFIX;
-  process.env.PIPELINE_ASSETS_BUCKET = "test-pipeline-assets";
-  requireActor.mockResolvedValue({ actor: "reviewer" });
+  env.set({
+    SAMPLE_EMAILS_DIR: undefined,
+    PIPELINE_SAMPLES_PREFIX: undefined,
+    PIPELINE_ASSETS_BUCKET: "test-pipeline-assets",
+  });
+  requireActor.mockResolvedValue(admitted("reviewer"));
 });
 
 describe("samples reader — repository directory", () => {
@@ -135,7 +118,7 @@ describe("samples reader — repository directory", () => {
 
 describe("samples reader — S3 when the directory is absent", () => {
   beforeEach(() => {
-    process.env.SAMPLE_EMAILS_DIR = NO_SUCH_DIR;
+    env.set({ SAMPLE_EMAILS_DIR: NO_SUCH_DIR });
   });
 
   it("falls back to the bucket under the default prefix", async () => {
@@ -143,7 +126,7 @@ describe("samples reader — S3 when the directory is absent", () => {
   });
 
   it("honours PIPELINE_SAMPLES_PREFIX", async () => {
-    process.env.PIPELINE_SAMPLES_PREFIX = "pipeline/samples/";
+    env.set({ PIPELINE_SAMPLES_PREFIX: "pipeline/samples/" });
     expect(await resolveSamplesSource()).toEqual({ kind: "s3", prefix: "pipeline/samples/" });
   });
 
@@ -229,8 +212,8 @@ describe("samples reader — S3 when the directory is absent", () => {
   });
 
   it("names PIPELINE_ASSETS_BUCKET when it is unset, even with recon's ASSETS_BUCKET present", async () => {
-    delete process.env.PIPELINE_ASSETS_BUCKET;
-    process.env.ASSETS_BUCKET = "recon-dev-assets";
+    env.set({ PIPELINE_ASSETS_BUCKET: undefined });
+    env.set({ ASSETS_BUCKET: "recon-dev-assets" });
     await expect(listSamples()).rejects.toThrow(/^PIPELINE_ASSETS_BUCKET is not set/);
   });
 
@@ -251,7 +234,7 @@ describe("GET /api/pipeline/samples", () => {
   });
 
   it("returns the corpus list from the bucket when the directory is absent", async () => {
-    process.env.SAMPLE_EMAILS_DIR = NO_SUCH_DIR;
+    env.set({ SAMPLE_EMAILS_DIR: NO_SUCH_DIR });
     installBucket({ "samples/01-a.json": sample("01-a") });
     const resp = await GET(new Request("http://x/api/pipeline/samples"));
     expect(resp.status).toBe(200);
@@ -259,7 +242,7 @@ describe("GET /api/pipeline/samples", () => {
   });
 
   it("reports a failed read as a 500 naming the cause, not as an empty list", async () => {
-    process.env.SAMPLE_EMAILS_DIR = NO_SUCH_DIR;
+    env.set({ SAMPLE_EMAILS_DIR: NO_SUCH_DIR });
     s3Send.mockRejectedValue(Object.assign(new Error("denied"), { name: "AccessDenied" }));
     const resp = await GET(new Request("http://x/api/pipeline/samples"));
     expect(resp.status).toBe(500);
@@ -267,10 +250,7 @@ describe("GET /api/pipeline/samples", () => {
   });
 
   it("honours an authorization refusal", async () => {
-    const { NextResponse } = await import("next/server");
-    requireActor.mockResolvedValue({
-      error: NextResponse.json({ error: "no token" }, { status: 401 }),
-    });
+    requireActor.mockResolvedValue(refused(401, "no token"));
     const resp = await GET(new Request("http://x/api/pipeline/samples"));
     expect(resp.status).toBe(401);
   });

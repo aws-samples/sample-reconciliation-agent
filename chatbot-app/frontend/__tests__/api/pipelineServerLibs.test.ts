@@ -3,15 +3,17 @@
  * The small server libraries the pipeline routes share: id generation, the environment reader
  * and the two Lambda invocation shapes.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 
-process.env.AWS_REGION = "us-east-1";
+import { lambdaModule } from "../helpers/awsMocks";
+import { scopedEnv } from "../helpers/env";
+
+// The env reader is the subject below, so its variables are set and cleared inside the cases.
+const envScope = scopedEnv({ AWS_REGION: "us-east-1" });
+afterAll(() => envScope.restore());
 
 const lambdaSend = vi.fn();
-vi.mock("@aws-sdk/client-lambda", () => ({
-  LambdaClient: vi.fn().mockImplementation(() => ({ send: lambdaSend })),
-  InvokeCommand: vi.fn().mockImplementation((i) => ({ __cmd: "Invoke", ...i })),
-}));
+vi.mock("@aws-sdk/client-lambda", () => lambdaModule(lambdaSend));
 
 const ids = await import("@/lib/pipeline/server/ids");
 const { env } = await import("@/lib/pipeline/server/env");

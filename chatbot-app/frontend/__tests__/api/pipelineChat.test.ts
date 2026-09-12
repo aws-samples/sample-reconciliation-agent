@@ -11,17 +11,26 @@
  * /memory` are admin-only; the assistant's `save_memory` and `delete_memory` are the same writes, so
  * a non-admin session must neither be offered them nor be able to run one the model calls anyway.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
+import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 
-process.env.AWS_REGION = "us-east-1";
-process.env.PIPELINE_ASSETS_BUCKET = "test-assets";
-process.env.DEALS_TABLE = "test-deals";
-process.env.EMAILS_TABLE = "test-emails";
-process.env.SKILL_PROPOSALS_TABLE = "test-proposals";
-process.env.CHAT_MEMORY_ID = "deal_pipeline_test_chat-xyz";
-process.env.KNOWLEDGE_MEMORY_ID = "";
-process.env.ASSISTANT_MODEL_ID = "us.anthropic.claude-sonnet-5";
+import { agentCoreModule, bedrockRuntimeModule, dynamoDbModule, s3Module } from "../helpers/awsMocks";
+import { scopedEnv } from "../helpers/env";
+import { createFakeTable } from "../helpers/fakeDdb";
+import { noSuchKey } from "../helpers/fakeS3";
+import { admitted, refused } from "../helpers/gates";
+import { jsonRequest } from "../helpers/http";
+
+const env = scopedEnv({
+  AWS_REGION: "us-east-1",
+  PIPELINE_ASSETS_BUCKET: "test-assets",
+  DEALS_TABLE: "test-deals",
+  EMAILS_TABLE: "test-emails",
+  SKILL_PROPOSALS_TABLE: "test-proposals",
+  CHAT_MEMORY_ID: "deal_pipeline_test_chat-xyz",
+  KNOWLEDGE_MEMORY_ID: "",
+  ASSISTANT_MODEL_ID: "us.anthropic.claude-sonnet-5",
+});
+afterAll(() => env.restore());
 
 const ddbSend = vi.fn();
 const s3Send = vi.fn();
@@ -33,31 +42,10 @@ const requireAppActor = vi.fn();
 // The history route names the actor only; the chat route also needs the admin flag.
 vi.mock("@/lib/api-auth", () => ({ requireActor }));
 vi.mock("@/lib/auth/app-admin", () => ({ requireAppActor }));
-vi.mock("@aws-sdk/client-dynamodb", () => ({
-  DynamoDBClient: vi.fn().mockImplementation(() => ({ send: ddbSend })),
-  GetItemCommand: vi.fn().mockImplementation((i) => ({ __cmd: "GetItem", ...i })),
-  PutItemCommand: vi.fn().mockImplementation((i) => ({ __cmd: "PutItem", ...i })),
-  ScanCommand: vi.fn().mockImplementation((i) => ({ __cmd: "Scan", ...i })),
-}));
-vi.mock("@aws-sdk/client-s3", () => ({
-  S3Client: vi.fn().mockImplementation(() => ({ send: s3Send })),
-  GetObjectCommand: vi.fn().mockImplementation((i) => ({ __cmd: "GetObject", ...i })),
-  PutObjectCommand: vi.fn().mockImplementation((i) => ({ __cmd: "PutObject", ...i })),
-  ListObjectsV2Command: vi.fn().mockImplementation((i) => ({ __cmd: "List", ...i })),
-  DeleteObjectCommand: vi.fn().mockImplementation((i) => ({ __cmd: "Delete", ...i })),
-}));
-vi.mock("@aws-sdk/client-bedrock-runtime", () => ({
-  BedrockRuntimeClient: vi.fn().mockImplementation(() => ({ send: bedrockSend })),
-  ConverseStreamCommand: vi.fn().mockImplementation((i) => ({ __cmd: "ConverseStream", ...i })),
-}));
-vi.mock("@aws-sdk/client-bedrock-agentcore", () => ({
-  BedrockAgentCoreClient: vi.fn().mockImplementation(() => ({ send: agentcoreSend })),
-  RetrieveMemoryRecordsCommand: vi.fn().mockImplementation((i) => ({ __cmd: "Retrieve", ...i })),
-  ListMemoryRecordsCommand: vi.fn().mockImplementation((i) => ({ __cmd: "ListRecords", ...i })),
-  BatchDeleteMemoryRecordsCommand: vi.fn().mockImplementation((i) => ({ __cmd: "BatchDelete", ...i })),
-  CreateEventCommand: vi.fn().mockImplementation((i) => ({ __cmd: "CreateEvent", ...i })),
-  ListEventsCommand: vi.fn().mockImplementation((i) => ({ __cmd: "ListEvents", ...i })),
-}));
+vi.mock("@aws-sdk/client-dynamodb", () => dynamoDbModule(ddbSend));
+vi.mock("@aws-sdk/client-s3", () => s3Module(s3Send));
+vi.mock("@aws-sdk/client-bedrock-runtime", () => bedrockRuntimeModule(bedrockSend));
+vi.mock("@aws-sdk/client-bedrock-agentcore", () => agentCoreModule(agentcoreSend));
 
 const chat = await import("@/app/api/pipeline/chat/route");
 const history = await import("@/app/api/pipeline/chat/history/route");
@@ -123,28 +111,22 @@ async function readFrames(resp: Response): Promise<{ events: ChatStreamEvent[]; 
 }
 
 function post(body: unknown) {
-  return chat.POST(
-    new Request("http://x/api/pipeline/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
-  );
+  return chat.POST(jsonRequest("POST", "http://x/api/pipeline/chat", body));
 }
+
+/** Deal lookups hit this table; it holds `DEAL` and nothing else. */
+const dealsTable = createFakeTable<DealRecord>({ keyAttr: "deal_id" });
+ddbSend.mockImplementation(dealsTable.send);
 
 beforeEach(() => {
   vi.clearAllMocks();
-  process.env.KNOWLEDGE_MEMORY_ID = "";
-  requireActor.mockResolvedValue({ actor: "user@example.test" });
-  requireAppActor.mockResolvedValue({ actor: "user@example.test", isAdmin: true });
-  // No seeded assistant prompt → built-in prompt; deal lookups hit the fake table below.
-  s3Send.mockRejectedValue(Object.assign(new Error("nsk"), { name: "NoSuchKey" }));
-  ddbSend.mockImplementation(async (cmd: { __cmd: string; Key?: never }) => {
-    if (cmd.__cmd === "GetItem" && unmarshall(cmd.Key!).deal_id === "dl_1") return { Item: marshall(DEAL) };
-    if (cmd.__cmd === "GetItem") return {};
-    if (cmd.__cmd === "Scan") return { Items: [marshall(DEAL)] };
-    return {};
-  });
+  env.set({ KNOWLEDGE_MEMORY_ID: "" });
+  requireActor.mockResolvedValue(admitted("user@example.test"));
+  requireAppActor.mockResolvedValue(admitted("user@example.test", { isAdmin: true }));
+  // No seeded assistant prompt → built-in prompt; deal lookups hit the fake table.
+  s3Send.mockRejectedValue(noSuchKey());
+  dealsTable.reset();
+  dealsTable.rows.dl_1 = DEAL;
   // Chat memory: empty history, successful event writes.
   agentcoreSend.mockImplementation(async (cmd: { __cmd: string }) =>
     cmd.__cmd === "ListEvents" ? { events: [] } : { event: { eventId: "evt" } },
@@ -283,16 +265,15 @@ describe("POST /api/pipeline/chat", () => {
   });
 
   it("honours an authorization refusal", async () => {
-    const { NextResponse } = await import("next/server");
-    requireAppActor.mockResolvedValue({ error: NextResponse.json({ error: "no" }, { status: 401 }) });
+    requireAppActor.mockResolvedValue(refused(401, "no"));
     expect((await post({ session_id: "s", message: "x" })).status).toBe(401);
   });
 
   it("withholds the memory-writing tools from a non-admin session and refuses one the model calls anyway", async () => {
     // A configured knowledge memory, so a gate that leaked would show up as a real BatchDelete call
     // rather than being masked by the "not configured" no-op.
-    process.env.KNOWLEDGE_MEMORY_ID = "deal_pipeline_test_knowledge-abc";
-    requireAppActor.mockResolvedValue({ actor: "analyst@example.test", isAdmin: false });
+    env.set({ KNOWLEDGE_MEMORY_ID: "deal_pipeline_test_knowledge-abc" });
+    requireAppActor.mockResolvedValue(admitted("analyst@example.test", { isAdmin: false }));
     bedrockSend
       .mockResolvedValueOnce({ stream: toolRound("tu-3", "delete_memory", { record_id: "rec-1" }) })
       .mockResolvedValueOnce({ stream: textRound("An admin can remove that record from the Memory Manager.") });
@@ -384,7 +365,7 @@ describe("chatAgent helpers", () => {
   });
 
   it("save_memory and delete_memory refuse a non-admin context before touching the memory", async () => {
-    process.env.KNOWLEDGE_MEMORY_ID = "deal_pipeline_test_knowledge-abc";
+    env.set({ KNOWLEDGE_MEMORY_ID: "deal_pipeline_test_knowledge-abc" });
     const ctx = { sessionId: "s", canWrite: false };
     const saved = await agent.executeTool("save_memory", { rule: "r", rationale: "why" }, ctx);
     expect(saved).toMatchObject({ ok: false, summary: "requires the admin group" });

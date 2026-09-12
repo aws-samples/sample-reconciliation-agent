@@ -15,14 +15,13 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ConsoleSettings } from "@/lib/console/types";
 
-import { clearAuthEnv, restoreAuthEnv, setAuthEnv, snapshotAuthEnv } from "../lib/auth/testEnv";
-import { createFakeSsm, ssmCommandMocks, type FakeSsm, type FakeSsmCommand } from "../lib/console/fakeSsm";
+import { ssmModule } from "../helpers/awsMocks";
+import { AUTH_ENV_NAMES, scopedEnv } from "../helpers/env";
+import { createFakeSsm, type FakeSsm, type FakeSsmCommand } from "../helpers/fakeSsm";
+import { jsonRequest } from "../helpers/http";
 
 const ssmSend = vi.hoisted(() => vi.fn());
-vi.mock("@aws-sdk/client-ssm", () => ({
-  SSMClient: vi.fn().mockImplementation(() => ({ send: ssmSend })),
-  ...ssmCommandMocks((impl) => vi.fn().mockImplementation(impl as never) as never),
-}));
+vi.mock("@aws-sdk/client-ssm", () => ssmModule(ssmSend));
 
 const { GET, PUT } = await import("@/app/api/console/settings/route");
 const { invalidate } = await import("@/lib/console/settings");
@@ -32,29 +31,23 @@ const ADMIN = { ALLOW_ANONYMOUS_API: "true", CONSOLE_ADMIN_GROUP: "console-admin
 const NON_ADMIN = { ...ADMIN, ANONYMOUS_GROUPS: "recon-admins" };
 
 let fake: FakeSsm;
-const saved = snapshotAuthEnv();
+const authEnv = scopedEnv(AUTH_ENV_NAMES);
 
 beforeEach(() => {
-  clearAuthEnv();
+  authEnv.clear();
   fake = createFakeSsm();
   ssmSend.mockReset();
   ssmSend.mockImplementation((cmd: FakeSsmCommand) => fake.send(cmd));
   invalidate();
 });
-afterAll(() => restoreAuthEnv(saved));
+afterAll(() => authEnv.restore());
 
 function get(headers: Record<string, string> = {}): Promise<Response> {
   return GET(new Request("https://app.example/api/console/settings", { headers }));
 }
 
 function put(body: unknown, raw = false): Promise<Response> {
-  return PUT(
-    new Request("https://app.example/api/console/settings", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: raw ? (body as string) : JSON.stringify(body),
-    }),
-  );
+  return PUT(jsonRequest("PUT", "https://app.example/api/console/settings", body, { raw }));
 }
 
 async function error(res: Response): Promise<string> {
@@ -73,7 +66,7 @@ function ssmWrites(): unknown[] {
 
 describe("GET /api/console/settings authentication and authorization", () => {
   it("401s without a token", async () => {
-    setAuthEnv({
+    authEnv.set({
       AUTH_PROVIDER: "okta",
       OKTA_ISSUER: "https://integrator-1234567.okta.com/oauth2/default",
       OKTA_CLIENT_ID: "0oaTESTclientid",
@@ -89,7 +82,7 @@ describe("GET /api/console/settings authentication and authorization", () => {
   });
 
   it("403s an authenticated non-admin, naming the group and CONSOLE_ADMIN_GROUP", async () => {
-    setAuthEnv(NON_ADMIN);
+    authEnv.set(NON_ADMIN);
     const res = await get();
     expect(res.status).toBe(403);
     const message = await error(res);
@@ -101,7 +94,7 @@ describe("GET /api/console/settings authentication and authorization", () => {
 
   it("403s everyone when CONSOLE_ADMIN_GROUP is unset, naming the variable", async () => {
     // Fail closed: anonymous mode holds every CONFIGURED group, and this one is not configured.
-    setAuthEnv({ ALLOW_ANONYMOUS_API: "true" });
+    authEnv.set({ ALLOW_ANONYMOUS_API: "true" });
     const res = await get();
     expect(res.status).toBe(403);
     expect(await error(res)).toContain("CONSOLE_ADMIN_GROUP is not configured");
@@ -109,7 +102,7 @@ describe("GET /api/console/settings authentication and authorization", () => {
 
   it("does not let a stored parameter make someone a console admin", async () => {
     // The overlay never carries CONSOLE_ADMIN_GROUP; even a parameter named like it changes nothing.
-    setAuthEnv({ ...NON_ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ...NON_ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX });
     fake.store.set(`${PREFIX}/access/CONSOLE_ADMIN_GROUP`, "recon-admins");
     expect((await get()).status).toBe(403);
   });
@@ -117,7 +110,7 @@ describe("GET /api/console/settings authentication and authorization", () => {
 
 describe("GET /api/console/settings for an admin", () => {
   it("answers on a deployment without the stored layer, marked unconfigured, with no-store", async () => {
-    setAuthEnv({ ...ADMIN, RECON_ACCESS_GROUP: "recon-users" });
+    authEnv.set({ ...ADMIN, RECON_ACCESS_GROUP: "recon-users" });
     const res = await get();
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
@@ -130,7 +123,7 @@ describe("GET /api/console/settings for an admin", () => {
   });
 
   it("reports stored values with their source when configured", async () => {
-    setAuthEnv({ ...ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX, RECON_ACCESS_GROUP: "env-users" });
+    authEnv.set({ ...ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX, RECON_ACCESS_GROUP: "env-users" });
     fake.seed(PREFIX, {
       "access/recon/access-group": "stored-users",
       "defaults/organization-label": "Northwind Capital",
@@ -145,7 +138,7 @@ describe("GET /api/console/settings for an admin", () => {
   });
 
   it("500s with the reason when Parameter Store cannot be read", async () => {
-    setAuthEnv({ ...ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ...ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX });
     ssmSend.mockRejectedValue(new Error("AccessDeniedException: ssm:GetParametersByPath"));
     const res = await get();
     expect(res.status).toBe(500);
@@ -155,7 +148,7 @@ describe("GET /api/console/settings for an admin", () => {
 
 describe("PUT /api/console/settings", () => {
   it("403s a non-admin before reading the body or touching SSM", async () => {
-    setAuthEnv({ ...NON_ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ...NON_ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX });
     const res = await put({ defaults: { organizationLabel: "x" } });
     expect(res.status).toBe(403);
     expect(await error(res)).toContain("CONSOLE_ADMIN_GROUP");
@@ -163,7 +156,7 @@ describe("PUT /api/console/settings", () => {
   });
 
   it("409s when the stored layer is not configured", async () => {
-    setAuthEnv(ADMIN);
+    authEnv.set(ADMIN);
     const res = await put({ defaults: { organizationLabel: "x" } });
     expect(res.status).toBe(409);
     expect(await error(res)).toContain("CONSOLE_SETTINGS_PREFIX");
@@ -171,14 +164,14 @@ describe("PUT /api/console/settings", () => {
   });
 
   it("400s a body that is not JSON", async () => {
-    setAuthEnv({ ...ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ...ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX });
     const res = await put("{not json", true);
     expect(res.status).toBe(400);
     expect(await error(res)).toContain("JSON");
   });
 
   it("400s an invalid field with the validator's message and writes nothing", async () => {
-    setAuthEnv({ ...ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ...ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX });
     const res = await put({ access: { recon: { accessGroup: "ok" }, pipeline: { adminGroup: "bad;name" } } });
     expect(res.status).toBe(400);
     expect(await error(res)).toContain("access.pipeline.adminGroup");
@@ -186,12 +179,12 @@ describe("PUT /api/console/settings", () => {
   });
 
   it("400s an empty update", async () => {
-    setAuthEnv({ ...ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ...ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX });
     expect((await put({})).status).toBe(400);
   });
 
   it("writes the fields, records the actor, and returns the refreshed settings", async () => {
-    setAuthEnv({ ...ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX, RECON_ADMIN_GROUP: "env-admin" });
+    authEnv.set({ ...ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX, RECON_ADMIN_GROUP: "env-admin" });
     fake.seed(PREFIX, { "access/recon/admin-group": "old-admin" });
     const res = await put({
       access: { recon: { accessGroup: "recon-users", adminGroup: "" } },
@@ -217,7 +210,7 @@ describe("PUT /api/console/settings", () => {
   });
 
   it("500s with the reason when a write fails", async () => {
-    setAuthEnv({ ...ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ...ADMIN, CONSOLE_SETTINGS_PREFIX: PREFIX });
     ssmSend.mockImplementation(async (cmd: FakeSsmCommand) => {
       if (cmd.__cmd === "Put") throw new Error("AccessDeniedException: ssm:PutParameter");
       return fake.send(cmd);

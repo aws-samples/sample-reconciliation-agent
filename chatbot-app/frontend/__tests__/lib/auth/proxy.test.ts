@@ -15,32 +15,18 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
-import { invalidate } from "@/lib/console/settings";
-import { config, proxy } from "@/proxy";
-
-import { createFakeSsm, type FakeSsm, type FakeSsmCommand } from "../console/fakeSsm";
-import { clearAuthEnv, restoreAuthEnv, setAuthEnv, snapshotAuthEnv } from "./testEnv";
+import { ssmModule } from "../../helpers/awsMocks";
+import { AUTH_ENV_NAMES, scopedEnv } from "../../helpers/env";
+import { createFakeSsm, type FakeSsm, type FakeSsmCommand } from "../../helpers/fakeSsm";
 
 // Parameter Store is the one dependency faked: the overlay cases below store a group there, and every
-// other case runs with the prefix unset, where the gate must never reach for it. The whole mock is
-// built inside `vi.hoisted` because the proxy is imported statically above, so the factory runs before
-// any other top-level binding in this file is initialised.
-const ssm = vi.hoisted(() => {
-  const send = vi.fn();
-  const tag = (cmd: string) => vi.fn().mockImplementation((input: object) => ({ __cmd: cmd, ...input }));
-  return {
-    send,
-    module: {
-      SSMClient: vi.fn().mockImplementation(() => ({ send })),
-      GetParameterCommand: tag("Get"),
-      GetParametersByPathCommand: tag("GetByPath"),
-      PutParameterCommand: tag("Put"),
-      DeleteParameterCommand: tag("Delete"),
-    },
-  };
-});
-vi.mock("@aws-sdk/client-ssm", () => ssm.module);
-const ssmSend = ssm.send;
+// other case runs with the prefix unset, where the gate must never reach for it. The proxy is imported
+// after the mock so the factory can use the shared builder.
+const ssmSend = vi.hoisted(() => vi.fn());
+vi.mock("@aws-sdk/client-ssm", () => ssmModule(ssmSend));
+
+const { invalidate } = await import("@/lib/console/settings");
+const { config, proxy } = await import("@/proxy");
 
 const PATHS = ["/api/recon/cases", "/api/pipeline/deals", "/api/console/settings", "/api/me"] as const;
 
@@ -52,15 +38,15 @@ const DENIED_PIPELINE =
 const PREFIX = "/recon-test/console";
 let fake: FakeSsm;
 
-const saved = snapshotAuthEnv();
+const authEnv = scopedEnv(AUTH_ENV_NAMES);
 beforeEach(() => {
-  clearAuthEnv();
+  authEnv.clear();
   fake = createFakeSsm();
   ssmSend.mockReset();
   ssmSend.mockImplementation((cmd: FakeSsmCommand) => fake.send(cmd));
   invalidate();
 });
-afterAll(() => restoreAuthEnv(saved));
+afterAll(() => authEnv.restore());
 
 function request(path: string, headers: Record<string, string> = {}): NextRequest {
   return new NextRequest(`https://app.example${path}`, { headers });
@@ -84,7 +70,7 @@ describe("proxy matcher", () => {
 
 describe("proxy authentication", () => {
   it("401s every prefix, with a Bearer challenge, when no token is presented", async () => {
-    setAuthEnv({
+    authEnv.set({
       AUTH_PROVIDER: "okta",
       OKTA_ISSUER: "https://integrator-1234567.okta.com/oauth2/default",
       OKTA_CLIENT_ID: "0oaTESTclientid",
@@ -111,7 +97,7 @@ describe("proxy authentication", () => {
 
 describe("proxy per-app access", () => {
   it("passes an anonymous caller through to every prefix when no access group is set", async () => {
-    setAuthEnv({ ALLOW_ANONYMOUS_API: "true" });
+    authEnv.set({ ALLOW_ANONYMOUS_API: "true" });
     for (const path of PATHS) {
       const res = await proxy(request(path));
       expect(res.status, path).toBe(200);
@@ -121,7 +107,7 @@ describe("proxy per-app access", () => {
   });
 
   it("403s an app-prefixed call from outside that app's access group, with the exact message", async () => {
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       ANONYMOUS_GROUPS: "nobody",
       RECON_ACCESS_GROUP: "recon-users",
@@ -135,7 +121,7 @@ describe("proxy per-app access", () => {
   });
 
   it("leaves the other app open when only one is restricted", async () => {
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       ANONYMOUS_GROUPS: "nobody",
       RECON_ACCESS_GROUP: "recon-users",
@@ -144,7 +130,7 @@ describe("proxy per-app access", () => {
   });
 
   it("lets /api/me through for a caller who may use no app", async () => {
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       ANONYMOUS_GROUPS: "nobody",
       RECON_ACCESS_GROUP: "recon-users",
@@ -156,7 +142,7 @@ describe("proxy per-app access", () => {
   });
 
   it("admits a member of the access group", async () => {
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       ANONYMOUS_GROUPS: "recon-users",
       RECON_ACCESS_GROUP: "recon-users",
@@ -165,7 +151,7 @@ describe("proxy per-app access", () => {
   });
 
   it("admits an admin who is not in the access group", async () => {
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       ANONYMOUS_GROUPS: "recon-admin",
       RECON_ACCESS_GROUP: "recon-users",
@@ -175,7 +161,7 @@ describe("proxy per-app access", () => {
   });
 
   it("restricts each app by its own group", async () => {
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       ANONYMOUS_GROUPS: "recon-users",
       RECON_ACCESS_GROUP: "recon-users",
@@ -188,7 +174,7 @@ describe("proxy per-app access", () => {
   });
 
   it("guards the bare prefix as well as nested paths", async () => {
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       ANONYMOUS_GROUPS: "nobody",
       RECON_ACCESS_GROUP: "recon-users",
@@ -199,7 +185,7 @@ describe("proxy per-app access", () => {
   it("honours the legacy app-specific switch for the whole shell", async () => {
     // A `.env.local` written for the pipeline app alone still opens BOTH BFFs: there is one server,
     // so a per-app switch never meant anything narrower.
-    setAuthEnv({ PIPELINE_ALLOW_ANONYMOUS_API: "true" });
+    authEnv.set({ PIPELINE_ALLOW_ANONYMOUS_API: "true" });
     for (const path of PATHS) {
       expect((await proxy(request(path))).status, path).toBe(200);
     }
@@ -211,7 +197,7 @@ describe("proxy app enablement", () => {
     // Terraform renders PIPELINE_ENABLED=false when enable_deal_pipeline is false. The pipeline's
     // routes must not run at all there: several of them would otherwise read the shared container's
     // recon resources, and the rest 500 on tables that do not exist.
-    setAuthEnv({ ALLOW_ANONYMOUS_API: "true", PIPELINE_ENABLED: "false" });
+    authEnv.set({ ALLOW_ANONYMOUS_API: "true", PIPELINE_ENABLED: "false" });
     const denied = await proxy(request("/api/pipeline/deals"));
     expect(denied.status).toBe(403);
     expect(await body(denied)).toEqual({ error: "Deal Pipeline is not enabled on this deployment" });
@@ -221,7 +207,7 @@ describe("proxy app enablement", () => {
   });
 
   it("403s a disabled app even for a caller in its admin group", async () => {
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       PIPELINE_ENABLED: "false",
       PIPELINE_ADMIN_GROUP: "deal-desk-admins",
@@ -230,7 +216,7 @@ describe("proxy app enablement", () => {
   });
 
   it.each(["true", "1", ""])("keeps the pipeline reachable when PIPELINE_ENABLED is %j", async (value) => {
-    setAuthEnv({ ALLOW_ANONYMOUS_API: "true", PIPELINE_ENABLED: value });
+    authEnv.set({ ALLOW_ANONYMOUS_API: "true", PIPELINE_ENABLED: value });
     expect((await proxy(request("/api/pipeline/deals"))).status).toBe(200);
   });
 });
@@ -238,7 +224,7 @@ describe("proxy app enablement", () => {
 describe("proxy under REQUIRE_ACCESS_GROUPS", () => {
   it("403s both apps for a caller in no group when their access groups are unset", async () => {
     // The composed deployment sets this, so a blank group can never mean "both desks may use it".
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       ANONYMOUS_GROUPS: "nobody",
       REQUIRE_ACCESS_GROUPS: "true",
@@ -252,7 +238,7 @@ describe("proxy under REQUIRE_ACCESS_GROUPS", () => {
   });
 
   it("admits the admin group and a configured access group as before", async () => {
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       ANONYMOUS_GROUPS: "recon-admin,deal-desk",
       REQUIRE_ACCESS_GROUPS: "true",
@@ -268,7 +254,7 @@ describe("proxy and the console routes", () => {
   it("admits any authenticated caller to /api/console/*, leaving the admin check to the route", async () => {
     // Like `/api/me`: the preferences route must answer for a caller who may use no app, and the
     // settings route refuses non-admins itself with a 403 that names CONSOLE_ADMIN_GROUP.
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       ANONYMOUS_GROUPS: "nobody",
       RECON_ACCESS_GROUP: "recon-users",
@@ -280,7 +266,7 @@ describe("proxy and the console routes", () => {
   });
 
   it("never touches Parameter Store when the layer is not configured", async () => {
-    setAuthEnv({ ALLOW_ANONYMOUS_API: "true", RECON_ACCESS_GROUP: "recon-users" });
+    authEnv.set({ ALLOW_ANONYMOUS_API: "true", RECON_ACCESS_GROUP: "recon-users" });
     for (const path of PATHS) await proxy(request(path));
     expect(ssmSend).not.toHaveBeenCalled();
   });
@@ -290,7 +276,7 @@ describe("proxy with the stored overlay", () => {
   it("denies with a stored access group a caller the environment alone would have admitted", async () => {
     // No RECON_ACCESS_GROUP in the environment: recon is open. The stored value closes it, and the 403
     // names the stored group, which is what the operator typed on the Settings screen.
-    setAuthEnv({ ALLOW_ANONYMOUS_API: "true", ANONYMOUS_GROUPS: "nobody", CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ALLOW_ANONYMOUS_API: "true", ANONYMOUS_GROUPS: "nobody", CONSOLE_SETTINGS_PREFIX: PREFIX });
     fake.seed(PREFIX, { "access/recon/access-group": "recon-users" });
     const denied = await proxy(request("/api/recon/cases"));
     expect(denied.status).toBe(403);
@@ -301,7 +287,7 @@ describe("proxy with the stored overlay", () => {
   });
 
   it("lets a stored group beat the environment's, in both directions", async () => {
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       ANONYMOUS_GROUPS: "desk-b",
       CONSOLE_SETTINGS_PREFIX: PREFIX,
@@ -317,13 +303,13 @@ describe("proxy with the stored overlay", () => {
   });
 
   it("admits a member of a stored admin group to an app the stored access group closes", async () => {
-    setAuthEnv({ ALLOW_ANONYMOUS_API: "true", ANONYMOUS_GROUPS: "recon-admin", CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ALLOW_ANONYMOUS_API: "true", ANONYMOUS_GROUPS: "recon-admin", CONSOLE_SETTINGS_PREFIX: PREFIX });
     fake.seed(PREFIX, { "access/recon/access-group": "recon-users", "access/recon/admin-group": "recon-admin" });
     expect((await proxy(request("/api/recon/cases/1"))).status).toBe(200);
   });
 
   it("switches an app off from the store", async () => {
-    setAuthEnv({ ALLOW_ANONYMOUS_API: "true", CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ALLOW_ANONYMOUS_API: "true", CONSOLE_SETTINGS_PREFIX: PREFIX });
     fake.seed(PREFIX, { "apps/pipeline/enabled": "false" });
     const denied = await proxy(request("/api/pipeline/deals"));
     expect(denied.status).toBe(403);
@@ -334,7 +320,7 @@ describe("proxy with the stored overlay", () => {
   it("cannot widen access past the environment-only switches", async () => {
     // REQUIRE_ACCESS_GROUPS comes from the environment and nothing stored can unset it, so a blank
     // stored access group still means admins-only.
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       ANONYMOUS_GROUPS: "nobody",
       REQUIRE_ACCESS_GROUPS: "true",
@@ -350,7 +336,7 @@ describe("proxy with the stored overlay", () => {
   it("falls back to the environment when Parameter Store is unreachable", async () => {
     // Fail open to env: a stored-only restriction is not enforced during the outage window, but the
     // deployment's own configuration still is, and nobody is locked out by an SSM hiccup.
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       ANONYMOUS_GROUPS: "nobody",
       CONSOLE_SETTINGS_PREFIX: PREFIX,

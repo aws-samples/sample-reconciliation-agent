@@ -12,53 +12,36 @@
  */
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { GET, type MeResponse } from "@/app/api/me/route";
-import { isAppAdmin } from "@/lib/auth/app-admin";
 import type { Viewer } from "@/lib/auth/apps";
-import { invalidate, preferencesParameterName } from "@/lib/console/settings";
-import { isReconAdmin } from "@/lib/reconAdmin";
 
-import {
-  clearAuthEnv,
-  restoreAuthEnv,
-  setAuthEnv,
-  snapshotAuthEnv,
-} from "../lib/auth/testEnv";
-import { createFakeSsm, type FakeSsm, type FakeSsmCommand } from "../lib/console/fakeSsm";
+import { ssmModule } from "../helpers/awsMocks";
+import { AUTH_ENV_NAMES, scopedEnv } from "../helpers/env";
+import { createFakeSsm, type FakeSsm, type FakeSsmCommand } from "../helpers/fakeSsm";
 
 // Parameter Store is the one dependency faked: the console fields below read the stored layer, and
-// every other case runs with the prefix unset, where the route must never reach for it. The whole
-// mock is built inside `vi.hoisted` because the route is imported statically above, so the factory
-// runs before any other top-level binding in this file is initialised.
-const ssm = vi.hoisted(() => {
-  const send = vi.fn();
-  const tag = (cmd: string) => vi.fn().mockImplementation((input: object) => ({ __cmd: cmd, ...input }));
-  return {
-    send,
-    module: {
-      SSMClient: vi.fn().mockImplementation(() => ({ send })),
-      GetParameterCommand: tag("Get"),
-      GetParametersByPathCommand: tag("GetByPath"),
-      PutParameterCommand: tag("Put"),
-      DeleteParameterCommand: tag("Delete"),
-    },
-  };
-});
-vi.mock("@aws-sdk/client-ssm", () => ssm.module);
-const ssmSend = ssm.send;
+// every other case runs with the prefix unset, where the route must never reach for it. The route is
+// imported after the mock so the factory can use the shared builder.
+const ssmSend = vi.hoisted(() => vi.fn());
+vi.mock("@aws-sdk/client-ssm", () => ssmModule(ssmSend));
+
+const { GET } = await import("@/app/api/me/route");
+type MeResponse = import("@/app/api/me/route").MeResponse;
+const { isAppAdmin } = await import("@/lib/auth/app-admin");
+const { invalidate, preferencesParameterName } = await import("@/lib/console/settings");
+const { isReconAdmin } = await import("@/lib/reconAdmin");
 
 const PREFIX = "/recon-test/console";
 let fake: FakeSsm;
 
-const saved = snapshotAuthEnv();
+const authEnv = scopedEnv(AUTH_ENV_NAMES);
 beforeEach(() => {
-  clearAuthEnv();
+  authEnv.clear();
   fake = createFakeSsm();
   ssmSend.mockReset();
   ssmSend.mockImplementation((cmd: FakeSsmCommand) => fake.send(cmd));
   invalidate();
 });
-afterAll(() => restoreAuthEnv(saved));
+afterAll(() => authEnv.restore());
 
 function get(headers: Record<string, string> = {}): Promise<Response> {
   return GET(new Request("https://app.example/api/me", { headers }));
@@ -66,7 +49,7 @@ function get(headers: Record<string, string> = {}): Promise<Response> {
 
 describe("GET /api/me", () => {
   it("returns exactly the Viewer shape plus the console fields, and nothing else", async () => {
-    setAuthEnv({ ALLOW_ANONYMOUS_API: "true" });
+    authEnv.set({ ALLOW_ANONYMOUS_API: "true" });
     const res = await get();
     expect(res.status).toBe(200);
     const viewer = (await res.json()) as MeResponse;
@@ -83,7 +66,7 @@ describe("GET /api/me", () => {
   });
 
   it("in anonymous mode, reports every configured app as accessible and administered", async () => {
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       RECON_ACCESS_GROUP: "recon-users",
       RECON_ADMIN_GROUP: "recon-admin",
@@ -103,7 +86,7 @@ describe("GET /api/me", () => {
     // ANONYMOUS_GROUPS=deal-desk is how a developer previews the shell as a pipeline user who has no
     // recon access; the body is what drives the rail to hide recon and the pipeline to hide its
     // admin surfaces.
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       ANONYMOUS_GROUPS: "deal-desk",
       RECON_ACCESS_GROUP: "recon-users",
@@ -124,7 +107,7 @@ describe("GET /api/me", () => {
   });
 
   it("answers for a viewer who may use no app at all", async () => {
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       ANONYMOUS_GROUPS: "nobody",
       RECON_ACCESS_GROUP: "recon-users",
@@ -141,7 +124,7 @@ describe("GET /api/me", () => {
   it("is open and not admin for every app when no group is configured", async () => {
     // A deployment that predates the shell: no access groups, no admin groups. Everyone may use both
     // apps and nobody administers either, which is what those deployments already did.
-    setAuthEnv({ ALLOW_ANONYMOUS_API: "true" });
+    authEnv.set({ ALLOW_ANONYMOUS_API: "true" });
     const viewer = (await (await get()).json()) as Viewer;
     expect(viewer.groups).toEqual([]);
     expect(viewer.apps).toEqual({
@@ -154,7 +137,7 @@ describe("GET /api/me", () => {
     // The recon-only upgrade: Terraform renders PIPELINE_ENABLED=false. The body is what drives the
     // landing page's single-app redirect and keeps Deal Pipeline out of the rail, so `access` AND
     // `admin` must both be false even for a viewer who holds the pipeline admin group.
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       PIPELINE_ENABLED: "false",
       RECON_ADMIN_GROUP: "recon-admin",
@@ -171,7 +154,7 @@ describe("GET /api/me", () => {
   it("closes an app with no access group to non-admins under REQUIRE_ACCESS_GROUPS", async () => {
     // The composed deployment: a deal-desk user must not see (or reach) recon just because recon's
     // access group was left blank.
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       ANONYMOUS_GROUPS: "deal-desk",
       REQUIRE_ACCESS_GROUPS: "true",
@@ -188,7 +171,7 @@ describe("GET /api/me", () => {
   it("agrees with the write-route helpers about a padded admin group", async () => {
     // A tfvars value with stray whitespace reaches the task verbatim. If this route trimmed and the
     // helpers did not, the rail would show an admin chip while every write route answered 403.
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       RECON_ADMIN_GROUP: "  recon-admin ",
       PIPELINE_ADMIN_GROUP: "deal-desk-admins  ",
@@ -203,7 +186,7 @@ describe("GET /api/me", () => {
   it("401s without a token rather than inventing a viewer", async () => {
     // The route verifies for itself even though the proxy already did: a matcher change that dropped
     // `/api/me` must not turn it into an unauthenticated oracle of who is in which group.
-    setAuthEnv({
+    authEnv.set({
       AUTH_PROVIDER: "okta",
       OKTA_ISSUER: "https://integrator-1234567.okta.com/oauth2/default",
       OKTA_CLIENT_ID: "0oaTESTclientid",
@@ -222,7 +205,7 @@ describe("GET /api/me", () => {
 
 describe("GET /api/me console fields", () => {
   it("reports the layer unconfigured, the default label and empty preferences without the prefix", async () => {
-    setAuthEnv({ ALLOW_ANONYMOUS_API: "true" });
+    authEnv.set({ ALLOW_ANONYMOUS_API: "true" });
     const viewer = (await (await get()).json()) as MeResponse;
     expect(viewer.console).toEqual({
       admin: false,
@@ -234,28 +217,28 @@ describe("GET /api/me console fields", () => {
 
   it("marks a member of CONSOLE_ADMIN_GROUP as console admin, and anonymous mode holds that group", async () => {
     // The same rule as the app admin groups: anonymous mode carries every configured group.
-    setAuthEnv({ ALLOW_ANONYMOUS_API: "true", CONSOLE_ADMIN_GROUP: " console-admins " });
+    authEnv.set({ ALLOW_ANONYMOUS_API: "true", CONSOLE_ADMIN_GROUP: " console-admins " });
     const viewer = (await (await get()).json()) as MeResponse;
     expect(viewer.groups).toEqual(["console-admins"]);
     expect(viewer.console.admin).toBe(true);
   });
 
   it("is not console admin for a restricted viewer or when the group is unset", async () => {
-    setAuthEnv({ ALLOW_ANONYMOUS_API: "true", ANONYMOUS_GROUPS: "recon-admin", CONSOLE_ADMIN_GROUP: "console-admins" });
+    authEnv.set({ ALLOW_ANONYMOUS_API: "true", ANONYMOUS_GROUPS: "recon-admin", CONSOLE_ADMIN_GROUP: "console-admins" });
     expect(((await (await get()).json()) as MeResponse).console.admin).toBe(false);
     // Unset group: anonymous mode holds every configured group, and this one is not configured.
-    clearAuthEnv();
-    setAuthEnv({ ALLOW_ANONYMOUS_API: "true" });
+    authEnv.clear();
+    authEnv.set({ ALLOW_ANONYMOUS_API: "true" });
     expect(((await (await get()).json()) as MeResponse).console.admin).toBe(false);
   });
 
   it("resolves the organization label from the environment when nothing is stored", async () => {
-    setAuthEnv({ ALLOW_ANONYMOUS_API: "true", CONSOLE_ORGANIZATION_LABEL: " Northwind Capital " });
+    authEnv.set({ ALLOW_ANONYMOUS_API: "true", CONSOLE_ORGANIZATION_LABEL: " Northwind Capital " });
     expect(((await (await get()).json()) as MeResponse).console.organizationLabel).toBe("Northwind Capital");
   });
 
   it("with the layer configured, reports it, prefers the stored label, and returns the viewer's preferences", async () => {
-    setAuthEnv({
+    authEnv.set({
       ALLOW_ANONYMOUS_API: "true",
       CONSOLE_SETTINGS_PREFIX: PREFIX,
       CONSOLE_ORGANIZATION_LABEL: "Env Label",
@@ -271,7 +254,7 @@ describe("GET /api/me console fields", () => {
 
   it("resolves per-app access against the stored overlay", async () => {
     // A stored access group must hide the app in the rail exactly as the proxy will 403 it.
-    setAuthEnv({ ALLOW_ANONYMOUS_API: "true", ANONYMOUS_GROUPS: "deal-desk", CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ALLOW_ANONYMOUS_API: "true", ANONYMOUS_GROUPS: "deal-desk", CONSOLE_SETTINGS_PREFIX: PREFIX });
     fake.seed(PREFIX, { "access/recon/access-group": "recon-users", "access/pipeline/admin-group": "deal-desk" });
     const viewer = (await (await get()).json()) as MeResponse;
     expect(viewer.apps).toEqual({
@@ -282,7 +265,7 @@ describe("GET /api/me console fields", () => {
 
   it("still answers, with empty preferences, when the preferences read fails", async () => {
     // The rail can render without preferences; it cannot render without the viewer.
-    setAuthEnv({ ALLOW_ANONYMOUS_API: "true", CONSOLE_SETTINGS_PREFIX: PREFIX });
+    authEnv.set({ ALLOW_ANONYMOUS_API: "true", CONSOLE_SETTINGS_PREFIX: PREFIX });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       ssmSend.mockImplementation(async (cmd: FakeSsmCommand) => {

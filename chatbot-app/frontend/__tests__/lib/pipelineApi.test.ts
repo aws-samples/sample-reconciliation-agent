@@ -25,20 +25,7 @@ import {
 } from "@/lib/pipelineApi";
 import type { ChatStreamEvent } from "@/lib/pipeline/types";
 
-/** A minimal Response stand-in: the client only ever reads `ok`, `status`, `json()`, `text()`, `body`. */
-function response(
-  status: number,
-  body: unknown,
-  opts: { raw?: boolean } = {},
-): Response {
-  const text = opts.raw ? String(body) : JSON.stringify(body);
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => JSON.parse(text),
-    text: async () => text,
-  } as unknown as Response;
-}
+import { fakeResponse } from "../helpers/http";
 
 /** A body stream that yields the given chunks in order, as bytes. */
 function stream(chunks: string[]): ReadableStream<Uint8Array> {
@@ -60,20 +47,20 @@ beforeEach(() => {
 
 describe("list routes", () => {
   it("accepts a bare array", async () => {
-    authedFetch.mockResolvedValue(response(200, [{ email_id: "em_1" }]));
+    authedFetch.mockResolvedValue(fakeResponse(200, [{ email_id: "em_1" }]));
     expect(await listEmails()).toEqual([{ email_id: "em_1" }]);
     expect(authedFetch).toHaveBeenCalledWith("/api/pipeline/emails", undefined, "PipelineAuth");
   });
 
   it("accepts an envelope keyed by the collection name", async () => {
-    authedFetch.mockResolvedValue(response(200, { emails: [{ email_id: "em_2" }] }));
+    authedFetch.mockResolvedValue(fakeResponse(200, { emails: [{ email_id: "em_2" }] }));
     expect(await listEmails()).toEqual([{ email_id: "em_2" }]);
   });
 
   it("filters proposals by status client-side as well as asking the server", async () => {
     // A route that ignores the query must not leak APPROVED rows into the PENDING view.
     authedFetch.mockResolvedValue(
-      response(200, [
+      fakeResponse(200, [
         { proposal_id: "p1", status: "PENDING" },
         { proposal_id: "p2", status: "APPROVED" },
       ]),
@@ -90,22 +77,22 @@ describe("list routes", () => {
 
 describe("single-record routes", () => {
   it("POSTs approve with no body and returns the updated deal", async () => {
-    authedFetch.mockResolvedValue(response(200, { deal_id: "dl_1", status: "UPLOAD_FAILED" }));
+    authedFetch.mockResolvedValue(fakeResponse(200, { deal_id: "dl_1", status: "UPLOAD_FAILED" }));
     const deal = await approveDeal("dl_1");
     expect(deal.status).toBe("UPLOAD_FAILED");
     expect(authedFetch).toHaveBeenCalledWith("/api/pipeline/deals/dl_1/approve", { method: "POST" }, "PipelineAuth");
   });
 
   it("returns the CSV as text and surfaces a failure through the shared error path", async () => {
-    authedFetch.mockResolvedValueOnce(response(200, "A,B\n1,2\n", { raw: true }));
+    authedFetch.mockResolvedValueOnce(fakeResponse(200, "A,B\n1,2\n", { raw: true }));
     expect(await getDealCsv("dl_1")).toBe("A,B\n1,2\n");
 
-    authedFetch.mockResolvedValueOnce(response(404, { error: "deal not found" }));
+    authedFetch.mockResolvedValueOnce(fakeResponse(404, { error: "deal not found" }));
     await expect(getDealCsv("dl_missing")).rejects.toThrow("deal not found");
   });
 
   it("treats a bodiless delete as every id deleted", async () => {
-    authedFetch.mockResolvedValue(response(204, "", { raw: true }));
+    authedFetch.mockResolvedValue(fakeResponse(204, "", { raw: true }));
     expect(await deleteMemory(["m1", "m2"])).toEqual({ deleted: ["m1", "m2"], failed: [] });
   });
 });
@@ -173,7 +160,7 @@ describe("streamChat()", () => {
   });
 
   it("throws the server's message on a non-2xx response before dispatching anything", async () => {
-    authedFetch.mockResolvedValue(response(503, { error: "ASSISTANT_MODEL_ID is not configured" }));
+    authedFetch.mockResolvedValue(fakeResponse(503, { error: "ASSISTANT_MODEL_ID is not configured" }));
     const onEvent = vi.fn();
     await expect(streamChat({ session_id: "s", message: "m" }, onEvent)).rejects.toThrow(
       "ASSISTANT_MODEL_ID is not configured",

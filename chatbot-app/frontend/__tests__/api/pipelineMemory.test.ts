@@ -7,9 +7,15 @@
  * memory must not look like a success. And the panel lists with `ListMemoryRecords`, not a search
  * — an inventory, not a relevance-ranked subset.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 
-process.env.AWS_REGION = "us-east-1";
+import { agentCoreControlModule, agentCoreModule } from "../helpers/awsMocks";
+import { scopedEnv } from "../helpers/env";
+import { admitted, refused } from "../helpers/gates";
+import { jsonRequest } from "../helpers/http";
+
+const env = scopedEnv(["KNOWLEDGE_MEMORY_ID", "CHAT_MEMORY_ID"], { AWS_REGION: "us-east-1" });
+afterAll(() => env.restore());
 
 const agentcoreSend = vi.fn();
 const controlSend = vi.fn();
@@ -18,18 +24,8 @@ const requireAppAdmin = vi.fn();
 
 vi.mock("@/lib/api-auth", () => ({ requireActor }));
 vi.mock("@/lib/auth/app-admin", () => ({ requireAppAdmin }));
-vi.mock("@aws-sdk/client-bedrock-agentcore", () => ({
-  BedrockAgentCoreClient: vi.fn().mockImplementation(() => ({ send: agentcoreSend })),
-  RetrieveMemoryRecordsCommand: vi.fn().mockImplementation((i) => ({ __cmd: "Retrieve", ...i })),
-  ListMemoryRecordsCommand: vi.fn().mockImplementation((i) => ({ __cmd: "ListRecords", ...i })),
-  BatchDeleteMemoryRecordsCommand: vi.fn().mockImplementation((i) => ({ __cmd: "BatchDelete", ...i })),
-  CreateEventCommand: vi.fn().mockImplementation((i) => ({ __cmd: "CreateEvent", ...i })),
-  ListEventsCommand: vi.fn().mockImplementation((i) => ({ __cmd: "ListEvents", ...i })),
-}));
-vi.mock("@aws-sdk/client-bedrock-agentcore-control", () => ({
-  BedrockAgentCoreControlClient: vi.fn().mockImplementation(() => ({ send: controlSend })),
-  GetMemoryCommand: vi.fn().mockImplementation((i) => ({ __cmd: "GetMemory", ...i })),
-}));
+vi.mock("@aws-sdk/client-bedrock-agentcore", () => agentCoreModule(agentcoreSend));
+vi.mock("@aws-sdk/client-bedrock-agentcore-control", () => agentCoreControlModule(controlSend));
 
 const memory = await import("@/app/api/pipeline/memory/route");
 const strategy = await import("@/app/api/pipeline/memory/strategy/route");
@@ -38,24 +34,18 @@ const { parseMemoryDeleteIds } = await import("@/lib/server/memoryRequests");
 
 const MEMORY_ID = "deal_pipeline_test_knowledge-abc123";
 
-function req(method: string, body?: unknown) {
-  return new Request("http://x/api/pipeline/memory", {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-}
+const req = (method: string, body?: unknown) => jsonRequest(method, "http://x/api/pipeline/memory", body);
 
 beforeEach(() => {
   vi.clearAllMocks();
-  process.env.KNOWLEDGE_MEMORY_ID = MEMORY_ID;
-  requireActor.mockResolvedValue({ actor: "reviewer" });
-  requireAppAdmin.mockResolvedValue({ actor: "admin-1" });
+  env.set({ KNOWLEDGE_MEMORY_ID: MEMORY_ID });
+  requireActor.mockResolvedValue(admitted("reviewer"));
+  requireAppAdmin.mockResolvedValue(admitted("admin-1"));
 });
 
 describe("with no knowledge memory configured", () => {
   beforeEach(() => {
-    process.env.KNOWLEDGE_MEMORY_ID = "";
+    env.set({ KNOWLEDGE_MEMORY_ID: "" });
   });
 
   it("GET answers an empty list without calling AgentCore", async () => {
@@ -142,10 +132,7 @@ describe("POST /api/pipeline/memory", () => {
 
   it("requires a rule and honours the admin gate", async () => {
     expect((await memory.POST(req("POST", {}))).status).toBe(400);
-    const { NextResponse } = await import("next/server");
-    requireAppAdmin.mockResolvedValue({
-      error: NextResponse.json({ error: "not an admin" }, { status: 403 }),
-    });
+    requireAppAdmin.mockResolvedValue(refused(403, "not an admin"));
     expect((await memory.POST(req("POST", { rule: "x" }))).status).toBe(403);
     expect(agentcoreSend).not.toHaveBeenCalled();
   });
@@ -239,12 +226,12 @@ describe("memoryClient", () => {
   });
 
   it("chat events are no-ops without CHAT_MEMORY_ID and keyed on the actor with it", async () => {
-    process.env.CHAT_MEMORY_ID = "";
+    env.set({ CHAT_MEMORY_ID: "" });
     expect(await client.appendChatEvent("s1", "user", "hi", "sub-1")).toBe(false);
     expect(await client.listChatEvents("s1", "sub-1")).toEqual([]);
     expect(agentcoreSend).not.toHaveBeenCalled();
 
-    process.env.CHAT_MEMORY_ID = "chat-mem";
+    env.set({ CHAT_MEMORY_ID: "chat-mem" });
     agentcoreSend.mockResolvedValueOnce({ event: { eventId: "e1" } });
     expect(await client.appendChatEvent("s1", "assistant", "hello", "user@example.test")).toBe(true);
     expect(agentcoreSend.mock.calls[0][0]).toMatchObject({

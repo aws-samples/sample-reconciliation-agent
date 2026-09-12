@@ -7,13 +7,21 @@
  * invocation carrying the new id. The 400s matter because the two body shapes are exclusive and a
  * body that quietly picked one would hide a client bug.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
+import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 
-process.env.AWS_REGION = "us-east-1";
-process.env.PIPELINE_ASSETS_BUCKET = "test-assets";
-process.env.EMAILS_TABLE = "test-emails";
-process.env.PARSER_FUNCTION = "test-parser";
+import { dynamoDbModule, lambdaModule, s3Module } from "../helpers/awsMocks";
+import { scopedEnv } from "../helpers/env";
+import { createFakeTable } from "../helpers/fakeDdb";
+import { admitted, refused } from "../helpers/gates";
+import { jsonRequest, routeParams } from "../helpers/http";
+
+const env = scopedEnv({
+  AWS_REGION: "us-east-1",
+  PIPELINE_ASSETS_BUCKET: "test-assets",
+  EMAILS_TABLE: "test-emails",
+  PARSER_FUNCTION: "test-parser",
+});
+afterAll(() => env.restore());
 
 const ddbSend = vi.fn();
 const s3Send = vi.fn();
@@ -21,23 +29,9 @@ const lambdaSend = vi.fn();
 const requireActor = vi.fn();
 
 vi.mock("@/lib/api-auth", () => ({ requireActor }));
-vi.mock("@aws-sdk/client-dynamodb", () => ({
-  DynamoDBClient: vi.fn().mockImplementation(() => ({ send: ddbSend })),
-  GetItemCommand: vi.fn().mockImplementation((i) => ({ __cmd: "GetItem", ...i })),
-  PutItemCommand: vi.fn().mockImplementation((i) => ({ __cmd: "PutItem", ...i })),
-  ScanCommand: vi.fn().mockImplementation((i) => ({ __cmd: "Scan", ...i })),
-}));
-vi.mock("@aws-sdk/client-s3", () => ({
-  S3Client: vi.fn().mockImplementation(() => ({ send: s3Send })),
-  GetObjectCommand: vi.fn().mockImplementation((i) => ({ __cmd: "GetObject", ...i })),
-  PutObjectCommand: vi.fn().mockImplementation((i) => ({ __cmd: "PutObject", ...i })),
-  ListObjectsV2Command: vi.fn().mockImplementation((i) => ({ __cmd: "List", ...i })),
-  DeleteObjectCommand: vi.fn().mockImplementation((i) => ({ __cmd: "Delete", ...i })),
-}));
-vi.mock("@aws-sdk/client-lambda", () => ({
-  LambdaClient: vi.fn().mockImplementation(() => ({ send: lambdaSend })),
-  InvokeCommand: vi.fn().mockImplementation((i) => ({ __cmd: "Invoke", ...i })),
-}));
+vi.mock("@aws-sdk/client-dynamodb", () => dynamoDbModule(ddbSend));
+vi.mock("@aws-sdk/client-s3", () => s3Module(s3Send));
+vi.mock("@aws-sdk/client-lambda", () => lambdaModule(lambdaSend));
 
 const emails = await import("@/app/api/pipeline/emails/route");
 const emailById = await import("@/app/api/pipeline/emails/[id]/route");
@@ -46,71 +40,28 @@ const { parseCreateEmailBody, MAX_EMAIL_BODY_BYTES, MAX_EMAIL_HEADER_BYTES } = a
   "@/lib/pipeline/server/requests"
 );
 
-/** In-memory emails table behind the DynamoDB mock. */
-let table: Record<string, Record<string, unknown>>;
-/** Runs after a GetItem has been served — a concurrent writer between a route's read and its write. */
-let afterGet: (() => void) | null;
-
-interface FakePut {
-  __cmd: string;
-  Key?: never;
-  Item?: never;
-  ConditionExpression?: string;
-  ExpressionAttributeNames?: Record<string, string>;
-  ExpressionAttributeValues?: never;
-}
-
-/** The one condition the email store uses: refuse the put while the stored row is PARSING. */
-function conditionHolds(cmd: FakePut, current: Record<string, unknown> | undefined): boolean {
-  if (!cmd.ConditionExpression) return true;
-  expect(cmd.ConditionExpression).toBe("attribute_not_exists(#status) OR #status <> :parsing");
-  const attr = cmd.ExpressionAttributeNames!["#status"];
-  const parsing = unmarshall(cmd.ExpressionAttributeValues!)[":parsing"];
-  return current?.[attr] === undefined || current[attr] !== parsing;
-}
-
-function installTable() {
-  table = {};
-  afterGet = null;
-  ddbSend.mockImplementation(async (cmd: FakePut) => {
-    if (cmd.__cmd === "GetItem") {
-      const key = unmarshall(cmd.Key!).email_id as string;
-      const snapshot = table[key] ? marshall(table[key]) : undefined;
-      afterGet?.();
-      return { Item: snapshot };
-    }
-    if (cmd.__cmd === "PutItem") {
-      const item = unmarshall(cmd.Item!);
-      if (!conditionHolds(cmd, table[item.email_id as string])) {
-        throw Object.assign(new Error("The conditional request failed"), {
-          name: "ConditionalCheckFailedException",
-        });
-      }
-      table[item.email_id as string] = item;
-      return {};
-    }
-    if (cmd.__cmd === "Scan") return { Items: Object.values(table).map((i) => marshall(i)) };
-    throw new Error(`unexpected ${cmd.__cmd}`);
-  });
-}
+/**
+ * In-memory emails table behind the DynamoDB mock. The one condition the email store uses refuses the
+ * put while the stored row is PARSING; `emailsTable.afterGet` is the concurrent writer between a
+ * route's read and its write.
+ */
+const emailsTable = createFakeTable<Record<string, unknown>>({
+  keyAttr: "email_id",
+  conditionExpression: "attribute_not_exists(#status) OR #status <> :parsing",
+});
+const table = emailsTable.rows;
+ddbSend.mockImplementation(emailsTable.send);
 
 function post(body: unknown) {
-  return emails.POST(
-    new Request("http://x/api/pipeline/emails", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
-  );
+  return emails.POST(jsonRequest("POST", "http://x/api/pipeline/emails", body));
 }
-const params = (id: string) => ({ params: Promise.resolve({ id }) });
 
 beforeEach(() => {
   vi.clearAllMocks();
-  installTable();
+  emailsTable.reset();
   s3Send.mockResolvedValue({});
   lambdaSend.mockResolvedValue({ StatusCode: 202 });
-  requireActor.mockResolvedValue({ actor: "reviewer" });
+  requireActor.mockResolvedValue(admitted("reviewer"));
 });
 
 describe("parseCreateEmailBody", () => {
@@ -244,10 +195,7 @@ describe("POST /api/pipeline/emails", () => {
   });
 
   it("honours an authorization refusal", async () => {
-    const { NextResponse } = await import("next/server");
-    requireActor.mockResolvedValue({
-      error: NextResponse.json({ error: "no token" }, { status: 401 }),
-    });
+    requireActor.mockResolvedValue(refused(401, "no token"));
     expect((await post({ sample_id: "01-news-alert-northwind-addon-tlb" })).status).toBe(401);
   });
 });
@@ -259,9 +207,9 @@ describe("GET /api/pipeline/emails and /emails/[id]", () => {
     const list = await (await emails.GET(new Request("http://x/api/pipeline/emails"))).json();
     expect(list.map((e: { email_id: string }) => e.email_id)).toEqual(["em_b", "em_a"]);
 
-    const one = await emailById.GET(new Request("http://x/api/pipeline/emails/em_a"), params("em_a"));
+    const one = await emailById.GET(new Request("http://x/api/pipeline/emails/em_a"), routeParams({ id: "em_a" }));
     expect((await one.json()).subject).toBe("A");
-    const missing = await emailById.GET(new Request("http://x/api/pipeline/emails/em_z"), params("em_z"));
+    const missing = await emailById.GET(new Request("http://x/api/pipeline/emails/em_z"), routeParams({ id: "em_z" }));
     expect(missing.status).toBe(404);
   });
 });
@@ -277,7 +225,7 @@ describe("POST /api/pipeline/emails/[id]/reparse", () => {
     };
     const resp = await reparse.POST(
       new Request("http://x/api/pipeline/emails/em_a/reparse", { method: "POST" }),
-      params("em_a"),
+      routeParams({ id: "em_a" }),
     );
     expect(resp.status).toBe(202);
     expect(await resp.json()).toMatchObject({ status: "PARSING", error: null });
@@ -300,7 +248,7 @@ describe("POST /api/pipeline/emails/[id]/reparse", () => {
     };
     const resp = await reparse.POST(
       new Request("http://x/api/pipeline/emails/em_a/reparse", { method: "POST" }),
-      params("em_a"),
+      routeParams({ id: "em_a" }),
     );
     expect(resp.status).toBe(409);
     expect((await resp.json()).error).toMatch(/already being parsed/);
@@ -312,12 +260,12 @@ describe("POST /api/pipeline/emails/[id]/reparse", () => {
   it("409s when a concurrent reparse won the PARSING write between this one's read and write", async () => {
     // Two tabs both read PARSED; the other tab's put lands first. Ours must not start a second run.
     table.em_a = { email_id: "em_a", received_at: "2026-08-10T09:00:00Z", status: "PARSED", deal_id: "dl_1" };
-    afterGet = () => {
+    emailsTable.afterGet = () => {
       table.em_a = { ...table.em_a, status: "PARSING" };
     };
     const resp = await reparse.POST(
       new Request("http://x/api/pipeline/emails/em_a/reparse", { method: "POST" }),
-      params("em_a"),
+      routeParams({ id: "em_a" }),
     );
     expect(resp.status).toBe(409);
     expect(lambdaSend).not.toHaveBeenCalled();
@@ -327,7 +275,7 @@ describe("POST /api/pipeline/emails/[id]/reparse", () => {
   it("404s an unknown email without invoking anything", async () => {
     const resp = await reparse.POST(
       new Request("http://x/api/pipeline/emails/em_z/reparse", { method: "POST" }),
-      params("em_z"),
+      routeParams({ id: "em_z" }),
     );
     expect(resp.status).toBe(404);
     expect(lambdaSend).not.toHaveBeenCalled();

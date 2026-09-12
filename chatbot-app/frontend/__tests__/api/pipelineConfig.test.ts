@@ -7,10 +7,19 @@
  * GET also carries the console's default model id (`lib/console/settings.ts`) so the Config tab can
  * offer "Use console default"; that value is reported raw and never written by this route.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 
-process.env.AWS_REGION = "us-east-1";
-process.env.PIPELINE_AGENT_MODEL_PARAM = "/deal-pipeline-test/agent-model-id";
+import { ssmModule } from "../helpers/awsMocks";
+import { scopedEnv } from "../helpers/env";
+import { createFakeSsm, parameterNotFound } from "../helpers/fakeSsm";
+import { admitted, refused } from "../helpers/gates";
+import { jsonRequest } from "../helpers/http";
+
+const env = scopedEnv(["CONSOLE_SETTINGS_PREFIX", "CONSOLE_DEFAULT_MODEL_ID"], {
+  AWS_REGION: "us-east-1",
+  PIPELINE_AGENT_MODEL_PARAM: "/deal-pipeline-test/agent-model-id",
+});
+afterAll(() => env.restore());
 
 const ssmSend = vi.fn();
 const requireActor = vi.fn();
@@ -18,13 +27,7 @@ const requireAppAdmin = vi.fn();
 
 vi.mock("@/lib/api-auth", () => ({ requireActor }));
 vi.mock("@/lib/auth/app-admin", () => ({ requireAppAdmin }));
-vi.mock("@aws-sdk/client-ssm", () => ({
-  SSMClient: vi.fn().mockImplementation(() => ({ send: ssmSend })),
-  GetParameterCommand: vi.fn().mockImplementation((i) => ({ __cmd: "Get", ...i })),
-  GetParametersByPathCommand: vi.fn().mockImplementation((i) => ({ __cmd: "GetByPath", ...i })),
-  PutParameterCommand: vi.fn().mockImplementation((i) => ({ __cmd: "Put", ...i })),
-  DeleteParameterCommand: vi.fn().mockImplementation((i) => ({ __cmd: "Delete", ...i })),
-}));
+vi.mock("@aws-sdk/client-ssm", () => ssmModule(ssmSend));
 
 const { GET, PUT } = await import("@/app/api/pipeline/config/route");
 const { AGENT_MODEL_IDS } = await import("@/lib/server/agentModels");
@@ -36,32 +39,21 @@ function get() {
   return GET(new Request("http://x/api/pipeline/config"));
 }
 function put(body: unknown) {
-  return PUT(
-    new Request("http://x/api/pipeline/config", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
-  );
+  return PUT(jsonRequest("PUT", "http://x/api/pipeline/config", body));
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
-  requireActor.mockResolvedValue({ actor: "reviewer" });
-  requireAppAdmin.mockResolvedValue({ actor: "admin" });
+  requireActor.mockResolvedValue(admitted("reviewer"));
+  requireAppAdmin.mockResolvedValue(admitted("admin"));
   // The console layer is off unless a case turns it on; its cache must not carry between cases.
-  delete process.env.CONSOLE_SETTINGS_PREFIX;
-  delete process.env.CONSOLE_DEFAULT_MODEL_ID;
+  env.set({ CONSOLE_SETTINGS_PREFIX: undefined, CONSOLE_DEFAULT_MODEL_ID: undefined });
   invalidate();
-});
-afterEach(() => {
-  delete process.env.CONSOLE_SETTINGS_PREFIX;
-  delete process.env.CONSOLE_DEFAULT_MODEL_ID;
 });
 
 describe("GET /api/pipeline/config", () => {
   it("reports null when the parameter does not exist yet", async () => {
-    ssmSend.mockRejectedValue(Object.assign(new Error("nf"), { name: "ParameterNotFound" }));
+    ssmSend.mockRejectedValue(parameterNotFound());
     const body = await (await get()).json();
     expect(body).toEqual({ modelId: null, modelIds: AGENT_MODEL_IDS, consoleDefaultModelId: null });
     expect(ssmSend.mock.calls[0][0]).toMatchObject({
@@ -73,16 +65,11 @@ describe("GET /api/pipeline/config", () => {
   });
 
   it("reports the console default from its stored parameter when the layer is configured", async () => {
-    process.env.CONSOLE_SETTINGS_PREFIX = CONSOLE_PREFIX;
-    ssmSend.mockImplementation(async (cmd: { __cmd: string; Path?: string }) => {
-      if (cmd.__cmd === "Get") return { Parameter: { Value: "us.anthropic.claude-sonnet-5" } };
-      if (cmd.__cmd === "GetByPath" && cmd.Path === `${CONSOLE_PREFIX}/defaults`) {
-        return {
-          Parameters: [{ Name: `${CONSOLE_PREFIX}/defaults/model-id`, Value: "us.anthropic.claude-opus-5" }],
-        };
-      }
-      return { Parameters: [] };
-    });
+    env.set({ CONSOLE_SETTINGS_PREFIX: CONSOLE_PREFIX });
+    const fake = createFakeSsm();
+    fake.store.set("/deal-pipeline-test/agent-model-id", "us.anthropic.claude-sonnet-5");
+    fake.seed(`${CONSOLE_PREFIX}/defaults`, { "model-id": "us.anthropic.claude-opus-5" });
+    ssmSend.mockImplementation(fake.send);
     const body = await (await get()).json();
     // Reported raw beside the pipeline's own value; choosing it is still a PUT of the pipeline parameter.
     expect(body).toEqual({
@@ -93,8 +80,8 @@ describe("GET /api/pipeline/config", () => {
   });
 
   it("reports the console default from CONSOLE_DEFAULT_MODEL_ID when nothing is stored", async () => {
-    process.env.CONSOLE_DEFAULT_MODEL_ID = "some.other.model";
-    ssmSend.mockRejectedValue(Object.assign(new Error("nf"), { name: "ParameterNotFound" }));
+    env.set({ CONSOLE_DEFAULT_MODEL_ID: "some.other.model" });
+    ssmSend.mockRejectedValue(parameterNotFound());
     const body = await (await get()).json();
     // Not filtered by the allowlist: the UI compares it against `modelIds` and can say when it is not offered.
     expect(body.consoleDefaultModelId).toBe("some.other.model");
@@ -141,10 +128,7 @@ describe("PUT /api/pipeline/config", () => {
   });
 
   it("honours the admin gate", async () => {
-    const { NextResponse } = await import("next/server");
-    requireAppAdmin.mockResolvedValue({
-      error: NextResponse.json({ error: "not an admin" }, { status: 403 }),
-    });
+    requireAppAdmin.mockResolvedValue(refused(403, "not an admin"));
     expect((await put({ modelId: "us.anthropic.claude-opus-5" })).status).toBe(403);
     expect(ssmSend).not.toHaveBeenCalled();
   });

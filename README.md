@@ -478,7 +478,7 @@ terraform apply -var="policy_enforcement_mode=LOG_ONLY"
 pip install -r agent-blueprint/recon-agent/requirements.txt -r requirements-dev.txt
 export AWS_DEFAULT_REGION=us-east-1   # moto builds real boto3 clients; botocore needs a region
 ruff check .
-python -m pytest -q            # 1851 passed, 21 skipped, ~50s
+python -m pytest -q            # 1874 passed, 21 skipped, ~50s
 #                              # 11 of the skips are in tests/integration/ — 10 need
 #                              # RECON_GATEWAY_URL (+ dev-account creds), 1 also needs
 #                              # EMAIL_CONFIRMATION_TOKEN. 4 are in tests/skills/, one per
@@ -489,7 +489,7 @@ python -m pytest -q            # 1851 passed, 21 skipped, ~50s
 # Frontend (chatbot-app/frontend). `npm run build` is the gate that matters — it compiles
 # every route, catching breakage both vitest and tsc miss.
 cd chatbot-app/frontend && npm ci && npx tsc --noEmit && npx vitest run && npm run build
-#                          # 120 files, 1677 passed
+#                          # 124 files, 1711 passed
 
 # Terraform module tests (plan-only, mocked providers, no credentials). Both CIs run these.
 for m in deal-pipeline frontend-ecs lambda-package; do

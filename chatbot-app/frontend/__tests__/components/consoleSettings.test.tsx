@@ -13,6 +13,8 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { fakeResponse } from "../helpers/http";
+
 import type { ConsoleSettings } from "@/lib/console/types";
 import { resetViewerCache } from "@/lib/shell/viewer";
 
@@ -71,7 +73,7 @@ function me(over: Record<string, unknown> = {}) {
 }
 
 function serveMe(body: unknown) {
-  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, status: 200, statusText: "", json: async () => body }));
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(fakeResponse(200, body)));
 }
 
 /** The settings body: one of each source, so every chip variant is on screen. */
@@ -472,10 +474,7 @@ describe("the page", () => {
   });
 
   it("names the failure when the viewer cannot be loaded", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({ ok: false, status: 503, statusText: "", json: async () => ({ error: "AUTH_PROVIDER is unset" }) }),
-    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(fakeResponse(503, { error: "AUTH_PROVIDER is unset" })));
     render(<SettingsScreen tabParam="access" />);
     expect(await screen.findByRole("alert")).toHaveTextContent("AUTH_PROVIDER is unset");
   });

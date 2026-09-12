@@ -189,7 +189,7 @@ frontend:
     - cd chatbot-app/frontend
     - npm ci
     - npx tsc --noEmit
-    # The whole suite: 120 files, 1677 tests.
+    # The whole suite: 124 files, 1711 tests.
     - npx vitest run
     # The real gate — it compiles every route, catching breakage both the unit tests and tsc
     # miss. `npm run lint` is deliberately absent (ESLint is broken repo-wide), and

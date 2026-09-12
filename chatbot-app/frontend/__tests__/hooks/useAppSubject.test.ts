@@ -12,6 +12,8 @@
 import { renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { fakeResponse } from "../helpers/http";
+
 const authHeaders = vi.fn();
 vi.mock("@/lib/auth/client-token", () => ({
   authHeaders: () => authHeaders(),
@@ -37,19 +39,9 @@ const ME = {
 
 const UNKNOWN = { subject: "", groups: [], isAdmin: false };
 
-/** A fetch stub in the shape the store reads (`ok`, `status`, `statusText`, `json`). */
-function answer(body: unknown, status = 200) {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    statusText: "",
-    json: async () => body,
-  };
-}
-
 /** Stub `fetch` with one answer and return the mock, so a case can count calls. */
 function serve(body: unknown, status = 200) {
-  const fetchMock = vi.fn().mockResolvedValue(answer(body, status));
+  const fetchMock = vi.fn().mockResolvedValue(fakeResponse(status, body));
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
 }

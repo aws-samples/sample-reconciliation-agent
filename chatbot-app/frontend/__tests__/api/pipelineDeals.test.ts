@@ -13,13 +13,22 @@
  * when it does not hold. The race tests use `afterGet` to change the row between a route's read and
  * its write — the interleaving a second reviewer, a stale tab or the OMS Lambda produces.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
+import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
+import { unmarshall } from "@aws-sdk/util-dynamodb";
 
-process.env.AWS_REGION = "us-east-1";
-process.env.PIPELINE_ASSETS_BUCKET = "test-assets";
-process.env.DEALS_TABLE = "test-deals";
-process.env.OMS_UPLOAD_FUNCTION = "test-oms-upload";
+import { dynamoDbModule, lambdaModule, s3Module } from "../helpers/awsMocks";
+import { scopedEnv } from "../helpers/env";
+import { createFakeTable, type FakeDdbCommand } from "../helpers/fakeDdb";
+import { admitted, refused } from "../helpers/gates";
+import { jsonRequest, routeParams } from "../helpers/http";
+
+const env = scopedEnv({
+  AWS_REGION: "us-east-1",
+  PIPELINE_ASSETS_BUCKET: "test-assets",
+  DEALS_TABLE: "test-deals",
+  OMS_UPLOAD_FUNCTION: "test-oms-upload",
+});
+afterAll(() => env.restore());
 
 const ddbSend = vi.fn();
 const s3Send = vi.fn();
@@ -29,23 +38,9 @@ const requireAppAdmin = vi.fn();
 
 vi.mock("@/lib/api-auth", () => ({ requireActor }));
 vi.mock("@/lib/auth/app-admin", () => ({ requireAppAdmin }));
-vi.mock("@aws-sdk/client-dynamodb", () => ({
-  DynamoDBClient: vi.fn().mockImplementation(() => ({ send: ddbSend })),
-  GetItemCommand: vi.fn().mockImplementation((i) => ({ __cmd: "GetItem", ...i })),
-  PutItemCommand: vi.fn().mockImplementation((i) => ({ __cmd: "PutItem", ...i })),
-  ScanCommand: vi.fn().mockImplementation((i) => ({ __cmd: "Scan", ...i })),
-}));
-vi.mock("@aws-sdk/client-s3", () => ({
-  S3Client: vi.fn().mockImplementation(() => ({ send: s3Send })),
-  GetObjectCommand: vi.fn().mockImplementation((i) => ({ __cmd: "GetObject", ...i })),
-  PutObjectCommand: vi.fn().mockImplementation((i) => ({ __cmd: "PutObject", ...i })),
-  ListObjectsV2Command: vi.fn().mockImplementation((i) => ({ __cmd: "List", ...i })),
-  DeleteObjectCommand: vi.fn().mockImplementation((i) => ({ __cmd: "Delete", ...i })),
-}));
-vi.mock("@aws-sdk/client-lambda", () => ({
-  LambdaClient: vi.fn().mockImplementation(() => ({ send: lambdaSend })),
-  InvokeCommand: vi.fn().mockImplementation((i) => ({ __cmd: "Invoke", ...i })),
-}));
+vi.mock("@aws-sdk/client-dynamodb", () => dynamoDbModule(ddbSend));
+vi.mock("@aws-sdk/client-s3", () => s3Module(s3Send));
+vi.mock("@aws-sdk/client-lambda", () => lambdaModule(lambdaSend));
 
 const { emptyFields, toCsv } = await import("@/lib/pipeline/omsSchema");
 const deals = await import("@/app/api/pipeline/deals/route");
@@ -56,63 +51,20 @@ const reject = await import("@/app/api/pipeline/deals/[id]/reject/route");
 const { toUploadResult } = await import("@/lib/pipeline/server/dealStore");
 type DealRecord = import("@/lib/pipeline/types").DealRecord;
 
-/** In-memory deals table behind the DynamoDB mock. */
-let table: Record<string, DealRecord>;
-/** Runs after the n-th GetItem (1-based) has been served — a concurrent writer between read and write. */
-let afterGet: ((n: number) => void) | null;
-
-interface FakePut {
-  __cmd: string;
-  Key?: never;
-  Item?: never;
-  ConditionExpression?: string;
-  ExpressionAttributeNames?: Record<string, string>;
-  ExpressionAttributeValues?: never;
-}
-
-/** The one condition shape the deal store uses: `#status = :expected` against the stored row. */
-function conditionHolds(cmd: FakePut, current: DealRecord | undefined): boolean {
-  if (!cmd.ConditionExpression) return true;
-  expect(cmd.ConditionExpression).toBe("#status = :expected");
-  const attr = cmd.ExpressionAttributeNames!["#status"] as keyof DealRecord;
-  const expected = unmarshall(cmd.ExpressionAttributeValues!)[":expected"];
-  return current?.[attr] === expected;
-}
-
-function installTable() {
-  table = {};
-  afterGet = null;
-  let gets = 0;
-  ddbSend.mockImplementation(async (cmd: FakePut) => {
-    if (cmd.__cmd === "GetItem") {
-      const key = unmarshall(cmd.Key!).deal_id as string;
-      const snapshot = table[key] ? marshall(table[key], { removeUndefinedValues: true }) : undefined;
-      afterGet?.(++gets);
-      return { Item: snapshot };
-    }
-    if (cmd.__cmd === "PutItem") {
-      const item = unmarshall(cmd.Item!) as DealRecord;
-      if (!conditionHolds(cmd, table[item.deal_id])) {
-        throw Object.assign(new Error("The conditional request failed"), {
-          name: "ConditionalCheckFailedException",
-        });
-      }
-      table[item.deal_id] = item;
-      return {};
-    }
-    if (cmd.__cmd === "Scan") {
-      return { Items: Object.values(table).map((i) => marshall(i, { removeUndefinedValues: true })) };
-    }
-    throw new Error(`unexpected ${cmd.__cmd}`);
-  });
-}
+/**
+ * In-memory deals table behind the DynamoDB mock. The one condition shape the deal store uses is
+ * `#status = :expected` against the stored row; `dealsTable.afterGet` is the concurrent writer.
+ */
+const dealsTable = createFakeTable<DealRecord>({ keyAttr: "deal_id", conditionExpression: "#status = :expected" });
+const table = dealsTable.rows;
+ddbSend.mockImplementation(dealsTable.send);
 
 /** The `:expected` status each conditional PutItem so far was guarded on, in order. */
 function expectedStatuses(): string[] {
   return ddbSend.mock.calls
-    .map((c) => c[0] as FakePut)
+    .map((c) => c[0] as FakeDdbCommand)
     .filter((c) => c.__cmd === "PutItem")
-    .map((c) => unmarshall(c.ExpressionAttributeValues!)[":expected"] as string);
+    .map((c) => unmarshall(c.ExpressionAttributeValues! as never)[":expected"] as string);
 }
 
 /** A minimal valid STAGED deal — the required fields filled in the OMS formats. */
@@ -150,32 +102,14 @@ function stagedDeal(overrides: Partial<DealRecord> = {}): DealRecord {
   };
 }
 
-const params = (id: string) => ({ params: Promise.resolve({ id }) });
 function patch(id: string, body: unknown) {
-  return dealById.PATCH(
-    new Request(`http://x/api/pipeline/deals/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
-    params(id),
-  );
+  return dealById.PATCH(jsonRequest("PATCH", `http://x/api/pipeline/deals/${id}`, body), routeParams({ id }));
 }
 function approvePost(id: string) {
-  return approve.POST(
-    new Request(`http://x/api/pipeline/deals/${id}/approve`, { method: "POST" }),
-    params(id),
-  );
+  return approve.POST(jsonRequest("POST", `http://x/api/pipeline/deals/${id}/approve`), routeParams({ id }));
 }
 function rejectPost(id: string, body: unknown) {
-  return reject.POST(
-    new Request(`http://x/api/pipeline/deals/${id}/reject`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
-    params(id),
-  );
+  return reject.POST(jsonRequest("POST", `http://x/api/pipeline/deals/${id}/reject`, body), routeParams({ id }));
 }
 const lambdaPayload = (result: unknown) => ({
   Payload: new TextEncoder().encode(JSON.stringify(result)),
@@ -183,11 +117,11 @@ const lambdaPayload = (result: unknown) => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
-  installTable();
+  dealsTable.reset();
   table.dl_1 = stagedDeal();
   s3Send.mockResolvedValue({});
-  requireActor.mockResolvedValue({ actor: "reviewer" });
-  requireAppAdmin.mockResolvedValue({ actor: "admin-1" });
+  requireActor.mockResolvedValue(admitted("reviewer"));
+  requireAppAdmin.mockResolvedValue(admitted("admin-1"));
 });
 
 describe("GET /api/pipeline/deals", () => {
@@ -283,7 +217,7 @@ describe("PATCH /api/pipeline/deals/[id]", () => {
 
   it("409s when the deal moved on between the read and the write, and puts the CSV back in step with the row that won", async () => {
     // A second reviewer rejects the deal while this PATCH is between its GetItem and its PutItem.
-    afterGet = () => {
+    dealsTable.afterGet = () => {
       table.dl_1 = {
         ...table.dl_1,
         status: "REJECTED",
@@ -307,10 +241,7 @@ describe("PATCH /api/pipeline/deals/[id]", () => {
   it("404s an unknown deal and honours the admin gate", async () => {
     expect((await patch("dl_9", { fields: { notes: "x" } })).status).toBe(404);
     ddbSend.mockClear();
-    const { NextResponse } = await import("next/server");
-    requireAppAdmin.mockResolvedValue({
-      error: NextResponse.json({ error: "not an admin" }, { status: 403 }),
-    });
+    requireAppAdmin.mockResolvedValue(refused(403, "not an admin"));
     expect((await patch("dl_1", { fields: { notes: "x" } })).status).toBe(403);
     expect(ddbSend).not.toHaveBeenCalled();
   });
@@ -318,7 +249,7 @@ describe("PATCH /api/pipeline/deals/[id]", () => {
 
 describe("GET /api/pipeline/deals/[id]/csv", () => {
   it("serves the current fields as a CSV download", async () => {
-    const resp = await csv.GET(new Request("http://x/api/pipeline/deals/dl_1/csv"), params("dl_1"));
+    const resp = await csv.GET(new Request("http://x/api/pipeline/deals/dl_1/csv"), routeParams({ id: "dl_1" }));
     expect(resp.status).toBe(200);
     expect(resp.headers.get("Content-Type")).toContain("text/csv");
     expect(resp.headers.get("Content-Disposition")).toContain('dl_1.csv"');
@@ -374,7 +305,7 @@ describe("POST /api/pipeline/deals/[id]/approve", () => {
   });
 
   it("409s and never invokes the OMS when another decision lands between the read and the APPROVED write", async () => {
-    afterGet = () => {
+    dealsTable.afterGet = () => {
       table.dl_1 = { ...table.dl_1, status: "REJECTED" };
     };
     lambdaSend.mockResolvedValue(lambdaPayload(rejection));
@@ -391,7 +322,7 @@ describe("POST /api/pipeline/deals/[id]/approve", () => {
     lambdaSend.mockResolvedValue(
       lambdaPayload({ accepted: true, errors: [], staging_key: "oms-staging/dl_1.csv" }),
     );
-    afterGet = (n) => {
+    dealsTable.afterGet = (n) => {
       if (n !== 2) return;
       table.dl_1 = {
         ...table.dl_1,
@@ -465,10 +396,7 @@ describe("POST /api/pipeline/deals/[id]/approve", () => {
   });
 
   it("honours the admin gate", async () => {
-    const { NextResponse } = await import("next/server");
-    requireAppAdmin.mockResolvedValue({
-      error: NextResponse.json({ error: "not an admin" }, { status: 403 }),
-    });
+    requireAppAdmin.mockResolvedValue(refused(403, "not an admin"));
     expect((await approvePost("dl_1")).status).toBe(403);
     expect(lambdaSend).not.toHaveBeenCalled();
   });
@@ -507,7 +435,7 @@ describe("POST /api/pipeline/deals/[id]/reject", () => {
   it("409s instead of overwriting an upload that completed between the read and the write", async () => {
     // Reject lands inside the approve window: the file is already in oms-staging, so a rejection
     // recorded now would say the opposite of what happened.
-    afterGet = () => {
+    dealsTable.afterGet = () => {
       table.dl_1 = { ...table.dl_1, status: "UPLOADED" };
     };
     const resp = await rejectPost("dl_1", { reason: "too late" });

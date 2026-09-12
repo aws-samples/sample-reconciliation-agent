@@ -10,6 +10,8 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { fakeResponse } from "../helpers/http";
+
 import { resetViewerCache } from "@/lib/shell/viewer";
 
 let pathname = "/recon/dashboard";
@@ -51,7 +53,7 @@ function me(over: Record<string, unknown> = {}) {
 }
 
 function serveMe(body: unknown) {
-  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, status: 200, statusText: "", json: async () => body }));
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(fakeResponse(200, body)));
 }
 
 const storage = window.localStorage as unknown as {
