@@ -6,8 +6,10 @@ escalated to the Tier-2 agent. Opening a case is idempotent, so a redelivered st
 no-op rather than a duplicate.
 """
 
+import logging
 import os
 
+import boto3
 from boto3.dynamodb.types import TypeDeserializer
 
 from backend.recon_core.cases import CaseStore
@@ -20,6 +22,8 @@ from backend.tier1.engine import ESCALATION_TIER1_DISABLED, reconcile
 # The deterministic rule set, one entry per domain. Production loads this from the environment or
 # SSM; the inline default is what keeps Tier-1 deterministic when nothing has been configured.
 _RULES = {"cash": {"match_attr": "amount", "tolerance": "0.05", "category": "amount-match"}}
+
+logger = logging.getLogger(__name__)
 
 _DESER = TypeDeserializer()
 
@@ -99,7 +103,8 @@ def handle(event, _context):
         table=os.environ.get("CASES_TABLE", "recon-cases"),
         audit=os.environ.get("AUDIT_TABLE", "recon-audit"),
     )
-    agent_arn = os.environ.get("AGENT_RUNTIME_ARN")
+    # No AGENT_RUNTIME_ARN read here any more: this consumer does not dispatch, so it has no use for
+    # the runtime's identity. The map run owns that.
     # Read the deterministic-tier toggle once for the whole batch rather than per record.
     deterministic_on = tier1_enabled()
     results = []
@@ -171,13 +176,18 @@ def handle(event, _context):
                 break_type = classify_break(break_record(item).fields)
                 if break_type:
                     item.attributes["tier1_break_type"] = break_type
+            # Open the case PENDING. Dispatch is not this function's job: the Tier-2 map run
+            # (infra/modules/tier2-dispatch) collects PENDING cases and investigates them
+            # MaxConcurrency at a time. This consumer only NUDGES it, once per batch, after the loop.
+            #
+            # Dispatching from here could not be bounded. This consumer runs one invocation per stream
+            # shard, and shard count on a PAY_PER_REQUEST table is exactly what a large intake batch
+            # inflates, so a fan-out from here scales with the burst it needs to absorb. Moving the
+            # decision to a single admission point is what makes a ceiling possible at all.
+            #
+            # It also makes PENDING mean something. Until now a case flipped to IN_PROGRESS before any
+            # work started, so the queue could not distinguish "waiting" from "the model is thinking".
             created = cases.open(item, status=CaseStatus.PENDING, tier=2)
-            if created and agent_arn:
-                # Hand off to Tier-2: advance the case state, then dispatch the agent runtime
-                # asynchronously so this shard is not held open for the investigation.
-                from backend.tier1.invoke_agent import invoke_recon_agent
-
-                invoke_recon_agent(agent_arn=agent_arn, item=item, cases=cases)
             results.append(
                 {
                     "item_id": item.item_id,
@@ -186,4 +196,38 @@ def handle(event, _context):
                     "reason": reason,
                 }
             )
+    # Nudge the Tier-2 runner so a submission does not wait for the next scheduled tick. Once per
+    # BATCH, not per record: a burst is thousands of records across many shards, and one start per
+    # escalation would be thousands of StartExecution calls to accomplish exactly what one does.
+    #
+    # This is not a return to dispatching from the stream, and the distinction is the whole reason it
+    # is safe. What starts here is the BOUNDED runner, not an investigation: the run's own
+    # single-flight guard makes every start beyond the first a no-op while a run is in flight, and its
+    # MaxConcurrency is still the only thing deciding how many agents run at once. A thousand nudges
+    # therefore produce one working run, which is precisely the property a fan-out from here lacked.
+    if any(r.get("escalated") for r in results):
+        _nudge_tier2()
     return {"results": results}
+
+
+def _nudge_tier2() -> None:
+    """Start a Tier-2 map run now, so an escalation is not waiting on the schedule.
+
+    Never raises. The scheduled rule is the backstop: if this call fails the case is still PENDING and
+    the next tick collects it, so a nudge failure costs latency rather than the case. Raising would
+    fail the whole stream batch — including the auto-cleared items in it — to save something the
+    schedule already covers.
+
+    An ``ExecutionAlreadyExists`` or a throttle is expected under a burst rather than exceptional, so
+    it is logged at INFO: the run that already exists is the one that will do the work.
+
+    :returns: None
+    """
+    arn = os.environ.get("TIER2_STATE_MACHINE_ARN", "")
+    if not arn:
+        # Unwired: fall back to the schedule silently rather than logging per batch.
+        return
+    try:
+        boto3.client("stepfunctions").start_execution(stateMachineArn=arn)
+    except Exception as exc:  # noqa: BLE001 - see the docstring: the schedule is the backstop
+        logger.info("Tier-2 nudge failed (%s); the scheduled run will collect these cases", exc)

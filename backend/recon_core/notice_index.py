@@ -32,7 +32,6 @@ The original value is kept in a non-key attribute so a reader never has to inver
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Iterator
 
-from backend.recon_core.notices import INDEX_KEY_FIELDS
 
 # The character that separates an encoded value from the notice id inside the sort key.
 #
@@ -203,22 +202,20 @@ def flatten_sections(sections: Any) -> dict[str, Any]:
 def indexable_fields(row: Any) -> dict[str, Any]:
     """Everything about a notice that should be searchable.
 
-    The embedded extraction, plus the promoted index-key attributes layered ON TOP. The attribute wins,
-    and that precedence is the whole reason this function exists rather than :func:`flatten_sections`
-    alone: those three attributes hold a NORMALISED value the raw extraction does not have. The mapper
-    resolves ``borrower`` to ``counterparty``, ``value_date`` to ``notice_date``, and a missing obligor
-    to ``"unknown"``. Indexing only the sections would leave a notice findable under ``borrower`` and
-    not under ``counterparty``, and an unattributable one findable under neither.
+    Exactly its embedded extraction, because that is now the only place extracted content lives. This
+    used to layer three promoted attributes on top -- `counterparty`, `notice_date`, `reference` -- which
+    held values the raw extraction did not: the mapper resolved `borrower`, folded `value_date` into
+    `notice_date`, and defaulted a missing obligor to `"unknown"`. Those attributes and that normalisation
+    are gone with the GSIs that required them, so there is nothing left to layer.
 
-    :param row: a notice as a mapping — a stored DynamoDB item or a dumped model.
+    Kept as a named function rather than collapsed into :func:`flatten_sections` at every call site: it is
+    the ONE place that decides what gets indexed, and both writers (the hook and the backfill) go through
+    it, so they cannot drift into indexing different things.
+
+    :param row: a notice as a mapping -- a stored DynamoDB item or a dumped model.
     :returns: field name to value, ready for :meth:`NoticeSearchIndex.reindex`.
     """
-    out = flatten_sections(row.get("idp_sections"))
-    for name in INDEX_KEY_FIELDS:
-        value = row.get(name)
-        if value is not None:
-            out[name] = value
-    return out
+    return flatten_sections(row.get("idp_sections"))
 
 
 # BatchWriteItem's hard ceiling on requests per call.

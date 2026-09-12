@@ -248,7 +248,9 @@ def test_the_stored_notice_carries_the_extraction_and_the_run_id() -> None:
 
     notice = NoticeStore(table_name="recon-notices").get(notice_id="idp-doc-1")
     assert notice.notice_class == "Notice"
-    assert notice.counterparty == "CINDERMOOR LOGISTICS HOLDINGS INC."
+    assert (
+        notice.idp_sections[0]["fields"].get("counterparty") == "CINDERMOOR LOGISTICS HOLDINGS INC."
+    )
     assert notice.idp_execution_arn == "run-A"
 
 

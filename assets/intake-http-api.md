@@ -177,7 +177,7 @@ Three fields change what the platform does. The rest is passthrough or a label.
 `_RULES` in `backend/tier1/handler.py:22`, a single entry: `cash` → match on `amount`, tolerance
 `0.05`, auto-clear category `amount-match`. `reconcile()` does `rules.get(item.domain)`, so any other
 value returns the `no_rule` escalation immediately — no comparison is attempted, the item opens
-`PENDING` and goes straight to the agent. This is why the domain is `cash` and not a business label
+`PENDING` and waits for the next Tier-2 map run — a scheduled poll, so up to its interval. This is why the domain is `cash` and not a business label
 like `unapplied-cash`: the latter is accepted, written, and silently skips the deterministic tier.
 Change it only alongside a new `_RULES` entry.
 
@@ -261,7 +261,7 @@ existed", not "nothing was accepted".
 The write lands in `recon-dev-items`, the platform's **only stream-enabled table**. The Tier-1 Lambda
 consumes that stream (`LATEST`, batch 10, `bisect_batch_on_function_error`, 3 retries, SQS DLQ on
 failure), auto-clears an unambiguous match against the mocked GL, and otherwise escalates by
-async-invoking the agent worker. See [case-lifecycle.md](case-lifecycle.md).
+opening a `PENDING` case for the Tier-2 map run to claim — the stream consumer dispatches nothing. See [case-lifecycle.md](case-lifecycle.md).
 
 ## `GET /skills`
 
@@ -400,16 +400,16 @@ Worth flagging beyond intake, because it is the same failure class as the missin
 `bedrock-agent-runtime` endpoint that [private-vpc-deployment.md](private-vpc-deployment.md) warns
 about: **`lambda` is not in `_private_interface_endpoints`**, and four in-VPC callers invoke Lambdas.
 
-| Caller                 | Invokes                                                           |
-| ---------------------- | ----------------------------------------------------------------- |
-| Frontend BFF (Fargate) | `recon-dev-intake` — the queue's "Create New" submission          |
-| Frontend BFF (Fargate) | the case-retry invoke (fire-and-forget)                           |
-| Tier-1 Lambda          | `GL_QUERY_FUNCTION` — the GL lookup (`backend/tier1/gl_match.py`) |
-| Tier-1 Lambda          | the agent-worker escalation (`backend/tier1/invoke_agent.py`)     |
+| Caller                 | Invokes                                                                                                             |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Frontend BFF (Fargate) | `recon-dev-intake` — the queue's "Create New" submission                                                            |
+| Frontend BFF (Fargate) | the case-retry invoke (fire-and-forget)                                                                             |
+| Tier-1 Lambda          | `GL_QUERY_FUNCTION` — the GL lookup (`backend/tier1/gl_match.py`)                                                   |
+| Tier-1 Lambda          | the agent-worker retry from the console (`backend/tier1/invoke_agent.py`); the Tier-1 consumer no longer invokes it |
 
 All four work today only because `private_vpc = true` leaves the NAT gateway in place. Removing the
 NAT — the deliberate follow-up step in that page's "Enabling it" — takes manual submissions, the GL
-lookup and every Tier-2 escalation with it, and the symptom is a hang and a timeout rather than an
+lookup with it, and the symptom is a hang and a timeout rather than an
 error naming the cause. The private REST API does not help here — it is an ingress path, and these are
 outbound calls. Add the `lambda` endpoint in the same change that removes the NAT.
 

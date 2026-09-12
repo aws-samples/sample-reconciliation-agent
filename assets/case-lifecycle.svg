@@ -135,25 +135,27 @@
   <rect x="236" y="300" width="768" height="46" rx="6" fill="#eef6ff" stroke="#147eba" stroke-width="1.5" />
   <text x="620" y="317" class="tb">escalate to Tier-2</text>
   <text x="620" y="330" class="t">stamp tier1_escalation_reason + tier1_break_type &#183; cases.open(PENDING, tier 2)</text>
-  <text x="620" y="342" class="t">then transition PENDING &#8594; IN_PROGRESS under a ConditionExpression — the idempotency point</text>
+  <text x="620" y="342" class="t">and STOP — this consumer dispatches nothing; the case waits in PENDING</text>
 
   <path class="arrow" d="M620,346 L620,382" />
 
   <!-- ============================ BAND 3 · DISPATCH ============================ -->
   <rect x="40" y="384" width="1160" height="104" rx="8" fill="none" stroke="#d5dbdb" stroke-width="1.5" />
-  <text x="56" y="404" class="band-label">3 · ASYNC DISPATCH (invoke_agent.py &#8594; agent_worker.py)</text>
+  <text x="56" y="404" class="band-label">3 · TIER-2 MAP RUN (Step Functions, scheduled &#183; modules/tier2-dispatch)</text>
 
   <rect x="64" y="416" width="170" height="56" rx="6" fill="#f7f8fa" stroke="#d5dbdb" />
-  <text x="149" y="436" class="mono">lambda:Invoke</text>
-  <text x="149" y="450" class="t">InvocationType=Event</text>
-  <text x="149" y="463" class="t">the shard is never held</text>
+  <text x="149" y="433" class="mono">Collect &#183; ClaimCase</text>
+  <text x="149" y="446" class="t">PENDING off the GSI &#8594; S3;</text>
+  <text x="149" y="458" class="t">claim = PENDING &#8594; IN_PROGRESS,</text>
+  <text x="149" y="469" class="t">the idempotency point</text>
 
   <path class="arrow" d="M234,444 L252,444" />
 
   <rect x="256" y="416" width="176" height="56" rx="6" fill="#f7f8fa" stroke="#d5dbdb" />
-  <text x="344" y="436" class="mono">_resolve_backend()</text>
-  <text x="344" y="450" class="t">SSM param — an operator</text>
-  <text x="344" y="463" class="t">switches with no redeploy</text>
+  <text x="344" y="433" class="mono">Map &#183; MaxConcurrency</text>
+  <text x="344" y="446" class="t">the Bedrock token budget;</text>
+  <text x="344" y="458" class="t">backend resolved ONCE per run,</text>
+  <text x="344" y="469" class="t">so a run cannot straddle a switch</text>
 
   <path class="arrow" d="M432,444 L450,444" />
 
@@ -162,7 +164,7 @@
   <!-- Switch 1 — WHICH implementation. The only choice an operator makes here: harness OR runtime. -->
   <rect x="458" y="421" width="118" height="46" rx="4" fill="#f7f8fa" stroke="#d5dbdb" />
   <text x="517" y="437" class="tb">harness</text>
-  <text x="517" y="451" class="t">managed AgentCore</text>
+  <text x="517" y="451" class="t">blocking worker, capped</text>
 
   <!-- Switch 2 — HOW the runtime is reached. Nested inside the runtime backend on purpose: it is
        not a third peer option, and both rows below reach the same container. -->
@@ -171,10 +173,10 @@
   <text x="612" y="454" class="t">container</text>
 
   <rect x="640" y="424" width="336" height="18" rx="3" fill="#ffffff" stroke="#147eba" />
-  <text x="648" y="436" class="t" style="text-anchor: start">ingress (live here) &#183; SigV4 POST &#183; <tspan class="mono">use_ingress_gateway = true</tspan></text>
+  <text x="648" y="436" class="t" style="text-anchor: start">dispatcher &#183; <tspan class="mono">waitForTaskToken</tspan> &#183; returns in ~1s</text>
 
   <rect x="640" y="445" width="336" height="18" rx="3" fill="#ffffff" stroke="#d5dbdb" />
-  <text x="648" y="457" class="t" style="text-anchor: start">direct &#183; InvokeAgentRuntime &#183; <tspan class="mono">= false</tspan>, or the auto-fallback</text>
+  <text x="648" y="457" class="t" style="text-anchor: start">agent backgrounds it, then <tspan class="mono">SendTaskSuccess</tspan></text>
 
   <path class="arrow-red" d="M988,444 L1004,444" />
 

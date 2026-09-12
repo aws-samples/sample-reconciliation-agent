@@ -236,6 +236,24 @@ resource "aws_iam_role_policy" "agent" {
         Resource = [var.cases_table_arn, "${var.cases_table_arn}/index/*", var.audit_table_arn]
       },
       {
+        # Signal completion of a backgrounded investigation to the Step Functions execution that is
+        # paused on its task token. Resource "*" is not laxity: a task token is an opaque, short-lived
+        # credential and is not addressable by ARN, so these three actions cannot be scoped further.
+        # What bounds them is that a token is single-use and only ever handed to the container that
+        # was asked to do the work.
+        #
+        # The PLATFORM calls these, never the model — they are not gateway tools. Cedar denies the
+        # agent role the status-transition tool for the same reason: a run must not be able to declare
+        # its own outcome.
+        Effect = "Allow"
+        Action = [
+          "states:SendTaskSuccess",
+          "states:SendTaskFailure",
+          "states:SendTaskHeartbeat",
+        ]
+        Resource = "*"
+      },
+      {
         Effect   = "Allow"
         Action   = ["bedrock:Retrieve", "bedrock:RetrieveAndGenerate"]
         Resource = "*"
