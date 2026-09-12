@@ -214,27 +214,19 @@ terraform:validate:
     # off 6.57.0, which corrupts request bodies under parallel refresh. Do not relax it.
     - terraform init -backend=false -input=false
     - terraform validate
-    # The standalone deal-pipeline root (local state, no backend block) is a second root module and
-    # validates on its own; the recon root composes the same module count-gated, so a break that
-    # only shows with the module instantiated would otherwise slip past.
-    - cd "$CI_PROJECT_DIR/infra/environments/deal-pipeline"
-    - terraform init -backend=false -input=false
-    - terraform validate
     # Module tests, all plan-only under mocked providers (no credentials, nothing created). Each
     # module pins its providers in a versions.tf, which is what lets `init` here resolve the same
-    # majors the roots do. The mock providers still need the binaries for their schemas.
-    - cd "$CI_PROJECT_DIR/infra/modules/console-settings"
-    - terraform init -backend=false -input=false
-    - terraform test
-    - cd "$CI_PROJECT_DIR/infra/modules/deal-pipeline"
-    - terraform init -backend=false -input=false
-    - terraform test
-    - cd "$CI_PROJECT_DIR/infra/modules/frontend-ecs"
-    - terraform init -backend=false -input=false
-    - terraform test
-    - cd "$CI_PROJECT_DIR/infra/modules/lambda-package"
-    - terraform init -backend=false -input=false
-    - terraform test
+    # majors the root does. The mock providers still need the binaries for their schemas.
+    #
+    # Self-discovering: every module with a tests/ directory runs, so a new suite needs no edit here
+    # or in .github/workflows/ci.yml (which runs the same loop). The deal-pipeline module is only
+    # count-gated in the recon root, so its own suite is what instantiates it in CI.
+    - |
+      for tests in "$CI_PROJECT_DIR"/infra/modules/*/tests; do
+        module="$(dirname "$tests")"
+        echo "== ${module#"$CI_PROJECT_DIR/"}"
+        (cd "$module" && terraform init -backend=false -input=false && terraform test) || exit 1
+      done
 
 secret-scan:
   stage: verify
@@ -573,6 +565,16 @@ terraform:plan:
         echo "      proceed; approving means running terraform:apply:allow-destroy by hand."
         printf '%s\n' "$destroyed" | sed 's/^/  - DESTROY: /'
       fi
+      # The apply job refuses these too (its guard explains why): memories, strategies and S3 seed
+      # objects planned for REPLACEMENT.
+      irreplaceable="$(terraform show -json recon.tfplan \
+        | jq -r '[.resource_changes[]? | select((.change.actions | index("delete")) and (.change.actions | index("create"))) | select(.type == "aws_bedrockagentcore_memory" or .type == "aws_bedrockagentcore_memory_strategy" or .type == "aws_s3_object") | .address] | .[]')"
+      irreplaceable_count="$(printf '%s' "$irreplaceable" | grep -c . || true)"
+      if [ "$irreplaceable_count" -gt 0 ]; then
+        echo "NOTE: this plan REPLACES $irreplaceable_count memory / strategy / S3 seed object(s), whose"
+        echo "      contents Terraform cannot restore. terraform:apply will refuse to proceed."
+        printf '%s\n' "$irreplaceable" | sed 's/^/  ~ REPLACE: /'
+      fi
   artifacts:
     # ONLY the rendered text, never recon.tfplan. A binary plan file stores every variable
     # value in the clear, including the ones declared `sensitive = true` — so archiving it
@@ -650,6 +652,32 @@ terraform:plan:
       echo "Plan: $destroy_count resource(s) destroyed, $replace_count replaced."
       if [ "$replace_count" -gt 0 ]; then
         printf '%s\n' "$replaced" | sed 's/^/  ~ replace: /'
+      fi
+      # ...EXCEPT for the resource types whose contents Terraform cannot put back. An AgentCore
+      # Memory or strategy holds records the service consolidated (recon's analyst lessons live in
+      # one); an S3 seed object may hold an analyst's UI edit (a create-only seed). Replacing either
+      # is delete+create and the contents are gone. Nothing in an ordinary apply replaces them: a
+      # planned replace means a `moved` block that missed or a changed name, key or bucket (see
+      # infra/README.md, "Plan checklist"), so it is refused exactly like a pure delete.
+      irreplaceable="$(terraform show -json apply.tfplan \
+        | jq -r '[.resource_changes[]? | select((.change.actions | index("delete")) and (.change.actions | index("create"))) | select(.type == "aws_bedrockagentcore_memory" or .type == "aws_bedrockagentcore_memory_strategy" or .type == "aws_s3_object") | .address] | .[]')"
+      irreplaceable_count="$(printf '%s' "$irreplaceable" | grep -c . || true)"
+      if [ "$irreplaceable_count" -gt 0 ]; then
+        printf '%s\n' "$irreplaceable" | sed 's/^/  ~ REPLACE, contents not recoverable: /'
+        if [ "${ALLOW_DESTROY:-no}" != "yes" ]; then
+          echo "" >&2
+          echo "ERROR: this plan REPLACES $irreplaceable_count AgentCore Memory, memory strategy or S3 seed" >&2
+          echo "       object(s), and nothing has approved that. Refusing to apply." >&2
+          echo "" >&2
+          echo "       A replace is delete+create: the memory's stored records (the recon lessons) or" >&2
+          echo "       the object's live content (an analyst's edit) would be lost. Expected cause: a" >&2
+          echo "       moved block missing or wrong after a refactor, or a changed name, key or bucket." >&2
+          echo "       Read infra/README.md, 'Plan checklist', and terraform:plan's recon.plan.txt." >&2
+          echo "       If the replacements above are intended, run the manual" >&2
+          echo "       'terraform:apply:allow-destroy' job in this same pipeline." >&2
+          exit 1
+        fi
+        echo "ALLOW_DESTROY=yes — the replacements above were approved by running this job."
       fi
       if [ "$destroy_count" -gt 0 ]; then
         printf '%s\n' "$destroyed" | sed 's/^/  - DESTROY: /'

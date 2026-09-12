@@ -54,7 +54,9 @@ resource "aws_iam_role_policy" "actions" {
   role = aws_iam_role.actions.id
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    # concat(): the six statements every deployment has, in the order they have always rendered,
+    # then two per additional seed bucket. With no additional bucket the JSON is unchanged.
+    Statement = concat([
       {
         Effect   = "Allow"
         Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
@@ -113,7 +115,22 @@ resource "aws_iam_role_policy" "actions" {
         Action   = ["cognito-idp:UpdateUserPoolClient"]
         Resource = var.user_pool_arn
       },
-    ]
+      ], flatten([
+        # Seed reconciliation for each additional bucket (the deal pipeline's): the same two
+        # statements as above, same action-name caveat.
+        for arn in var.additional_assets_bucket_arns : [
+          {
+            Effect   = "Allow"
+            Action   = ["s3:GetEncryptionConfiguration"]
+            Resource = arn
+          },
+          {
+            Effect   = "Allow"
+            Action   = ["s3:GetObject", "s3:PutObject"]
+            Resource = "${arn}/*"
+          },
+        ]
+    ]))
   })
 }
 

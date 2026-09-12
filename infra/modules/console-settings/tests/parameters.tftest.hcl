@@ -107,8 +107,7 @@ run "pipeline_disabled_is_stored_as_the_literal_false" {
 run "blank_seeds_are_skipped_not_written_as_placeholders" {
   command = plan
 
-  # The standalone deal-pipeline root's shape: recon is another root's, and the pipeline access
-  # group is deliberately open.
+  # A pipeline-only shape: no recon group named, and the pipeline access group deliberately open.
   variables {
     recon_access_group    = ""
     recon_admin_group     = "   "

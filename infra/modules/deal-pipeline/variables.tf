@@ -8,7 +8,9 @@ variable "agent_model_id" {
     Bedrock model (or cross-region inference-profile) id the parsing agent invokes. This is only
     the SEED of the /<name_prefix>/agent-model-id SSM parameter: the Config tab overwrites the
     parameter at runtime and the parser reads it per invocation, so changing this after the first
-    apply does nothing (the parameter carries ignore_changes on value).
+    apply does nothing (the parameter carries ignore_changes on value). It is also what the
+    console's assistant chat invokes directly, with no runtime override (ASSISTANT_MODEL_ID in the
+    console_environment output).
   EOT
   type        = string
   default     = "us.anthropic.claude-sonnet-5"
@@ -26,7 +28,7 @@ variable "memory_model_id" {
 }
 
 variable "log_retention_days" {
-  description = "CloudWatch Logs retention for both Lambda log groups."
+  description = "CloudWatch Logs retention for both Lambda log groups (created through modules/lambda-logs)."
   type        = number
   default     = 14
 }

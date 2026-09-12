@@ -21,20 +21,20 @@ output "skill_proposals_table" {
 
 output "knowledge_memory_id" {
   description = "AgentCore Memory holding the edge_cases strategy (parser recall, assistant save_memory, Memory Manager)."
-  value       = aws_bedrockagentcore_memory.knowledge.id
+  value       = module.knowledge_memory.memory_id
 }
 
 output "knowledge_memory_arn" {
-  value = aws_bedrockagentcore_memory.knowledge.arn
+  value = module.knowledge_memory.memory_arn
 }
 
 output "chat_memory_id" {
   description = "AgentCore Memory the assistant writes chat turns to (events only, 7-day expiry)."
-  value       = aws_bedrockagentcore_memory.chat.id
+  value       = module.chat_memory.memory_id
 }
 
 output "chat_memory_arn" {
-  value = aws_bedrockagentcore_memory.chat.arn
+  value = module.chat_memory.memory_arn
 }
 
 output "parser_function_name" {
@@ -85,4 +85,22 @@ output "region" {
 
 output "account_id" {
   value = local.account_id
+}
+
+# The console wiring (console.tf), for modules/frontend-ecs's app_wiring input. The recon root passes
+# both as app_wiring.pipeline; a developer's laptop gets the same values through that root's
+# frontend_env_local output, which reads them back off the rendered task definition.
+output "console_environment" {
+  description = "Environment the console container needs for the pipeline BFF, as { name, value } entries: PIPELINE_ASSETS_BUCKET, PIPELINE_AGENT_MODEL_PARAM, PIPELINE_SKILLS_PREFIX, EMAILS_TABLE, DEALS_TABLE, SKILL_PROPOSALS_TABLE, KNOWLEDGE_MEMORY_ID, CHAT_MEMORY_ID, PARSER_FUNCTION, OMS_UPLOAD_FUNCTION, ASSISTANT_MODEL_ID, PARSER_PROMPT_KEY, PIPELINE_SAMPLES_PREFIX."
+  value       = local.console_environment
+}
+
+output "console_task_statements" {
+  description = "IAM statements the console task role needs to reach this module's resources with exactly the verbs the pipeline BFF issues, one jsonencode()d statement per entry (statements differ in shape, so no single HCL type holds them; frontend-ecs decodes them into its policy unchanged)."
+  value       = [for s in local.console_task_statements : jsonencode(s)]
+}
+
+output "editable_seeds" {
+  description = "The create-only seeds (every skills/<name>/SKILL.md and the parser prompt) as bucket key => { path = file to read, source = repo-relative label }, for the recon root's aws_lambda_invocation.pipeline_seed_push. Derived from the same locals as the seed modules, so the two cannot disagree."
+  value       = local.editable_seeds
 }

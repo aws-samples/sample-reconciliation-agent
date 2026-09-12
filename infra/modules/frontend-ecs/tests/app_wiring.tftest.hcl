@@ -6,9 +6,13 @@
 #
 # private_vpc = true so the two data sources (default internet gateway, CloudFront prefix list) and
 # the CloudFront/WAF resources are skipped; none of them bears on what is under test, which is the
-# deal-pipeline WIRING: the environment the task gets and the grants the task role gets, with the
-# app off (a recon-only console must be unchanged apart from being TOLD the app is off) and with it
-# on.
+# per-app WIRING (var.app_wiring): a recon-only console renders the environment and policy it always
+# has, byte for byte (pinned by hash below); an enabled app's variables and grants are appended after
+# every recon variable and statement, in app order and then EXACTLY as the app exported them, never
+# re-sorted (the order is part of the task definition, so re-ordering would roll every console with
+# an app enabled); a disabled app contributes nothing; and a duplicated variable name fails at plan. The apps here are SYNTHETIC. What the
+# deal-pipeline app exports is that module's contract, tested in
+# modules/deal-pipeline/tests/console_wiring.tftest.hcl; this module knows apps only in the abstract.
 #
 # override_during = plan makes the overridden computed values known at plan time. Without it the
 # ECR repository URL is unknown until apply, and because the container image is `<url>:<hash>` the
@@ -60,57 +64,66 @@ variables {
   pipeline_access_group = "deal-desk"
   pipeline_admin_group  = "deal-desk-admins"
 
-  # The environment names this module hands the pipeline BFF when the app is deployed. Not a module
-  # variable -- a test-only value both runs below assert against, so the set is written once.
-  pipeline_env_names = [
-    "PIPELINE_ASSETS_BUCKET", "PIPELINE_AGENT_MODEL_PARAM", "PIPELINE_SKILLS_PREFIX",
-    "EMAILS_TABLE", "DEALS_TABLE", "SKILL_PROPOSALS_TABLE",
-    "KNOWLEDGE_MEMORY_ID", "CHAT_MEMORY_ID",
-    "PARSER_FUNCTION", "OMS_UPLOAD_FUNCTION",
-    "ASSISTANT_MODEL_ID", "PARSER_PROMPT_KEY", "PIPELINE_SAMPLES_PREFIX",
-  ]
+  # GOLDEN. sha256 of the task-policy JSON and of the container-environment JSON this module rendered
+  # for exactly the inputs above BEFORE app_wiring existed (the pipeline_* inputs, pipeline_enabled =
+  # false). That is the recon-only console's policy and environment: every recon-only run below must
+  # hash to them, and so must the recon half of every enabled run. A change here is a change to what
+  # every deployed recon console runs, so make it on purpose and then regenerate both values from a
+  # plan of this module under these inputs:
+  #   sha256(aws_iam_role_policy.ecs_task.policy)
+  #   sha256(jsonencode(jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment))
+  golden_recon_policy_sha256      = "df19d6614e95f14fb2edd395915c4b386338dfcc742b46bc476ca186023fdcb7"
+  golden_recon_environment_sha256 = "0c35474a95073791d638a1b199fb925e0b230cb8173c58ec9f0772a34290e5e0"
 
-  # Every deal-pipeline resource, so a run only has to flip pipeline_enabled. Ignored while the app
-  # is off: the environment and the grants that name them are gated on pipeline_enabled, which the
-  # recon-only run below proves.
-  pipeline_assets_bucket             = "frontend-test-pipeline-assets"
-  pipeline_assets_bucket_arn         = "arn:aws:s3:::frontend-test-pipeline-assets"
-  pipeline_emails_table              = "frontend-test-pipeline-emails"
-  pipeline_emails_table_arn          = "arn:aws:dynamodb:us-east-1:123456789012:table/frontend-test-pipeline-emails"
-  pipeline_deals_table               = "frontend-test-pipeline-deals"
-  pipeline_deals_table_arn           = "arn:aws:dynamodb:us-east-1:123456789012:table/frontend-test-pipeline-deals"
-  pipeline_skill_proposals_table     = "frontend-test-pipeline-skill-proposals"
-  pipeline_skill_proposals_table_arn = "arn:aws:dynamodb:us-east-1:123456789012:table/frontend-test-pipeline-skill-proposals"
-  pipeline_knowledge_memory_id       = "frontend_test_pipeline_knowledge-abc"
-  pipeline_knowledge_memory_arn      = "arn:aws:bedrock-agentcore:us-east-1:123456789012:memory/frontend_test_pipeline_knowledge-abc"
-  pipeline_chat_memory_id            = "frontend_test_pipeline_chat-def"
-  pipeline_chat_memory_arn           = "arn:aws:bedrock-agentcore:us-east-1:123456789012:memory/frontend_test_pipeline_chat-def"
-  pipeline_parser_function_name      = "frontend-test-pipeline-parser"
-  pipeline_parser_function_arn       = "arn:aws:lambda:us-east-1:123456789012:function:frontend-test-pipeline-parser"
-  pipeline_oms_upload_function_name  = "frontend-test-pipeline-oms-upload"
-  pipeline_oms_upload_function_arn   = "arn:aws:lambda:us-east-1:123456789012:function:frontend-test-pipeline-oms-upload"
-  pipeline_agent_model_param         = "/frontend-test-pipeline/agent-model-id"
-  pipeline_agent_model_param_arn     = "arn:aws:ssm:us-east-1:123456789012:parameter/frontend-test-pipeline/agent-model-id"
-  pipeline_assistant_model_id        = "us.anthropic.claude-sonnet-5"
+  # Synthetic apps. alpha and beta are enabled, gamma is not. The names are chosen so that a sort by
+  # name WOULD interleave the two apps (ALPHA_BUCKET, BETA_QUEUE, ZULU_TABLE) and would move alpha's
+  # ZULU_TABLE behind its ALPHA_BUCKET: the enabled run below can therefore tell "appended exactly as
+  # exported" (ZULU_TABLE, ALPHA_BUCKET, BETA_QUEUE) from any re-ordering. The statements cover both
+  # shapes a real one takes: a list Resource, and a string Resource with a Condition. Sid is test-only -- recon's statements carry none, which is how the
+  # runs tell the two halves of the policy apart.
+  wired_apps = {
+    alpha = {
+      enabled = true
+      environment = [
+        { name = "ZULU_TABLE", value = "alpha-zulu" },
+        { name = "ALPHA_BUCKET", value = "alpha-assets" },
+      ]
+      task_statements = [
+        jsonencode({ Sid = "AlphaTable", Effect = "Allow", Action = ["dynamodb:GetItem", "dynamodb:PutItem"], Resource = ["arn:aws:dynamodb:us-east-1:123456789012:table/alpha-zulu"] }),
+        jsonencode({ Sid = "AlphaList", Effect = "Allow", Action = ["s3:ListBucket"], Resource = "arn:aws:s3:::alpha-assets", Condition = { StringLike = { "s3:prefix" = ["skills/*"] } } }),
+      ]
+    }
+    beta = {
+      enabled         = true
+      environment     = [{ name = "BETA_QUEUE", value = "beta-queue" }]
+      task_statements = [jsonencode({ Sid = "BetaQueue", Effect = "Allow", Action = ["sqs:SendMessage"], Resource = "arn:aws:sqs:us-east-1:123456789012:beta-queue" })]
+    }
+    gamma = {
+      enabled         = false
+      environment     = [{ name = "GAMMA_TABLE", value = "gamma-table" }]
+      task_statements = [jsonencode({ Sid = "GammaTable", Effect = "Allow", Action = ["dynamodb:Scan"], Resource = "arn:aws:dynamodb:us-east-1:123456789012:table/gamma-table" })]
+    }
+  }
 }
 
+# app_wiring at its default: the recon-only console. The three access-control names and the two
+# switches are always present -- the proxy resolves every registered app from them whether or not a
+# second app is deployed -- and the whole policy and environment are what they were before the rail.
 run "recon_only_console_is_unchanged_apart_from_the_group_and_switch_variables" {
   command = plan
 
-  # The three access-control names are always present: the proxy resolves every registered app
-  # from them whether or not the pipeline is deployed, and "" is the documented open/nobody value.
   assert {
     condition = alltrue([
       for name in ["RECON_ACCESS_GROUP", "PIPELINE_ACCESS_GROUP", "PIPELINE_ADMIN_GROUP"] :
       contains([for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name], name)
     ])
-    error_message = "RECON_ACCESS_GROUP, PIPELINE_ACCESS_GROUP and PIPELINE_ADMIN_GROUP must be in the task environment even when the pipeline app is not deployed"
+    error_message = "RECON_ACCESS_GROUP, PIPELINE_ACCESS_GROUP and PIPELINE_ADMIN_GROUP must be in the task environment even when no second app is deployed"
   }
 
-  # ... and so are the two switches, with the recon-only values. PIPELINE_ENABLED=false is what makes
-  # the shell hide the app and refuse /api/pipeline/*; without it every authenticated user saw a Deal
-  # Pipeline entry whose pages failed with a missing-variable 500. REQUIRE_ACCESS_GROUPS=false keeps a
-  # blank access group open, which is what this console had before the rail existed.
+  # PIPELINE_ENABLED=false is what makes the shell hide the app and refuse /api/pipeline/*; without it
+  # every authenticated user saw a Deal Pipeline entry whose pages failed with a missing-variable 500.
+  # REQUIRE_ACCESS_GROUPS=false keeps a blank access group open, which is what this console had before
+  # the rail existed.
   assert {
     condition = (
       { for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name => e.value }["PIPELINE_ENABLED"] == "false"
@@ -119,49 +132,58 @@ run "recon_only_console_is_unchanged_apart_from_the_group_and_switch_variables" 
     error_message = "a recon-only console must render PIPELINE_ENABLED=false and REQUIRE_ACCESS_GROUPS=false"
   }
 
-  # Nothing pipeline-specific leaks into a recon-only console: not the environment ...
+  # The property that protects recon: the task policy is BYTE-FOR-BYTE the one rendered before this
+  # module had an app_wiring input.
   assert {
-    condition = length(setintersection(
-      toset([for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name]),
-      toset(var.pipeline_env_names),
-    )) == 0
-    error_message = "with pipeline_enabled = false none of the pipeline BFF variables may be set"
+    condition     = sha256(aws_iam_role_policy.ecs_task.policy) == var.golden_recon_policy_sha256
+    error_message = "the recon-only task policy no longer matches the golden rendering; a recon grant changed"
   }
 
-  # ... nor the task role. The recon SKILLS_PREFIX/ASSETS_BUCKET grants are on recon's bucket, so the
-  # only way a pipeline resource could appear here is through the pipeline statements.
+  # ... and so is the container environment, order included (a reorder alone is a new task
+  # definition revision and a rolling deployment of the console).
   assert {
-    condition = !anytrue(flatten([
-      for s in jsondecode(aws_iam_role_policy.ecs_task.policy).Statement :
-      [for r in flatten([s.Resource]) : strcontains(r, "deal-csv/") || strcontains(r, "samples/") || startswith(r, var.pipeline_assets_bucket_arn) || r == var.pipeline_emails_table_arn]
-    ]))
-    error_message = "with pipeline_enabled = false the task policy must carry no deal-pipeline grant"
+    condition     = sha256(jsonencode(jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment)) == var.golden_recon_environment_sha256
+    error_message = "the recon-only container environment no longer matches the golden rendering; a recon variable, value or position changed"
   }
 
-  # No SAMPLE_EMAILS_DIR in a container, on or off: a disk path reads as configured and lists nothing.
+  # Nothing app-shaped is in the policy: recon's statements carry no Sid.
   assert {
-    condition     = !contains([for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name], "SAMPLE_EMAILS_DIR")
-    error_message = "SAMPLE_EMAILS_DIR must never be set on the ECS task"
+    condition     = !anytrue([for s in jsondecode(aws_iam_role_policy.ecs_task.policy).Statement : can(s.Sid)])
+    error_message = "with app_wiring empty the task policy must carry no app statement"
   }
 }
 
-run "pipeline_enabled_without_its_arns_fails_at_plan" {
+# A map full of wiring with nothing enabled renders exactly like the empty map: the same two hashes.
+# This is the composed root's shape with enable_deal_pipeline = false (an entry, disabled, its lists
+# empty), and also what a root passing a still-populated entry with enabled = false must get.
+run "a_disabled_app_contributes_nothing" {
   command = plan
 
   variables {
-    pipeline_enabled                   = true
-    pipeline_assets_bucket_arn         = ""
-    pipeline_emails_table_arn          = ""
-    pipeline_deals_table_arn           = ""
-    pipeline_skill_proposals_table_arn = ""
-    pipeline_knowledge_memory_arn      = ""
-    pipeline_chat_memory_arn           = ""
-    pipeline_parser_function_arn       = ""
-    pipeline_oms_upload_function_arn   = ""
-    pipeline_agent_model_param_arn     = ""
+    app_wiring = {
+      alpha = merge(var.wired_apps.alpha, { enabled = false })
+      beta  = merge(var.wired_apps.beta, { enabled = false })
+      gamma = var.wired_apps.gamma
+    }
   }
 
-  expect_failures = [aws_iam_role_policy.ecs_task]
+  assert {
+    condition     = sha256(aws_iam_role_policy.ecs_task.policy) == var.golden_recon_policy_sha256
+    error_message = "a disabled app must leave the task policy byte-for-byte the recon-only one"
+  }
+
+  assert {
+    condition     = sha256(jsonencode(jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment)) == var.golden_recon_environment_sha256
+    error_message = "a disabled app must leave the container environment byte-for-byte the recon-only one"
+  }
+
+  assert {
+    condition = length(setintersection(
+      toset([for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name]),
+      toset(["ALPHA_BUCKET", "ZULU_TABLE", "BETA_QUEUE", "GAMMA_TABLE"]),
+    )) == 0
+    error_message = "a disabled app's variables must not reach the task environment"
+  }
 }
 
 # Two apps behind one OIDC client with a blank access group would admit the whole deal desk to the
@@ -191,21 +213,12 @@ run "pipeline_enabled_with_a_whitespace_pipeline_access_group_fails_at_plan" {
   expect_failures = [var.pipeline_enabled]
 }
 
-run "pipeline_console_gets_the_environment_and_matching_grants" {
+run "enabled_apps_append_their_variables_as_exported_and_their_grants_after_recon" {
   command = plan
 
   variables {
     pipeline_enabled = true
-  }
-
-  # Every documented BFF variable is present (the recon-only run above proves none of them is
-  # present with the app off, so between the two runs enabling it adds exactly this set).
-  assert {
-    condition = length(setsubtract(
-      toset(var.pipeline_env_names),
-      toset([for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name]),
-    )) == 0
-    error_message = "enabling the pipeline must add every documented BFF variable to the task environment"
+    app_wiring       = var.wired_apps
   }
 
   # Both switches flip together: the app is on, and a blank access group now fails closed.
@@ -214,154 +227,159 @@ run "pipeline_console_gets_the_environment_and_matching_grants" {
       { for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name => e.value }["PIPELINE_ENABLED"] == "true"
       && { for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name => e.value }["REQUIRE_ACCESS_GROUPS"] == "true"
     )
-    error_message = "a console with the pipeline deployed must render PIPELINE_ENABLED=true and REQUIRE_ACCESS_GROUPS=true"
+    error_message = "a console with a second app deployed must render PIPELINE_ENABLED=true and REQUIRE_ACCESS_GROUPS=true"
   }
 
-  # And only once each: a duplicated name in an ECS environment is last-one-wins with no warning.
+  # The app variables are the TAIL of the environment: alpha's in the order alpha listed them
+  # (ZULU_TABLE before ALPHA_BUCKET -- a sort would have swapped them), then beta's, each with its own
+  # value. This is the enabled-case golden: an app's exported list lands untouched, so the console a
+  # deployment rendered when it built an app's variables itself (the pipeline's, in modules/deal-pipeline's
+  # export order) is the console it renders through app_wiring -- the same task definition revision.
+  assert {
+    condition = jsonencode(slice(
+      jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment,
+      length(jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment) - 3,
+      length(jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment),
+      )) == jsonencode([
+      { name = "ZULU_TABLE", value = "alpha-zulu" },
+      { name = "ALPHA_BUCKET", value = "alpha-assets" },
+      { name = "BETA_QUEUE", value = "beta-queue" },
+    ])
+    error_message = "the enabled apps' variables must be appended last, in app order and then exactly in each app's export order (never re-sorted), with their values"
+  }
+
+  # The same property stated against the input: the tail IS the enabled apps' lists concatenated,
+  # byte for byte, so nothing this module does to them can change a deployed task definition.
+  assert {
+    condition = jsonencode(slice(
+      jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment,
+      length(jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment) - 3,
+      length(jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment),
+    )) == jsonencode(concat(var.wired_apps.alpha.environment, var.wired_apps.beta.environment))
+    error_message = "the enabled apps' variables must reach the task definition exactly as exported: the same entries, the same order, nothing re-sorted or re-shaped"
+  }
+
+  # Everything BEFORE them is the recon-only environment. It differs from the golden rendering in
+  # exactly two VALUES -- PIPELINE_ENABLED and REQUIRE_ACCESS_GROUPS, the console-level switches that
+  # pipeline_enabled = true flips (asserted above) -- so with those two read back as "false" it must
+  # hash to the golden: same names, same values, same order, nothing else moved.
+  assert {
+    condition = sha256(jsonencode([
+      for e in slice(
+        jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment,
+        0,
+        length(jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment) - 3,
+      ) : contains(["PIPELINE_ENABLED", "REQUIRE_ACCESS_GROUPS"], e.name) ? { name = e.name, value = "false" } : e
+    ])) == var.golden_recon_environment_sha256
+    error_message = "enabling apps must leave the recon variables ahead of theirs byte-for-byte unchanged, apart from the two switch values"
+  }
+
+  assert {
+    condition     = !contains([for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name], "GAMMA_TABLE")
+    error_message = "a disabled app's variables must not reach the task environment when other apps are enabled"
+  }
+
+  # Only once each: a duplicated name in an ECS environment is last-one-wins with no warning.
   assert {
     condition     = length([for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name]) == length(distinct([for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name]))
     error_message = "no environment variable name may appear twice in the task definition"
   }
 
-  # The prefixed names carry the PIPELINE values, and the recon names still carry recon's: this is
-  # the collision the prefix exists for.
+  # The app statements are the TAIL of the policy (no console-settings prefix here, so nothing follows
+  # them), in app order and then in the order each app exported them; gamma's is absent.
+  assert {
+    condition = [
+      for s in slice(
+        jsondecode(aws_iam_role_policy.ecs_task.policy).Statement,
+        length(jsondecode(aws_iam_role_policy.ecs_task.policy).Statement) - 3,
+        length(jsondecode(aws_iam_role_policy.ecs_task.policy).Statement),
+      ) : s.Sid
+    ] == ["AlphaTable", "AlphaList", "BetaQueue"]
+    error_message = "the enabled apps' statements must be the last three in the policy, in app order then export order"
+  }
+
+  assert {
+    condition     = length([for s in jsondecode(aws_iam_role_policy.ecs_task.policy).Statement : s if can(s.Sid)]) == 3
+    error_message = "exactly the enabled apps' statements may carry into the policy; a disabled app's must not"
+  }
+
+  # Every statement WITHOUT a Sid is recon's, and together they are the recon-only policy, byte for
+  # byte: the same golden hash, re-encoded without the app statements.
+  assert {
+    condition = sha256(jsonencode({
+      Version   = "2012-10-17"
+      Statement = [for s in jsondecode(aws_iam_role_policy.ecs_task.policy).Statement : s if !can(s.Sid)]
+    })) == var.golden_recon_policy_sha256
+    error_message = "enabling apps must leave every recon statement byte-for-byte unchanged"
+  }
+
+  # A statement lands exactly as the app wrote it: the string Resource stays a string and the
+  # Condition survives the JSON round trip.
   assert {
     condition = (
-      { for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name => e.value }["PIPELINE_ASSETS_BUCKET"] == "frontend-test-pipeline-assets"
-      && { for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name => e.value }["ASSETS_BUCKET"] == "frontend-test-assets"
-      && { for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name => e.value }["PIPELINE_AGENT_MODEL_PARAM"] == "/frontend-test-pipeline/agent-model-id"
-      && { for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name => e.value }["PIPELINE_SAMPLES_PREFIX"] == "samples/"
+      one([for s in jsondecode(aws_iam_role_policy.ecs_task.policy).Statement : s if try(s.Sid, "") == "AlphaList"]).Resource == "arn:aws:s3:::alpha-assets"
+      && one([for s in jsondecode(aws_iam_role_policy.ecs_task.policy).Statement : s if try(s.Sid, "") == "AlphaList"]).Condition.StringLike["s3:prefix"] == ["skills/*"]
+      && one([for s in jsondecode(aws_iam_role_policy.ecs_task.policy).Statement : s if try(s.Sid, "") == "AlphaTable"]).Resource == ["arn:aws:dynamodb:us-east-1:123456789012:table/alpha-zulu"]
     )
-    error_message = "the PIPELINE_-prefixed variables must carry the pipeline's values while the bare recon names keep recon's"
+    error_message = "app statements must land in the policy exactly as exported: string and list Resources, and Conditions, intact"
+  }
+}
+
+# The recon root renders a laptop's .env.local (output frontend_env_local) from this output rather
+# than from its own copy of the wiring, so the output has to BE the container environment: every
+# name, every value, nothing else -- with apps enabled, so both halves are covered.
+run "task_environment_output_is_the_container_environment" {
+  command = plan
+
+  variables {
+    pipeline_enabled = true
+    app_wiring       = var.wired_apps
   }
 
-  # Every S3 location the environment names is one the role can read: the skills prefix, the
-  # samples prefix and the parser prompt key each fall under a GetObject resource on the PIPELINE
-  # bucket -- the invariant modules/deal-pipeline keeps for its Lambdas, kept here for the console.
   assert {
-    condition = alltrue([
-      for location in [
-        { for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name => e.value }["PIPELINE_SKILLS_PREFIX"],
-        { for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name => e.value }["PIPELINE_SAMPLES_PREFIX"],
-        { for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name => e.value }["PARSER_PROMPT_KEY"],
-        ] : anytrue([
-          for r in flatten([
-            for s in jsondecode(aws_iam_role_policy.ecs_task.policy).Statement : s.Resource
-            if contains(s.Action, "s3:GetObject")
-          ]) : startswith("${var.pipeline_assets_bucket_arn}/${location}", trimsuffix(r, "*"))
-      ])
-    ])
-    error_message = "every pipeline S3 prefix or key in the task environment must be covered by an s3:GetObject resource on the pipeline bucket"
+    condition     = output.task_environment == { for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name => e.value }
+    error_message = "task_environment must be exactly the container's environment as a name => value map"
   }
 
-  # Verb per resource, as the BFF actually calls S3. PutObject reaches exactly the four locations the
-  # BFF writes (emails/, deal-csv/, the parser prompt, the skills prefix) ...
+  # The names the root indexes from the map: a recon variable, the token that makes the output
+  # sensitive, the console-wide prefix, the two switches, and the enabled apps' variables.
   assert {
-    condition = toset(flatten([
-      for s in jsondecode(aws_iam_role_policy.ecs_task.policy).Statement : flatten([s.Resource])
-      if contains(s.Action, "s3:PutObject") && startswith(flatten([s.Resource])[0], var.pipeline_assets_bucket_arn)
-      ])) == toset([
-      "${var.pipeline_assets_bucket_arn}/emails/*",
-      "${var.pipeline_assets_bucket_arn}/deal-csv/*",
-      "${var.pipeline_assets_bucket_arn}/${var.pipeline_parser_prompt_key}",
-      "${var.pipeline_assets_bucket_arn}/${var.pipeline_skills_prefix}*",
-    ])
-    error_message = "s3:PutObject on the pipeline bucket must cover exactly emails/, deal-csv/, the parser prompt key and the skills prefix"
+    condition = length(setsubtract(
+      toset(["CASES_TABLE", "EMAIL_CONFIRMATION_TOKEN", "CONSOLE_SETTINGS_PREFIX", "PIPELINE_ENABLED", "REQUIRE_ACCESS_GROUPS", "ALPHA_BUCKET", "BETA_QUEUE", "ZULU_TABLE"]),
+      toset(keys(output.task_environment)),
+    )) == 0
+    error_message = "task_environment must carry the recon, console-wide and app names the root's frontend_env_local output indexes"
+  }
+}
+
+# An app that exports a recon name would silently take that name over in the container. Refused at
+# plan, on the task definition, naming the variable.
+run "an_app_variable_that_reuses_a_recon_name_fails_at_plan" {
+  command = plan
+
+  variables {
+    app_wiring = {
+      clash = {
+        enabled         = true
+        environment     = [{ name = "ASSETS_BUCKET", value = "not-recons-bucket" }]
+        task_statements = []
+      }
+    }
   }
 
-  # ... DeleteObject reaches the skills prefix alone (a retired skill is removed, not blanked) ...
-  assert {
-    condition = toset(flatten([
-      for s in jsondecode(aws_iam_role_policy.ecs_task.policy).Statement : flatten([s.Resource])
-      if contains(s.Action, "s3:DeleteObject") && startswith(flatten([s.Resource])[0], var.pipeline_assets_bucket_arn)
-    ])) == toset(["${var.pipeline_assets_bucket_arn}/${var.pipeline_skills_prefix}*"])
-    error_message = "s3:DeleteObject on the pipeline bucket must cover the skills prefix and nothing else"
+  expect_failures = [aws_ecs_task_definition.frontend]
+}
+
+# Two apps exporting one name are refused the same way, whichever order the map sorts them into.
+run "two_apps_exporting_one_variable_fail_at_plan" {
+  command = plan
+
+  variables {
+    app_wiring = {
+      alpha = merge(var.wired_apps.alpha, { environment = [{ name = "SHARED_TABLE", value = "alpha" }] })
+      beta  = merge(var.wired_apps.beta, { environment = [{ name = "SHARED_TABLE", value = "beta" }] })
+    }
   }
 
-  # ... and the Terraform-managed seeds the BFF only reads -- the sample corpus, the security master
-  # the mock OMS validator trusts, the assistant prompt -- are reachable by no write verb at all.
-  assert {
-    condition = !anytrue(flatten([
-      for s in jsondecode(aws_iam_role_policy.ecs_task.policy).Statement : [
-        for r in flatten([s.Resource]) :
-        strcontains(r, "/${var.pipeline_samples_prefix}") || strcontains(r, "/security-master/") || endswith(r, "/prompts/assistant-system.md")
-      ] if contains(s.Action, "s3:PutObject") || contains(s.Action, "s3:DeleteObject")
-    ]))
-    error_message = "samples/, security-master/ and prompts/assistant-system.md are read-only for the console: no statement granting PutObject or DeleteObject may name them"
-  }
-
-  # ListBucket is confined to the two prefixes the BFF lists, and the pipeline bucket's ListBucket
-  # statement is the only one on that bucket.
-  assert {
-    condition = toset(one([
-      for s in jsondecode(aws_iam_role_policy.ecs_task.policy).Statement : s.Condition.StringLike["s3:prefix"]
-      if contains(s.Action, "s3:ListBucket") && flatten([s.Resource])[0] == var.pipeline_assets_bucket_arn
-    ])) == toset(["${var.pipeline_skills_prefix}*", "${var.pipeline_samples_prefix}*"])
-    error_message = "the pipeline ListBucket prefix condition must name exactly the skills and samples prefixes, the only two the BFF lists"
-  }
-
-  # Tables: all three and nothing else DynamoDB-shaped. No index ARN: the by_email GSI is the parser
-  # Lambda's, and the BFF never queries it.
-  assert {
-    condition = toset(one([
-      for s in jsondecode(aws_iam_role_policy.ecs_task.policy).Statement : flatten([s.Resource])
-      if contains(flatten([s.Resource]), var.pipeline_emails_table_arn)
-      ])) == toset([
-      var.pipeline_emails_table_arn,
-      var.pipeline_deals_table_arn,
-      var.pipeline_skill_proposals_table_arn,
-    ])
-    error_message = "the pipeline DynamoDB statement must name the three tables and no index"
-  }
-
-  # Exactly the verbs src/lib/pipeline/server/aws.ts exports: getItem, putItem, scanAll.
-  assert {
-    condition = toset(one([
-      for s in jsondecode(aws_iam_role_policy.ecs_task.policy).Statement : s.Action
-      if contains(flatten([s.Resource]), var.pipeline_emails_table_arn)
-    ])) == toset(["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Scan"])
-    error_message = "the pipeline DynamoDB statement must grant GetItem, PutItem and Scan only: the BFF issues no UpdateItem, Query or DeleteItem"
-  }
-
-  # Both Lambdas the BFF invokes, and both memories with their record sub-resources.
-  assert {
-    condition = anytrue([
-      for s in jsondecode(aws_iam_role_policy.ecs_task.policy).Statement :
-      toset(flatten([s.Resource])) == toset([var.pipeline_parser_function_arn, var.pipeline_oms_upload_function_arn])
-      if contains(s.Action, "lambda:InvokeFunction")
-    ])
-    error_message = "one lambda:InvokeFunction statement must name exactly the parser and the OMS upload function"
-  }
-
-  # Exactly the commands src/lib/pipeline/server/memoryClient.ts sends -- no DeleteEvent, which
-  # nothing in the pipeline BFF calls.
-  assert {
-    condition = anytrue([
-      for s in jsondecode(aws_iam_role_policy.ecs_task.policy).Statement :
-      toset(flatten([s.Resource])) == toset([
-        var.pipeline_knowledge_memory_arn, "${var.pipeline_knowledge_memory_arn}/*",
-        var.pipeline_chat_memory_arn, "${var.pipeline_chat_memory_arn}/*",
-        ]) && toset(s.Action) == toset([
-        "bedrock-agentcore:CreateEvent",
-        "bedrock-agentcore:ListEvents",
-        "bedrock-agentcore:RetrieveMemoryRecords",
-        "bedrock-agentcore:ListMemoryRecords",
-        "bedrock-agentcore:BatchDeleteMemoryRecords",
-        "bedrock-agentcore:GetMemory",
-      ])
-      if contains(s.Action, "bedrock-agentcore:CreateEvent")
-    ])
-    error_message = "the pipeline memory statement must cover both memories (and their records) with exactly CreateEvent, ListEvents, RetrieveMemoryRecords, ListMemoryRecords, BatchDeleteMemoryRecords and GetMemory"
-  }
-
-  # The pipeline's model parameter is under /<name_prefix>-pipeline/, which the recon SSM statement's
-  # /<name_prefix>/* does NOT match -- so its own statement must exist and name the exact ARN.
-  assert {
-    condition = anytrue([
-      for s in jsondecode(aws_iam_role_policy.ecs_task.policy).Statement :
-      flatten([s.Resource]) == [var.pipeline_agent_model_param_arn] && contains(s.Action, "ssm:PutParameter")
-      if contains(s.Action, "ssm:GetParameter")
-    ])
-    error_message = "the pipeline model parameter needs its own Get/PutParameter statement on its exact ARN"
-  }
+  expect_failures = [aws_ecs_task_definition.frontend]
 }

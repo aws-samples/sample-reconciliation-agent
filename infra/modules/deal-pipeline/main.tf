@@ -6,10 +6,11 @@
 # extraction strategy, chat with none), one SSM parameter, and two Python Lambdas (parser, mock
 # OMS upload). Contract: docs/deal-pipeline-design.md §2, §3, §8, §11.
 #
-# There is no ECS, CloudFront, Cognito or gateway here on purpose. The Next.js BFF either runs
-# locally with the developer's credentials (infra/environments/deal-pipeline) or is the recon
+# There is no ECS, CloudFront, Cognito or gateway here on purpose. The Next.js BFF is the recon
 # console's own container, whose task role the recon root grants access to these resources
-# (infra/environments/recon composes this module beside modules/frontend-ecs).
+# (infra/environments/recon composes this module beside modules/frontend-ecs) -- or runs on a
+# developer's laptop with the developer's credentials, from the .env.local that root's
+# frontend_env_local output renders.
 ####################################################################################
 
 data "aws_caller_identity" "current" {}
@@ -43,16 +44,18 @@ locals {
   # Memory names must be identifiers (letters, digits, underscore) -- hyphens are rejected.
   memory_name_base = replace(var.name_prefix, "-", "_")
 
-  # The one place the S3 layout (design §3) is spelled out for the parts a Lambda touches. The
-  # Lambda env vars and IAM grants below reference these so a prefix rename cannot leave a grant
-  # behind. emails/<id>.json is absent on purpose: the BFF alone writes and reads it (the parser
-  # takes the email body from the emails table), so no grant here should name it.
+  # The one place the S3 layout (design §3) is spelled out. The Lambda env vars and IAM grants
+  # (lambdas.tf) and the console's environment and grants (console.tf) all reference these, so a
+  # prefix rename cannot leave a grant behind. emails_prefix is for console.tf ALONE: the BFF writes
+  # and reads emails/<id>.json and the parser takes the email body from the emails table, so no
+  # Lambda grant in this module may name it.
   skills_prefix          = "skills/"
   prompts_prefix         = "prompts/"
   security_master_prefix = "security-master/"
   deal_csv_prefix        = "deal-csv/"
   oms_staging_prefix     = "oms-staging/"
   samples_prefix         = "samples/"
+  emails_prefix          = "emails/"
   parser_prompt_key      = "${local.prompts_prefix}parser-system.md"
   assistant_prompt_key   = "${local.prompts_prefix}assistant-system.md"
   counterparties_key     = "${local.security_master_prefix}counterparties.csv"
@@ -101,69 +104,68 @@ resource "aws_s3_bucket_public_access_block" "assets" {
 }
 
 # Skills are CREATE-ONLY seeds. The demo's whole point is that an approved skill proposal rewrites
-# skills/<name>/SKILL.md in S3 (design §1, §12 step 3); if this resource tracked the repo file, the
-# next apply -- even one that only changes log retention -- would silently revert the learned
-# skill to the committed version. ignore_changes keeps the first upload and leaves every later
-# edit to the application.
+# skills/<name>/SKILL.md in S3 (design §1, §12 step 3); if this seed tracked the repo file, the next
+# apply -- even one that only changes log retention -- would silently revert the learned skill to
+# the committed version. modules/seeded-object with create_only = true keeps the first upload and
+# leaves every later edit to the application; its header explains why the attributes it ignores are
+# wider than etag/source (an application write that merely sets a charset would otherwise make the
+# next apply revert the learned content).
 #
-# The list is wider than etag/source because the AWS provider treats a diff in ANY of these
-# attributes as a content change and resolves it by re-uploading the whole object from `source`
-# -- the repo file -- not with a metadata-only update. Ignoring only etag/source would let an
-# application write that merely sets a charset or an x-amz-meta-* tag make the next apply revert
-# the learned content. (ignore_changes must be a literal list, so the two seeds repeat it.)
-resource "aws_s3_object" "skill_seed" {
+# A repo edit to a committed skill STILL reaches S3, without `terraform taint`: the recon root's
+# aws_lambda_invocation.pipeline_seed_push reconciles every key in local.editable_seeds (below) on
+# each apply -- pushing when only the repo changed, leaving a live edit alone when only the live
+# object changed, and failing the apply with the two commands that resolve it when both did. A
+# tainted seed would instead be re-created from the repo, which is exactly the revert the lifecycle
+# rule exists to prevent.
+module "skill_seed" {
+  source   = "../seeded-object"
   for_each = local.skill_files
 
   bucket       = aws_s3_bucket.assets.id
   key          = "${local.skills_prefix}${each.value}"
-  source       = "${local.skills_dir}/${each.value}"
-  etag         = filemd5("${local.skills_dir}/${each.value}")
+  source_path  = "${local.skills_dir}/${each.value}"
   content_type = "text/markdown"
-
-  lifecycle {
-    ignore_changes = [etag, source, content_type, metadata, cache_control, content_encoding, storage_class]
-  }
+  create_only  = true
 }
 
-# Same create-only treatment, same ignore list, for the parser system prompt: the Skills tab edits
-# it in place (design §9, /skills/system-prompt PUT). fileexists() -> count keeps the plan valid
-# while the prompt is still being written elsewhere in the tree.
-resource "aws_s3_object" "parser_prompt_seed" {
-  count = fileexists(local.parser_prompt_path) ? 1 : 0
+# Same create-only treatment for the parser system prompt: the Skills tab edits it in place (design
+# §9, /skills/system-prompt PUT). fileexists() -> count keeps the plan valid while the prompt is
+# still being written elsewhere in the tree.
+module "parser_prompt_seed" {
+  source = "../seeded-object"
+  count  = fileexists(local.parser_prompt_path) ? 1 : 0
 
   bucket       = aws_s3_bucket.assets.id
   key          = local.parser_prompt_key
-  source       = local.parser_prompt_path
-  etag         = filemd5(local.parser_prompt_path)
+  source_path  = local.parser_prompt_path
   content_type = "text/markdown"
-
-  lifecycle {
-    ignore_changes = [etag, source, content_type, metadata, cache_control, content_encoding, storage_class]
-  }
+  create_only  = true
 }
 
 # The assistant prompt has no UI editor, so it TRACKS the repo: a change to the committed file
 # re-uploads on the next apply, which is the only way to ship a prompt fix to the chat.
-resource "aws_s3_object" "assistant_prompt_seed" {
-  count = fileexists(local.assistant_prompt_path) ? 1 : 0
+module "assistant_prompt_seed" {
+  source = "../seeded-object"
+  count  = fileexists(local.assistant_prompt_path) ? 1 : 0
 
   bucket       = aws_s3_bucket.assets.id
   key          = local.assistant_prompt_key
-  source       = local.assistant_prompt_path
-  etag         = filemd5(local.assistant_prompt_path)
+  source_path  = local.assistant_prompt_path
   content_type = "text/markdown"
+  create_only  = false
 }
 
 # Reference data is not editable in the UI either, so it tracks the repo like the assistant
 # prompt. Both files are committed, hence no existence guard.
-resource "aws_s3_object" "security_master_seed" {
+module "security_master_seed" {
+  source   = "../seeded-object"
   for_each = toset(["issuers.csv", "counterparties.csv"])
 
   bucket       = aws_s3_bucket.assets.id
   key          = "${local.security_master_prefix}${each.value}"
-  source       = "${local.secmaster}/${each.value}"
-  etag         = filemd5("${local.secmaster}/${each.value}")
+  source_path  = "${local.secmaster}/${each.value}"
   content_type = "text/csv"
+  create_only  = false
 }
 
 # The sample-email corpus behind the Inbox's "Simulate incoming email" dialog. It lives in S3 so a
@@ -172,15 +174,119 @@ resource "aws_s3_object" "security_master_seed" {
 # like the other reference data: the corpus has no UI editor, so a re-upload on change is the only
 # way an edited or added sample reaches a deployment. No existence guard because the corpus is
 # committed; a plan against a checkout missing it seeds nothing and the check block below says so.
-resource "aws_s3_object" "sample_email_seed" {
+module "sample_email_seed" {
+  source   = "../seeded-object"
   for_each = local.sample_files
 
   bucket       = aws_s3_bucket.assets.id
   key          = "${local.samples_prefix}${each.value}"
-  source       = "${local.samples_dir}/${each.value}"
-  etag         = filemd5("${local.samples_dir}/${each.value}")
+  source_path  = "${local.samples_dir}/${each.value}"
   content_type = "application/json"
+  create_only  = false
 }
+
+# The create-only seeds as the root's seed push wants them: bucket key => the file to read and the
+# repo-relative label a conflict message names. Exactly the keys the two create-only modules above
+# seed, derived from the same locals, so a skill added to the tree is seeded and pushed in one step.
+# (The tracking seeds are not here: Terraform re-uploads those itself.) `path` is absolute, like the
+# module's other paths; `source` is deliberately relative so the invocation input -- which embeds
+# it -- is the same on every machine that plans this root.
+locals {
+  editable_seeds = merge(
+    {
+      for f in local.skill_files : "${local.skills_prefix}${f}" => {
+        path   = "${local.skills_dir}/${f}"
+        source = "agent-blueprint/deal-pipeline-agent/skills/${f}"
+      }
+    },
+    {
+      for p in(fileexists(local.parser_prompt_path) ? [local.parser_prompt_path] : []) : local.parser_prompt_key => {
+        path   = p
+        source = "agent-blueprint/deal-pipeline-agent/prompts/parser-system.md"
+      }
+    },
+  )
+}
+
+# State-only moves, one per object that existed as an inline aws_s3_object in this file until
+# 2026-09, keyed exactly as fileset() keyed it. Same bucket, key, source and content type on the
+# other side, so a plan shows the moves and no create, destroy or replace. A seed added to the tree
+# later needs no entry here; a `from` with nothing in state is a no-op.
+moved {
+  from = aws_s3_object.skill_seed["bank-notice-format/SKILL.md"]
+  to   = module.skill_seed["bank-notice-format/SKILL.md"].aws_s3_object.create_only[0]
+}
+
+moved {
+  from = aws_s3_object.skill_seed["deal-parsing/SKILL.md"]
+  to   = module.skill_seed["deal-parsing/SKILL.md"].aws_s3_object.create_only[0]
+}
+
+moved {
+  from = aws_s3_object.skill_seed["news-alert-format/SKILL.md"]
+  to   = module.skill_seed["news-alert-format/SKILL.md"].aws_s3_object.create_only[0]
+}
+
+moved {
+  from = aws_s3_object.skill_seed["oms-csv-format/SKILL.md"]
+  to   = module.skill_seed["oms-csv-format/SKILL.md"].aws_s3_object.create_only[0]
+}
+
+moved {
+  from = aws_s3_object.parser_prompt_seed[0]
+  to   = module.parser_prompt_seed[0].aws_s3_object.create_only[0]
+}
+
+moved {
+  from = aws_s3_object.assistant_prompt_seed[0]
+  to   = module.assistant_prompt_seed[0].aws_s3_object.tracking[0]
+}
+
+moved {
+  from = aws_s3_object.security_master_seed["issuers.csv"]
+  to   = module.security_master_seed["issuers.csv"].aws_s3_object.tracking[0]
+}
+
+moved {
+  from = aws_s3_object.security_master_seed["counterparties.csv"]
+  to   = module.security_master_seed["counterparties.csv"].aws_s3_object.tracking[0]
+}
+
+moved {
+  from = aws_s3_object.sample_email_seed["01-news-alert-northwind-addon-tlb.json"]
+  to   = module.sample_email_seed["01-news-alert-northwind-addon-tlb.json"].aws_s3_object.tracking[0]
+}
+
+moved {
+  from = aws_s3_object.sample_email_seed["02-bank-notice-cascade-midstream-first-lien-tlb.json"]
+  to   = module.sample_email_seed["02-bank-notice-cascade-midstream-first-lien-tlb.json"].aws_s3_object.tracking[0]
+}
+
+moved {
+  from = aws_s3_object.sample_email_seed["03-bank-notice-summit-safety-ae-tlb.json"]
+  to   = module.sample_email_seed["03-bank-notice-summit-safety-ae-tlb.json"].aws_s3_object.tracking[0]
+}
+
+moved {
+  from = aws_s3_object.sample_email_seed["04-bank-notice-lakeside-imaging-incremental-tlb.json"]
+  to   = module.sample_email_seed["04-bank-notice-lakeside-imaging-incremental-tlb.json"].aws_s3_object.tracking[0]
+}
+
+moved {
+  from = aws_s3_object.sample_email_seed["05-bank-notice-heritage-roots-tlb.json"]
+  to   = module.sample_email_seed["05-bank-notice-heritage-roots-tlb.json"].aws_s3_object.tracking[0]
+}
+
+moved {
+  from = aws_s3_object.sample_email_seed["06-bank-notice-copperfield-insurance-tlb.json"]
+  to   = module.sample_email_seed["06-bank-notice-copperfield-insurance-tlb.json"].aws_s3_object.tracking[0]
+}
+
+moved {
+  from = aws_s3_object.sample_email_seed["07-news-alert-ridgeline-packaging-secured-notes.json"]
+  to   = module.sample_email_seed["07-news-alert-ridgeline-packaging-secured-notes.json"].aws_s3_object.tracking[0]
+}
+
 
 # A missing seed is not an error -- the tree is assembled by several hands and the module must
 # plan before every file lands -- but it must not be invisible either: a parser with no skills

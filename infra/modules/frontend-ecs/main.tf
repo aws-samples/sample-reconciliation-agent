@@ -352,189 +352,35 @@ resource "aws_iam_role" "ecs_task" {
 }
 
 # ---------------------------------------------------------------------------------
-# Deal-pipeline app: the S3 locations the console's BFF touches, named ONCE and grouped by the verbs
-# the BFF actually issues (src/lib/pipeline/server/{skillsStore,samples,emailStore,dealStore,
-# chatAgent}.ts), so the object grants, the ListBucket condition and the environment cannot disagree
-# -- the same verb-per-resource invariant modules/deal-pipeline keeps for its Lambdas. oms-staging/
-# is deliberately absent: only the mock OMS Lambda writes there, and nothing in the console reads it
-# back.
+# Per-app wiring (var.app_wiring). An app module exports the environment its BFF reads and the
+# task-role statements that reach exactly its resources (modules/deal-pipeline: console_environment,
+# console_task_statements); this module appends both for every app whose entry is enabled and knows
+# nothing else about the app. Gathered here, in one place, so that a recon-only console -- an empty
+# map, or no enabled entry -- renders the recon environment and policy below byte-for-byte as it did
+# before the app rail existed (tests/app_wiring.tftest.hcl pins both against that rendering).
 # ---------------------------------------------------------------------------------
 locals {
-  # The assistant system prompt's key is a constant in the BFF (ASSISTANT_PROMPT_KEY in
-  # src/lib/pipeline/server/env.ts) rather than an environment variable, so it is spelled out here
-  # and nowhere else in this module.
-  pipeline_assistant_prompt_key = "prompts/assistant-system.md"
+  enabled_apps = { for id, app in var.app_wiring : id => app if app.enabled }
 
-  # Read only. samples/ and security-master/ are Terraform-managed seeds that track the repo, and
-  # the assistant prompt has no UI editor; the BFF only ever GETs them. PutObject or DeleteObject here
-  # would let a compromised task rewrite counterparties.csv -- the list the mock OMS validator trusts
-  # and the one the parser role is deliberately denied write access to -- or delete the sample
-  # corpus, and either would stand until the next apply re-uploaded the seed.
-  pipeline_s3_read_only = [
-    "${var.pipeline_samples_prefix}*",
-    "security-master/*",
-    local.pipeline_assistant_prompt_key,
-  ]
-  # Read and write, no delete. emails/<id>.json is the BFF's own copy of each received email;
-  # deal-csv/<id>.csv is the staging CSV the BFF re-renders when a deal's fields are edited; the
-  # parser prompt is the one prompt the Skills tab edits in place. Nothing removes any of them: a
-  # rejected deal and a superseded email stay on the record.
-  pipeline_s3_read_write = [
-    "emails/*",
-    "deal-csv/*",
-    var.pipeline_parser_prompt_key,
-  ]
-  # Read, write AND delete: the Skills tab. A retired skill is removed, not blanked, or the parser
-  # would still load an empty SKILL.md.
-  pipeline_s3_read_write_delete = [
-    "${var.pipeline_skills_prefix}*",
-  ]
-  # The only two prefixes the BFF LISTS: the Skills tab lists skills/, the simulate dialog lists
-  # samples/. Everything else is addressed by exact key.
-  pipeline_s3_listed_prefixes = [
-    "${var.pipeline_skills_prefix}*",
-    "${var.pipeline_samples_prefix}*",
-  ]
+  # Every enabled app's variables in app order (map keys sort lexicographically) and then in the order
+  # the app exports them -- appended, never re-sorted. The order is part of the container definition,
+  # and the container definition IS the task definition: a console deployed while this module built
+  # the pipeline's variables itself rendered them in that module's export order, so appending an
+  # app's list untouched is what leaves that task definition's revision -- and the ECS service behind
+  # it -- unchanged across the move to app_wiring. A sort here would have been a new revision and a
+  # rolling deployment of every console with an app enabled. An app module owns its order the way it
+  # owns its names (modules/deal-pipeline/tests/console_wiring.tftest.hcl pins the pipeline's;
+  # tests/app_wiring.tftest.hcl pins that this module preserves whatever it is given). Duplicates are
+  # kept for the postcondition on the task definition to refuse; de-duplicating here would hide
+  # exactly the mistake it exists to catch.
+  app_environment = flatten([for app in local.enabled_apps : app.environment])
 
-  # Every ARN the pipeline statements below name. The precondition on the policy checks these are
-  # all set whenever the pipeline is enabled -- see the variables file for why.
-  pipeline_required_arns = {
-    pipeline_assets_bucket_arn         = var.pipeline_assets_bucket_arn
-    pipeline_emails_table_arn          = var.pipeline_emails_table_arn
-    pipeline_deals_table_arn           = var.pipeline_deals_table_arn
-    pipeline_skill_proposals_table_arn = var.pipeline_skill_proposals_table_arn
-    pipeline_knowledge_memory_arn      = var.pipeline_knowledge_memory_arn
-    pipeline_chat_memory_arn           = var.pipeline_chat_memory_arn
-    pipeline_parser_function_arn       = var.pipeline_parser_function_arn
-    pipeline_oms_upload_function_arn   = var.pipeline_oms_upload_function_arn
-    pipeline_agent_model_param_arn     = var.pipeline_agent_model_param_arn
-  }
-  pipeline_missing_arns = [for name, arn in local.pipeline_required_arns : name if arn == ""]
-
-  # Container environment the deal-pipeline BFF reads (src/lib/pipeline/server/env.ts), appended to
-  # the task definition only when the app is deployed here.
-  #
-  # The three PIPELINE_-prefixed names collide with recon's ASSETS_BUCKET / AGENT_MODEL_PARAM /
-  # SKILLS_PREFIX, which name recon's bucket, parameter and prefix in the same process; the pipeline
-  # BFF reads ONLY the prefixed names (a bare-name fallback once resolved to recon's bucket and
-  # parameter in this very task). The rest are unprefixed because nothing in recon reads them.
-  pipeline_task_environment = [
-    { name = "PIPELINE_ASSETS_BUCKET", value = var.pipeline_assets_bucket },
-    { name = "PIPELINE_AGENT_MODEL_PARAM", value = var.pipeline_agent_model_param },
-    { name = "PIPELINE_SKILLS_PREFIX", value = var.pipeline_skills_prefix },
-    { name = "EMAILS_TABLE", value = var.pipeline_emails_table },
-    { name = "DEALS_TABLE", value = var.pipeline_deals_table },
-    { name = "SKILL_PROPOSALS_TABLE", value = var.pipeline_skill_proposals_table },
-    { name = "KNOWLEDGE_MEMORY_ID", value = var.pipeline_knowledge_memory_id },
-    { name = "CHAT_MEMORY_ID", value = var.pipeline_chat_memory_id },
-    { name = "PARSER_FUNCTION", value = var.pipeline_parser_function_name },
-    { name = "OMS_UPLOAD_FUNCTION", value = var.pipeline_oms_upload_function_name },
-    { name = "ASSISTANT_MODEL_ID", value = var.pipeline_assistant_model_id },
-    { name = "PARSER_PROMPT_KEY", value = var.pipeline_parser_prompt_key },
-    # The simulate dialog's corpus comes from S3 here. There is deliberately no SAMPLE_EMAILS_DIR:
-    # the container has no checkout, and a disk path would read as configured while listing nothing.
-    { name = "PIPELINE_SAMPLES_PREFIX", value = var.pipeline_samples_prefix },
-  ]
-
-  # Task-role statements that exist only when the pipeline app is deployed in this console. Kept
-  # apart from the recon statements so a recon-only deployment's policy is byte-for-byte what it
-  # was before the app rail existed.
-  pipeline_task_statements = [
-    {
-      # The three pipeline tables, with exactly the verbs src/lib/pipeline/server/aws.ts exports:
-      # getItem, putItem (whole-row writes, conditional where a status transition needs it) and
-      # scanAll. Scan because the inbox, the deal list and the proposals list are all rendered whole
-      # -- demo-scale tables with no listing index. No UpdateItem, no Query and no index ARN: the BFF
-      # issues neither (the by_email GSI is the parser Lambda's, for re-parse). No DeleteItem: rows
-      # are superseded or rejected, never removed, so a proposal's decision and a deal's rejection
-      # stay on the record.
-      Effect = "Allow"
-      Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Scan"]
-      Resource = [
-        var.pipeline_emails_table_arn,
-        var.pipeline_deals_table_arn,
-        var.pipeline_skill_proposals_table_arn,
-      ]
-    },
-    {
-      # Object-level, one statement per access tier (the locals above), and nothing else in the
-      # bucket. Note the parser Lambda's own role in modules/deal-pipeline can read none of emails/
-      # or deal-csv/; this role can, because it is the one writing them.
-      Effect   = "Allow"
-      Action   = ["s3:GetObject"]
-      Resource = [for p in local.pipeline_s3_read_only : "${var.pipeline_assets_bucket_arn}/${p}"]
-    },
-    {
-      Effect   = "Allow"
-      Action   = ["s3:GetObject", "s3:PutObject"]
-      Resource = [for p in local.pipeline_s3_read_write : "${var.pipeline_assets_bucket_arn}/${p}"]
-    },
-    {
-      Effect   = "Allow"
-      Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
-      Resource = [for p in local.pipeline_s3_read_write_delete : "${var.pipeline_assets_bucket_arn}/${p}"]
-    },
-    {
-      # ListBucket authorizes on the BUCKET arn; the prefix condition confines it to the two prefixes
-      # the BFF lists, the way the recon statements above scope skills/ and lambda-src/. Narrower
-      # than the object grants on purpose: a listing is how a compromised task would discover keys it
-      # was never told about.
-      Effect    = "Allow"
-      Action    = ["s3:ListBucket"]
-      Resource  = var.pipeline_assets_bucket_arn
-      Condition = { StringLike = { "s3:prefix" = local.pipeline_s3_listed_prefixes } }
-    },
-    {
-      # Intake and reparse async-invoke the parser; approve invokes the mock OMS synchronously.
-      Effect   = "Allow"
-      Action   = ["lambda:InvokeFunction"]
-      Resource = [var.pipeline_parser_function_arn, var.pipeline_oms_upload_function_arn]
-    },
-    {
-      # The assistant chat calls Bedrock directly from the BFF (there is no agent runtime in the
-      # pipeline; the parser is a Lambda). Same shape as the pipeline's memory and parser roles: the
-      # model is runtime-selectable, so the grant covers every foundation model and this account's
-      # inference profiles rather than one fixed id.
-      Effect = "Allow"
-      Action = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
-      Resource = [
-        "arn:aws:bedrock:*::foundation-model/*",
-        "arn:aws:bedrock:${var.region}:${var.account_id}:inference-profile/*",
-      ]
-    },
-    {
-      # Both pipeline memories, with exactly the commands src/lib/pipeline/server/memoryClient.ts
-      # sends. Knowledge: the assistant's save_memory tool writes an event (CreateEvent), the
-      # assistant recalls consolidated records (RetrieveMemoryRecords), the Memory Manager lists and
-      # batch-deletes them. Chat: the assistant appends each turn (CreateEvent) and rebuilds history
-      # on page load (ListEvents). GetMemory is the read behind the Memory Manager's strategy panel,
-      # the same as recon's. No DeleteEvent: nothing in the pipeline BFF deletes an event -- the recon
-      # session routes that do target recon's MEMORY_ID under recon's own grant.
-      Effect = "Allow"
-      Action = [
-        "bedrock-agentcore:CreateEvent",
-        "bedrock-agentcore:ListEvents",
-        "bedrock-agentcore:RetrieveMemoryRecords",
-        "bedrock-agentcore:ListMemoryRecords",
-        "bedrock-agentcore:BatchDeleteMemoryRecords",
-        "bedrock-agentcore:GetMemory",
-      ]
-      Resource = [
-        var.pipeline_knowledge_memory_arn,
-        "${var.pipeline_knowledge_memory_arn}/*",
-        var.pipeline_chat_memory_arn,
-        "${var.pipeline_chat_memory_arn}/*",
-      ]
-    },
-    {
-      # The pipeline's Config tab reads and writes the parser model selection. The recon SSM grant
-      # above is path-scoped to /<name_prefix>/*, which this parameter is NOT under (the pipeline
-      # module prefixes its own names), so it is named here explicitly.
-      Effect   = "Allow"
-      Action   = ["ssm:GetParameter", "ssm:PutParameter"]
-      Resource = var.pipeline_agent_model_param_arn
-    },
-  ]
+  # App order, then each app's statements in the order it exports them -- the same rule as the
+  # environment. Statements travel jsonencode()d because IAM statements differ in shape -- some carry a
+  # Condition, Resource is a string or a list -- and no single HCL type holds them all (list(any)
+  # refuses: "all list elements must have the same type"); decoded here, they re-encode into the
+  # policy exactly as the app module wrote them.
+  app_task_statements = flatten([for app in local.enabled_apps : [for s in app.task_statements : jsondecode(s)]])
 }
 
 # ---------------------------------------------------------------------------------
@@ -575,16 +421,6 @@ locals {
 resource "aws_iam_role_policy" "ecs_task" {
   name = "task-policy"
   role = aws_iam_role.ecs_task.id
-
-  lifecycle {
-    # Fail at PLAN, naming the variable, rather than at apply with IAM's "MalformedPolicyDocument"
-    # (an empty Resource) or -- worse -- a policy that applies fine and names a resource that does
-    # not exist, which the console then reports as AccessDenied on every pipeline page.
-    precondition {
-      condition     = !var.pipeline_enabled || length(local.pipeline_missing_arns) == 0
-      error_message = "pipeline_enabled is true but these frontend-ecs inputs are empty: ${join(", ", local.pipeline_missing_arns)}. Pass every deal-pipeline module output, or set pipeline_enabled = false."
-    }
-  }
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -936,12 +772,11 @@ resource "aws_iam_role_policy" "ecs_task" {
         Resource  = var.assets_bucket_arn
         Condition = { StringLike = { "s3:prefix" = ["lambda-src/*"] } }
       },
-      # Deal-pipeline grants, only when that app is deployed in this console (local above). A
-      # filtered for-expression rather than `? : []`: the statements are objects of differing
-      # shapes (some carry a Condition), and a conditional insists both branches share one type.
-      # The console-settings grants follow, on the same pattern, whenever a prefix is configured
-      # (local.console_settings_statements above).
-      ], [for s in local.pipeline_task_statements : s if var.pipeline_enabled],
+      # App grants, for every app enabled in var.app_wiring (local.app_task_statements above),
+      # appended AFTER every recon statement so a recon-only console's policy is byte-for-byte what
+      # it was before the app rail existed. The console-settings grants follow, whenever a prefix is
+      # configured (local.console_settings_statements above).
+      ], local.app_task_statements,
     [for s in local.console_settings_statements : s if var.console_settings_prefix != ""])
   })
 }
@@ -1093,8 +928,8 @@ resource "aws_ecs_task_definition" "frontend" {
       { name = "CONSOLE_SETTINGS_PREFIX", value = var.console_settings_prefix },
       { name = "CONSOLE_ADMIN_GROUP", value = var.console_admin_group },
       { name = "CONSOLE_ORGANIZATION_LABEL", value = var.console_organization_label },
-      # Deal-pipeline BFF variables, only when that app is deployed here (local.pipeline_task_environment).
-    ], [for e in local.pipeline_task_environment : e if var.pipeline_enabled])
+      # App BFF variables, for every app enabled in var.app_wiring (local.app_environment above).
+    ], local.app_environment)
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -1104,6 +939,17 @@ resource "aws_ecs_task_definition" "frontend" {
       }
     }
   }])
+
+  lifecycle {
+    # A duplicated name in an ECS environment is last-one-wins with no warning. The recon names above
+    # are distinct; an app module that exports one of them (ASSETS_BUCKET rather than
+    # PIPELINE_ASSETS_BUCKET), or two apps that export the same name, fail here at plan, by name. A
+    # postcondition because the check needs the rendered list, which a precondition cannot read.
+    postcondition {
+      condition     = length(distinct([for e in jsondecode(self.container_definitions)[0].environment : e.name])) == length(jsondecode(self.container_definitions)[0].environment)
+      error_message = "the console task environment names a variable more than once: ${join(", ", try(nonsensitive(distinct([for e in jsondecode(self.container_definitions)[0].environment : e.name if length([for f in jsondecode(self.container_definitions)[0].environment : f if f.name == e.name]) > 1])), distinct([for e in jsondecode(self.container_definitions)[0].environment : e.name if length([for f in jsondecode(self.container_definitions)[0].environment : f if f.name == e.name]) > 1])))}. One process holds one value per name; prefix the app's variable (see var.app_wiring)."
+    }
+  }
 
   depends_on = [null_resource.codebuild_trigger]
 }

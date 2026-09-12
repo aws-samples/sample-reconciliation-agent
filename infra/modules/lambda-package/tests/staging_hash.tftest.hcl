@@ -101,9 +101,9 @@ run "rename_restages" {
   }
 }
 
-# Same sources, a second instance name (the standalone deal-pipeline root's). Two roots that share
-# one checkout used to stage into ONE directory under the module path; whichever ran last left its
-# dependency set there, and the other root's next plan zipped it with nothing in the plan to say so.
+# Same sources, a second instance name. Two instances that shared one checkout used to stage into
+# ONE directory under the module path; whichever ran last left its dependency set there, and the
+# other instance's next plan zipped it with nothing in the plan to say so.
 run "staging_directory_is_keyed_by_name" {
   command = plan
 
@@ -114,7 +114,7 @@ run "staging_directory_is_keyed_by_name" {
 
   assert {
     condition     = output.staging_dir != run.excluded_files_do_not_change_the_hash.staging_dir && endswith(output.staging_dir, "/.build/deal-pipeline-backend/staging")
-    error_message = "two instances with different names must stage into different directories, or the second root's staging run overwrites the first root's zip contents; got ${output.staging_dir}"
+    error_message = "two instances with different names must stage into different directories, or the second instance's staging run overwrites the first's zip contents; got ${output.staging_dir}"
   }
 
   # The name is part of what terraform_data.stage keys on: archive_file reads the staging directory

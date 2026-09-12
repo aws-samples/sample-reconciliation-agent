@@ -21,19 +21,33 @@ locals {
   oms_upload_function_name = "${var.name_prefix}-oms-upload"
 }
 
-# Log groups are declared (and created BEFORE the functions, via depends_on) so they carry the
-# retention setting. Left to Lambda, the group is auto-created on first invoke with retention
-# "never expire", and a later Terraform import would be needed to fix it.
-resource "aws_cloudwatch_log_group" "parser" {
-  #checkov:skip=CKV_AWS_158:Logs use the default CloudWatch-managed key; a KMS CMK adds overhead not warranted for demo logs.
-  name              = "/aws/lambda/${local.parser_function_name}"
-  retention_in_days = var.log_retention_days
+# Log groups are created BEFORE the functions (depends_on below) so they carry the retention setting.
+# Left to Lambda, the group is auto-created on first invoke with retention "never expire", and a later
+# Terraform import would be needed to fix it. modules/lambda-logs is the module the recon root uses
+# for its own Lambdas' groups; it is keyed here by label rather than by function name so the two
+# `moved` blocks below can name the new addresses (a moved index key must be a literal, and the
+# function names are built from var.name_prefix).
+module "lambda_logs" {
+  source = "../lambda-logs"
+
+  lambda_functions_by_key = {
+    parser     = local.parser_function_name
+    oms_upload = local.oms_upload_function_name
+  }
+  log_retention_days = var.log_retention_days
 }
 
-resource "aws_cloudwatch_log_group" "oms_upload" {
-  #checkov:skip=CKV_AWS_158:Logs use the default CloudWatch-managed key; a KMS CMK adds overhead not warranted for demo logs.
-  name              = "/aws/lambda/${local.oms_upload_function_name}"
-  retention_in_days = var.log_retention_days
+# The two groups were resources of this module before they moved into modules/lambda-logs. Same name,
+# same retention, so an existing deployment keeps its groups (and their retained logs) rather than
+# destroying and recreating them under the new addresses.
+moved {
+  from = aws_cloudwatch_log_group.parser
+  to   = module.lambda_logs.aws_cloudwatch_log_group.lambda["parser"]
+}
+
+moved {
+  from = aws_cloudwatch_log_group.oms_upload
+  to   = module.lambda_logs.aws_cloudwatch_log_group.lambda["oms_upload"]
 }
 
 # ---------------------------------------------------------------------------------
@@ -121,7 +135,7 @@ resource "aws_iam_role_policy" "parser" {
         # developer's credentials through the BFF.
         Effect   = "Allow"
         Action   = ["bedrock-agentcore:RetrieveMemoryRecords"]
-        Resource = [aws_bedrockagentcore_memory.knowledge.arn, "${aws_bedrockagentcore_memory.knowledge.arn}/*"]
+        Resource = [module.knowledge_memory.memory_arn, "${module.knowledge_memory.memory_arn}/*"]
       },
       {
         # The one Config-tab value the parser reads per invocation. Enumerated rather than
@@ -134,7 +148,7 @@ resource "aws_iam_role_policy" "parser" {
       {
         Effect   = "Allow"
         Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "${aws_cloudwatch_log_group.parser.arn}:*"
+        Resource = "${module.lambda_logs.log_group_arns["parser"]}:*"
       },
     ]
   })
@@ -159,7 +173,7 @@ resource "aws_lambda_function" "parser" {
       EMAILS_TABLE           = aws_dynamodb_table.emails.name
       DEALS_TABLE            = aws_dynamodb_table.deals.name
       ASSETS_BUCKET          = aws_s3_bucket.assets.bucket
-      KNOWLEDGE_MEMORY_ID    = aws_bedrockagentcore_memory.knowledge.id
+      KNOWLEDGE_MEMORY_ID    = module.knowledge_memory.memory_id
       AGENT_MODEL_PARAM      = aws_ssm_parameter.agent_model_id.name
       SKILLS_PREFIX          = local.skills_prefix
       PARSER_PROMPT_KEY      = local.parser_prompt_key
@@ -170,7 +184,7 @@ resource "aws_lambda_function" "parser" {
     }
   }
 
-  depends_on = [aws_cloudwatch_log_group.parser]
+  depends_on = [module.lambda_logs]
 }
 
 # The BFF invokes the parser asynchronously (InvocationType=Event), and async invocations retry
@@ -233,7 +247,7 @@ resource "aws_iam_role_policy" "oms_upload" {
       {
         Effect   = "Allow"
         Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "${aws_cloudwatch_log_group.oms_upload.arn}:*"
+        Resource = "${module.lambda_logs.log_group_arns["oms_upload"]}:*"
       },
     ]
   })
@@ -263,5 +277,5 @@ resource "aws_lambda_function" "oms_upload" {
     }
   }
 
-  depends_on = [aws_cloudwatch_log_group.oms_upload]
+  depends_on = [module.lambda_logs]
 }

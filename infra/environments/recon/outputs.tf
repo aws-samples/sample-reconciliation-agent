@@ -38,3 +38,163 @@ output "post_deploy_checklist" {
     var.console_admin_group != "" ? "" : "Console settings: console_admin_group is blank, so nobody can edit console-wide settings (access groups, app enablement, defaults) from the UI; every change needs a tfvars edit and an apply until an IdP group is named there.",
   ])
 }
+
+# ---------------------------------------------------------------------------------
+# chatbot-app/frontend/.env.local for running the console on a laptop AGAINST THIS DEPLOYMENT:
+#
+#   terraform output -raw frontend_env_local > ../../../chatbot-app/frontend/.env.local
+#   (cd ../../../chatbot-app/frontend && npm run dev)     # the BFF runs with your AWS credentials
+#
+# Every value is read back from the console task definition this root deploys
+# (module.frontend.task_environment) rather than re-derived here, so a laptop and the container
+# cannot disagree on what a variable means. The only lines that are NOT the task's are the
+# local-development settings .env.example documents: anonymous access on, the sample corpus read
+# from disk, the browser-side auth provider (a build argument in the container, a runtime variable
+# under `next dev`) and the console default model's env fallback.
+#
+# Indexing the map (not lookup() with a default) is deliberate: a name .env.example documents that
+# the task no longer sets fails the plan here instead of rendering an empty value the BFF would
+# report as a missing variable at the first request.
+#
+# Sensitive because the task environment carries EMAIL_CONFIRMATION_TOKEN. `output -raw` prints a
+# sensitive output regardless, and .env.local is gitignored (*.local).
+# ---------------------------------------------------------------------------------
+locals {
+  console_env = module.frontend.task_environment
+}
+
+output "frontend_env_local" {
+  description = "Complete chatbot-app/frontend/.env.local for a laptop run of the console against this deployment, rendered from the console task's own environment. Use with `terraform output -raw frontend_env_local`."
+  sensitive   = true
+  value       = <<-EOT
+    # Rendered by `terraform output -raw frontend_env_local` in infra/environments/recon for the
+    # ${var.name_prefix} deployment. Every value is the console task's own; .env.example says what each
+    # name means. Re-render after an apply rather than editing by hand.
+
+    # --- Authorization -----------------------------------------------------------------------------
+    # Local-dev mode: skip token verification and grant every configured app group (and both admin
+    # roles) to the single anonymous subject. Never set in a deployment.
+    ALLOW_ANONYMOUS_API=true
+    # Preview the shell as a restricted user, e.g. a pipeline user who is not an admin:
+    # ANONYMOUS_GROUPS=deal-desk
+    RECON_ACCESS_GROUP=${local.console_env["RECON_ACCESS_GROUP"]}
+    RECON_ADMIN_GROUP=${local.console_env["RECON_ADMIN_GROUP"]}
+    PIPELINE_ACCESS_GROUP=${local.console_env["PIPELINE_ACCESS_GROUP"]}
+    PIPELINE_ADMIN_GROUP=${local.console_env["PIPELINE_ADMIN_GROUP"]}
+    # The composed console's two switches, as this deployment sets them: exactly "false" hides the Deal
+    # Pipeline and 403s its API; exactly "true" makes an UNSET access group admins-only instead of
+    # open. Anonymous mode grants every group, so they only show under ANONYMOUS_GROUPS.
+    PIPELINE_ENABLED=${local.console_env["PIPELINE_ENABLED"]}
+    REQUIRE_ACCESS_GROUPS=${local.console_env["REQUIRE_ACCESS_GROUPS"]}
+    # Console-wide settings: the SSM layer under this prefix OVERLAYS the group variables above
+    # (stored -> env -> default) and is edited from the console's Settings screen; this root seeds it
+    # from the same tfvars values, so the two agree until someone edits in the UI. Comment the prefix
+    # out to run env-only (the Settings screens then render read-only). CONSOLE_ADMIN_GROUP is
+    # environment-only by design -- no stored value can grant it -- and anonymous mode makes you a
+    # console admin anyway.
+    CONSOLE_SETTINGS_PREFIX=${local.console_env["CONSOLE_SETTINGS_PREFIX"]}
+    CONSOLE_ADMIN_GROUP=${local.console_env["CONSOLE_ADMIN_GROUP"]}
+    CONSOLE_ORGANIZATION_LABEL="${local.console_env["CONSOLE_ORGANIZATION_LABEL"]}"
+    # Env fallback for the console default model an app may copy. The pipeline's model id doubles as
+    # that default (main.tf, console_settings.default_model_id), so the same value seeds
+    # ${local.console_env["CONSOLE_SETTINGS_PREFIX"]}/defaults/model-id, which wins once stored.
+    CONSOLE_DEFAULT_MODEL_ID=${var.pipeline_agent_model_id}
+    # Browser-side login flow (build-time in the container; runtime here).
+    NEXT_PUBLIC_AUTH_PROVIDER=${var.auth_provider}
+    AWS_REGION=${local.console_env["AWS_REGION"]}
+    # Server-side token verification, read only when anonymous mode is off. The task's values, kept
+    # commented so `next dev` stays anonymous; uncomment and complete (see .env.example) to verify
+    # real tokens from the laptop.
+    # AUTH_PROVIDER=${local.console_env["AUTH_PROVIDER"]}
+    # OKTA_ISSUER=${local.console_env["OKTA_ISSUER"]}
+    # OKTA_CLIENT_ID=${local.console_env["OKTA_CLIENT_ID"]}
+    # AUTH_GROUPS_CLAIM=${local.console_env["AUTH_GROUPS_CLAIM"]}
+
+    # --- Trade Reconciliation (/api/recon) ---------------------------------------------------------
+    CASES_TABLE=${local.console_env["CASES_TABLE"]}
+    AUDIT_TABLE=${local.console_env["AUDIT_TABLE"]}
+    ASSETS_BUCKET=${local.console_env["ASSETS_BUCKET"]}
+    SKILLS_CATALOG_KEY=${local.console_env["SKILLS_CATALOG_KEY"]}
+    SKILLS_PREFIX=${local.console_env["SKILLS_PREFIX"]}
+    SYSTEM_PROMPT_KEY=${local.console_env["SYSTEM_PROMPT_KEY"]}
+    HARNESS_SYSTEM_PROMPT_KEY=${local.console_env["HARNESS_SYSTEM_PROMPT_KEY"]}
+    LESSONS_TABLE=${local.console_env["LESSONS_TABLE"]}
+    GRAPH_MAILBOX=${local.console_env["GRAPH_MAILBOX"]}
+    CONTACTS_TABLE=${local.console_env["CONTACTS_TABLE"]}
+    TEMPLATES_TABLE=${local.console_env["TEMPLATES_TABLE"]}
+    WORKFLOW_TYPES_TABLE=${local.console_env["WORKFLOW_TYPES_TABLE"]}
+    UPLOADS_TABLE=${local.console_env["UPLOADS_TABLE"]}
+    IDP_INPUT_BUCKET=${local.console_env["IDP_INPUT_BUCKET"]}
+    UPLOAD_STAGING_BUCKET=${local.console_env["UPLOAD_STAGING_BUCKET"]}
+    EMAIL_PREPROCESS_FUNCTION=${local.console_env["EMAIL_PREPROCESS_FUNCTION"]}
+    IDP_APPSYNC_ENDPOINT=${local.console_env["IDP_APPSYNC_ENDPOINT"]}
+    NOTICES_TABLE=${local.console_env["NOTICES_TABLE"]}
+    RECON_GATEWAY_URL=${local.console_env["RECON_GATEWAY_URL"]}
+    REPROCESS_CAP=${local.console_env["REPROCESS_CAP"]}
+    AGENT_RUNTIME_ARN=${local.console_env["AGENT_RUNTIME_ARN"]}
+    AGENT_WORKER_FUNCTION=${local.console_env["AGENT_WORKER_FUNCTION"]}
+    INTAKE_FUNCTION=${local.console_env["INTAKE_FUNCTION"]}
+    POLICY_ENGINE_NAME=${local.console_env["POLICY_ENGINE_NAME"]}
+    EGRESS_GATEWAY_ARN=${local.console_env["EGRESS_GATEWAY_ARN"]}
+    TIER1_ENABLED_PARAM=${local.console_env["TIER1_ENABLED_PARAM"]}
+    LAMBDA_SRC_PREFIX=${local.console_env["LAMBDA_SRC_PREFIX"]}
+    RECON_MEMORY_ID=${local.console_env["RECON_MEMORY_ID"]}
+    AUTO_RESOLVE_PARAM=${local.console_env["AUTO_RESOLVE_PARAM"]}
+    COMMENT_REQUIREMENT_PARAM=${local.console_env["COMMENT_REQUIREMENT_PARAM"]}
+    AGENT_BACKEND_PARAM=${local.console_env["AGENT_BACKEND_PARAM"]}
+    AGENT_MODEL_PARAM=${local.console_env["AGENT_MODEL_PARAM"]}
+    NAME_PREFIX=${local.console_env["NAME_PREFIX"]}
+    HARNESS_CONFIG_VERSION_PARAM=${local.console_env["HARNESS_CONFIG_VERSION_PARAM"]}
+    EVAL_RESULTS_LOG_GROUP_PREFIX=${local.console_env["EVAL_RESULTS_LOG_GROUP_PREFIX"]}
+    HARNESS_LOG_GROUP=${local.console_env["HARNESS_LOG_GROUP"]}
+    HARNESS_SERVICE_NAME=${local.console_env["HARNESS_SERVICE_NAME"]}
+    ANALYST_AGREEMENT_EVALUATOR_ID=${local.console_env["ANALYST_AGREEMENT_EVALUATOR_ID"]}
+    EMAIL_CONFIRMATION_TOKEN=${local.console_env["EMAIL_CONFIRMATION_TOKEN"]}
+    AWS_ACCOUNT_ID=${local.console_env["AWS_ACCOUNT_ID"]}
+    BACKEND_SERVICE_NAMES=${local.console_env["BACKEND_SERVICE_NAMES"]}
+    BACKEND_EVENT_LOG_GROUPS=${local.console_env["BACKEND_EVENT_LOG_GROUPS"]}
+
+    # --- Deal Pipeline (/api/pipeline) -------------------------------------------------------------%{if var.enable_deal_pipeline}
+    PIPELINE_ASSETS_BUCKET=${local.console_env["PIPELINE_ASSETS_BUCKET"]}
+    EMAILS_TABLE=${local.console_env["EMAILS_TABLE"]}
+    DEALS_TABLE=${local.console_env["DEALS_TABLE"]}
+    SKILL_PROPOSALS_TABLE=${local.console_env["SKILL_PROPOSALS_TABLE"]}
+    KNOWLEDGE_MEMORY_ID=${local.console_env["KNOWLEDGE_MEMORY_ID"]}
+    CHAT_MEMORY_ID=${local.console_env["CHAT_MEMORY_ID"]}
+    PARSER_FUNCTION=${local.console_env["PARSER_FUNCTION"]}
+    OMS_UPLOAD_FUNCTION=${local.console_env["OMS_UPLOAD_FUNCTION"]}
+    PIPELINE_AGENT_MODEL_PARAM=${local.console_env["PIPELINE_AGENT_MODEL_PARAM"]}
+    ASSISTANT_MODEL_ID=${local.console_env["ASSISTANT_MODEL_ID"]}
+    # Local dev reads the simulate dialog's corpus from disk (relative to chatbot-app/frontend), so an
+    # edited sample shows up without an apply; the container has no such directory and reads the S3
+    # copy under PIPELINE_SAMPLES_PREFIX instead. Comment SAMPLE_EMAILS_DIR out to exercise that path.
+    SAMPLE_EMAILS_DIR=../../data/deal-emails
+    PIPELINE_SAMPLES_PREFIX=${local.console_env["PIPELINE_SAMPLES_PREFIX"]}
+    PIPELINE_SKILLS_PREFIX=${local.console_env["PIPELINE_SKILLS_PREFIX"]}
+    PARSER_PROMPT_KEY=${local.console_env["PARSER_PROMPT_KEY"]}%{else}
+    # enable_deal_pipeline = false: this deployment has no pipeline resources, and PIPELINE_ENABLED=false
+    # above hides the app. Set the variable, apply, and re-render this file to get the block.%{endif}
+  EOT
+}
+
+# ---------------------------------------------------------------------------------
+# The by-hand seed reconciliation for the pipeline bucket -- the run an operator makes BEFORE setting
+# enable_pipeline_seed_push = true on a deployment whose pipeline predates the push (see that
+# variable). Rendered from the module's own editable_seeds output, so the keys and repo files are
+# exactly the ones aws_lambda_invocation.pipeline_seed_push will read; the repo paths are relative to
+# the repo root, which is where the command must run:
+#
+#   eval "$(cd infra/environments/recon && terraform output -raw pipeline_seed_push_command)"
+#
+# Exit 0 means every key is adopted or already recorded and the variable can be flipped; exit 1 names
+# each AMBIGUOUS key with the two commands that settle it (take repo, or keep live and commit it).
+# Empty when the pipeline is not deployed. Not sensitive: a bucket name and repo-relative paths.
+# ---------------------------------------------------------------------------------
+output "pipeline_seed_push_command" {
+  description = "Run from the repo root, with the deployer's AWS credentials, to adopt the pipeline's live skill and prompt objects into the seed reconciliation before enabling enable_pipeline_seed_push. Empty unless enable_deal_pipeline."
+  value = var.enable_deal_pipeline ? join(" ", [
+    "BUCKET=${try(module.deal_pipeline[0].assets_bucket, "")}",
+    "SEEDS='${jsonencode(try({ for k, seed in module.deal_pipeline[0].editable_seeds : k => seed.source }, {}))}'",
+    "python3 infra/scripts/push_editable_seeds.py",
+  ]) : ""
+}

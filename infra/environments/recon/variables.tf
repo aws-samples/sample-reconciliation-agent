@@ -258,6 +258,25 @@ variable "pipeline_memory_model_id" {
   default     = "us.anthropic.claude-sonnet-5"
 }
 
+variable "enable_pipeline_seed_push" {
+  description = <<-EOT
+    Run the deploy-actions seed reconciliation (aws_lambda_invocation.pipeline_seed_push) against the
+    pipeline's create-only seeds -- its skills and parser prompt -- on every apply, the way recon's
+    seed_push does for recon's. Only meaningful with enable_deal_pipeline = true; ignored otherwise.
+
+    false (the default) on purpose: the reconciliation's FIRST run against a pipeline whose skill or
+    prompt objects were edited live before the push existed fails the apply as AMBIGUOUS (no marker
+    yet, and the live ETag differs from the repo MD5) -- after the module moves and the policy update
+    in the same apply have landed, which is not where an auto-applying CI should stop. Adopt those
+    keys first, by hand: `terraform output -raw pipeline_seed_push_command` prints the exact
+    infra/scripts/push_editable_seeds.py run for this deployment's bucket and keys; re-run it until it
+    exits 0, then set this true. A fresh deployment can set it true from the start, because a
+    just-created object is the "record" branch and cannot be ambiguous.
+  EOT
+  type        = bool
+  default     = false
+}
+
 # Seeds the one extraction workflow type at create time. Empty (the default) seeds only the
 # knowledge-base type, and an operator adds extraction types from the Config tab -- which is the
 # right shape here, because the configuration version names live in the document-pipeline deployment

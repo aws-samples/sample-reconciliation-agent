@@ -130,23 +130,19 @@ jobs:
           terraform init -backend=false -input=false
           terraform validate
 
-      - name: Validate the standalone deal-pipeline root
-        working-directory: infra/environments/deal-pipeline
-        # A second root module (local state, no backend block). The recon root composes the same
-        # module count-gated, so a break that only shows with the module instantiated would
-        # otherwise slip past validation.
-        run: |
-          terraform init -backend=false -input=false
-          terraform validate
-
       - name: Module tests
         # Plan-only under mocked providers: no credentials, nothing created. Each module pins its
-        # providers in a versions.tf so `init` resolves the same majors the roots do; the mocks
+        # providers in a versions.tf so `init` resolves the same majors the root does; the mocks
         # still need the provider binaries for their schemas.
+        #
+        # Self-discovering: every module with a tests/ directory runs, so a new suite needs no edit
+        # here or in .gitlab-ci.yml (which runs the same loop). The deal-pipeline module is only
+        # count-gated in the recon root, so its own suite is what instantiates it in CI.
         run: |
-          for module in console-settings deal-pipeline frontend-ecs lambda-package; do
-            echo "== infra/modules/$module"
-            (cd "infra/modules/$module" && terraform init -backend=false -input=false && terraform test)
+          for tests in infra/modules/*/tests; do
+            module="$(dirname "$tests")"
+            echo "== $module"
+            (cd "$module" && terraform init -backend=false -input=false && terraform test) || exit 1
           done
 
   secret-scan:

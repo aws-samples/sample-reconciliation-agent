@@ -42,3 +42,14 @@ output "is_private" {
   description = "True when the frontend is deployed in private-VPC mode (no CloudFront / no public endpoints)."
   value       = var.private_vpc
 }
+
+# The console container's environment as a name => value map, READ BACK from the task definition
+# this module renders rather than rebuilt from the inputs. The recon root renders a laptop's
+# chatbot-app/frontend/.env.local from it (output frontend_env_local), so the laptop and the
+# container cannot disagree on a single value: whatever the task carries is what the file says.
+# Sensitive because EMAIL_CONFIRMATION_TOKEN is in it.
+output "task_environment" {
+  description = "Every environment variable of the console container, name => value, exactly as the ECS task definition carries it: recon, console-wide and -- when pipeline_enabled -- the pipeline's. Feeds the recon root's frontend_env_local output."
+  sensitive   = true
+  value       = { for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name => e.value }
+}

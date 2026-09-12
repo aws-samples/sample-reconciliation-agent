@@ -13,6 +13,19 @@ variable "assets_bucket_arn" {
   type        = string
 }
 
+variable "additional_assets_bucket_arns" {
+  description = <<-EOT
+    ARNs of further SSE-S3 buckets whose UI-editable seeds the same reconciliation pushes -- the
+    deal pipeline's assets bucket when that app is deployed. Each gets the same two statements as
+    assets_bucket_arn (GetEncryptionConfiguration on the bucket; Get/PutObject under it), APPENDED
+    after the existing statements so that with the default [] the rendered policy is byte for byte
+    what it was before this input existed, and the recon deployment plans no change. A list so the
+    root can pass try([module.deal_pipeline[0].assets_bucket_arn], []).
+  EOT
+  type        = list(string)
+  default     = []
+}
+
 variable "user_pool_arn" {
   description = <<-EOT
     ARN of the Cognito user pool whose SPA client gets its callback URLs patched. Scoped to one

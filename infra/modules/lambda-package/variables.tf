@@ -4,7 +4,7 @@ variable "backend_dir" {
 }
 
 variable "name" {
-  description = "Base name for the output zip AND for this instance's staging directory (.build/<name>/staging), e.g. \"backend\". Two roots that instantiate the module from one checkout must use different names or they stage over each other."
+  description = "Base name for the output zip AND for this instance's staging directory (.build/<name>/staging), e.g. \"backend\". One staging directory per module instance: two instances in one checkout must use different names or they stage over each other."
   type        = string
   default     = "backend"
 }
@@ -12,18 +12,16 @@ variable "name" {
 variable "runtime_dependencies" {
   description = "Third-party pip deps to vendor into the zip. boto3/botocore are provided by the Lambda runtime and must NOT be listed here."
   type        = list(string)
-  # Empty by default, DELIBERATELY: which wheels a zip needs is a property of the Lambdas a ROOT
-  # deploys, not of this module, so every root spells its own list out (see
-  # infra/environments/recon/main.tf and infra/environments/deal-pipeline/main.tf). A default that
-  # listed the recon dependencies would silently bloat the standalone demo's zip; one that listed
-  # nothing while a root relied on it would ship a zip whose imports fail at cold start. With an
-  # empty list stage.sh never calls pip.
+  # Empty by default, DELIBERATELY: which wheels a zip needs is a property of the Lambdas the ROOT
+  # deploys, not of this module, so the root spells its own list out (see
+  # infra/environments/recon/main.tf). A default that listed the recon dependencies would silently
+  # bloat any leaner instance's zip; one that listed nothing while a root relied on it would ship a
+  # zip whose imports fail at cold start. With an empty list stage.sh never calls pip.
   #
   # One list for every Lambda a root deploys: a root builds ONE zip and every Lambda it deploys runs
-  # from it, so the list is the union of what all of them import. Roots do not share a staging
-  # directory (local.staging_dir is keyed by var.name), so the standalone deal-pipeline root's
-  # shorter list cannot end up in recon's zip -- two roots given the SAME name from one checkout
-  # would collide, which is why the standalone root names its instance differently.
+  # from it, so the list is the union of what all of them import. Each module instance stages into
+  # its own directory (local.staging_dir is keyed by var.name), so two instances in one checkout with
+  # different lists cannot overwrite each other's staging tree -- two given the SAME name would.
   #
   # The recon root's list is DUPLICATED in .gitlab-ci.yml's pre-plan staging call, which passes it
   # as arguments to stage.sh. The two MUST agree: archive_file reads the staging directory at PLAN

@@ -489,24 +489,15 @@ variable "pipeline_admin_group" {
 }
 
 # ---------------------------------------------------------------------------------
-# Deal-pipeline app wiring (modules/deal-pipeline), all optional.
-#
-# Every value defaults so a caller that deploys the recon console alone is unchanged. When
-# pipeline_enabled is true the task gets the PIPELINE_*/EMAILS_TABLE/... environment and the task
-# role gets grants on exactly these resources; a precondition on the policy insists every ARN is
-# set, because an empty Resource list is a malformed policy and a "" table name is a request to a
-# table that cannot exist.
-#
-# Three names are PIPELINE_-prefixed in the container (PIPELINE_ASSETS_BUCKET,
-# PIPELINE_AGENT_MODEL_PARAM, PIPELINE_SKILLS_PREFIX) because the recon BFF already reads
-# ASSETS_BUCKET, AGENT_MODEL_PARAM and SKILLS_PREFIX for ITS bucket, parameter and prefix, and one
-# process cannot hold two values under one name. The pipeline BFF reads ONLY the prefixed names: a
-# fallback to the bare ones would resolve to recon's bucket and parameter in this very task, which is
-# why the standalone root's env_local output emits the prefixed names as well.
+# The console-level switch for the deal-pipeline app. The app's own wiring -- its environment and its
+# task-role grants -- arrives through app_wiring below; this is what the console SHELL needs to know:
+# whether to show the app and serve or refuse /api/pipeline/* (PIPELINE_ENABLED), and whether a blank
+# access group is open or fails closed (REQUIRE_ACCESS_GROUPS). A root feeds it and
+# app_wiring["pipeline"].enabled from one variable, so the two cannot disagree.
 # ---------------------------------------------------------------------------------
 
 variable "pipeline_enabled" {
-  description = "Deploy the deal-pipeline app inside this console: its environment variables and task-role grants, PIPELINE_ENABLED=true and REQUIRE_ACCESS_GROUPS=true. false (the default) is the recon-only console: PIPELINE_ENABLED=false hides the app and refuses its API. true requires recon_access_group and pipeline_access_group."
+  description = "Tell the console the deal-pipeline app is deployed here: PIPELINE_ENABLED=true and REQUIRE_ACCESS_GROUPS=true. false (the default) is the recon-only console: PIPELINE_ENABLED=false hides the app and refuses its API. true requires recon_access_group and pipeline_access_group. The app's environment and grants are app_wiring[\"pipeline\"]'s, fed from the same root variable."
   type        = bool
   default     = false
 
@@ -519,129 +510,35 @@ variable "pipeline_enabled" {
   }
 }
 
-variable "pipeline_assets_bucket" {
-  description = "The deal pipeline's S3 bucket (skills, prompts, security master, sample corpus, emails, staging CSVs). Rendered as PIPELINE_ASSETS_BUCKET."
-  type        = string
-  default     = ""
-}
+# ---------------------------------------------------------------------------------
+# Per-app wiring. One entry per app the console hosts beside recon, keyed by app id. This module
+# appends every ENABLED entry's environment to the container and its statements to the task role,
+# and knows nothing else about the app: adding an app is one entry here, not a set of variables.
+#
+# The app module builds both from its own resources (modules/deal-pipeline: console_environment and
+# console_task_statements), so an ARN can never arrive empty and nothing here has to check for one.
+# What the app module must keep to:
+#   * Environment names must not collide with recon's (ASSETS_BUCKET, SKILLS_PREFIX,
+#     AGENT_MODEL_PARAM, ...) or with another app's: one process holds one value per name, and ECS
+#     resolves a duplicate last-one-wins with no warning. Prefix them (PIPELINE_ASSETS_BUCKET). The
+#     task definition's postcondition refuses a duplicate at plan.
+#   * task_statements are IAM statements jsonencode()d ONE PER ENTRY -- statements differ in shape
+#     (a Condition here, a string Resource there) and no single HCL type holds them all -- and they
+#     land in the policy exactly as written, after every recon statement, in app order.
+#   * enabled = false contributes nothing, whatever the lists hold: a root with a count-gated app
+#     module passes try(module.x[0].console_environment, []) and flips this from the same variable.
+# Empty (the default) is the recon-only console, whose environment and policy are byte-for-byte what
+# they were before this input existed; tests/app_wiring.tftest.hcl pins both.
+# ---------------------------------------------------------------------------------
 
-variable "pipeline_assets_bucket_arn" {
-  description = "ARN of the same bucket, for the prefix-scoped object grants and the ListBucket condition."
-  type        = string
-  default     = ""
-}
-
-variable "pipeline_emails_table" {
-  description = "Deal-pipeline emails table name (EMAILS_TABLE)."
-  type        = string
-  default     = ""
-}
-
-variable "pipeline_emails_table_arn" {
-  type    = string
-  default = ""
-}
-
-variable "pipeline_deals_table" {
-  description = "Deal-pipeline deals table name (DEALS_TABLE). The grant covers the table alone: the BFF reads deals by GetItem and Scan, and the by_email GSI is the parser Lambda's (re-parse), not the console's."
-  type        = string
-  default     = ""
-}
-
-variable "pipeline_deals_table_arn" {
-  type    = string
-  default = ""
-}
-
-variable "pipeline_skill_proposals_table" {
-  description = "Deal-pipeline skill-proposals table name (SKILL_PROPOSALS_TABLE)."
-  type        = string
-  default     = ""
-}
-
-variable "pipeline_skill_proposals_table_arn" {
-  type    = string
-  default = ""
-}
-
-variable "pipeline_knowledge_memory_id" {
-  description = "AgentCore Memory holding the edge_cases strategy: the assistant's save_memory writes it, the Memory Manager lists and deletes its records (KNOWLEDGE_MEMORY_ID)."
-  type        = string
-  default     = ""
-}
-
-variable "pipeline_knowledge_memory_arn" {
-  type    = string
-  default = ""
-}
-
-variable "pipeline_chat_memory_id" {
-  description = "AgentCore Memory the assistant writes chat turns to and rebuilds history from (CHAT_MEMORY_ID)."
-  type        = string
-  default     = ""
-}
-
-variable "pipeline_chat_memory_arn" {
-  type    = string
-  default = ""
-}
-
-variable "pipeline_parser_function_name" {
-  description = "Parsing-agent Lambda the BFF async-invokes on intake and reparse (PARSER_FUNCTION)."
-  type        = string
-  default     = ""
-}
-
-variable "pipeline_parser_function_arn" {
-  type    = string
-  default = ""
-}
-
-variable "pipeline_oms_upload_function_name" {
-  description = "Mock OMS validator Lambda the BFF invokes synchronously on approve (OMS_UPLOAD_FUNCTION)."
-  type        = string
-  default     = ""
-}
-
-variable "pipeline_oms_upload_function_arn" {
-  type    = string
-  default = ""
-}
-
-variable "pipeline_agent_model_param" {
-  description = "SSM parameter name holding the runtime-selected parser model; the Config tab reads and writes it (PIPELINE_AGENT_MODEL_PARAM)."
-  type        = string
-  default     = ""
-}
-
-variable "pipeline_agent_model_param_arn" {
-  description = "ARN of the same parameter. Enumerated rather than path-scoped, unlike the recon parameters: it lives under the pipeline's own prefix, and a wildcard there would hand this role every parameter added under it later."
-  type        = string
-  default     = ""
-}
-
-variable "pipeline_assistant_model_id" {
-  description = "Bedrock model (or inference-profile) id the assistant chat invokes directly (ASSISTANT_MODEL_ID)."
-  type        = string
-  default     = ""
-}
-
-variable "pipeline_samples_prefix" {
-  description = "S3 prefix of the seeded sample-email corpus the simulate dialog lists (PIPELINE_SAMPLES_PREFIX). The container has no checkout, so unlike local dev there is no SAMPLE_EMAILS_DIR fallback."
-  type        = string
-  default     = "samples/"
-}
-
-variable "pipeline_skills_prefix" {
-  description = "S3 prefix of the pipeline's editable skills (PIPELINE_SKILLS_PREFIX); also the prefix the task role may read, write and list."
-  type        = string
-  default     = "skills/"
-}
-
-variable "pipeline_parser_prompt_key" {
-  description = "S3 key of the parser system prompt the Skills tab edits in place (PARSER_PROMPT_KEY)."
-  type        = string
-  default     = "prompts/parser-system.md"
+variable "app_wiring" {
+  description = "Per-app console wiring, keyed by app id: { pipeline = { enabled = bool, environment = [{ name, value }, ...], task_statements = [jsonencode(statement), ...] } }. Enabled entries are appended to the container environment and to the task-role policy after every recon variable and statement, in app order and then exactly as the app exports them (never re-sorted: the order is part of the task definition); disabled entries and the empty default contribute nothing."
+  type = map(object({
+    enabled         = bool
+    environment     = list(object({ name = string, value = string }))
+    task_statements = list(string)
+  }))
+  default = {}
 }
 
 # ---------------------------------------------------------------------------------

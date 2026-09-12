@@ -30,7 +30,7 @@ output "policy_engine_name" {
 
 output "memory_id" {
   description = "AgentCore Memory id."
-  value       = aws_bedrockagentcore_memory.this.id
+  value       = module.memory.memory_id
 }
 
 # The `kb_id` / `kb_data_source_id` outputs are gone with the customer-managed KB they pointed at
@@ -69,7 +69,7 @@ output "kb_connector_target_id" {
 
 output "memory_arn" {
   description = "ARN of the AgentCore Memory (for CreateEvent/Retrieve IAM grants)."
-  value       = aws_bedrockagentcore_memory.this.arn
+  value       = module.memory.memory_arn
 }
 
 output "ingress_gateway_url" {

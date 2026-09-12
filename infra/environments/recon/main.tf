@@ -11,8 +11,8 @@ data "aws_caller_identity" "current" {}
 # it once; the Lambda modules reference the same zip.
 #
 # runtime_dependencies is spelled out here rather than defaulted in the module, because ONE zip
-# serves every Lambda this root deploys and the module's staging directory is shared by every
-# instance (see its variables.tf): the list has to be the union of what all of them import.
+# serves every Lambda this root deploys (see the module's variables.tf): the list has to be the
+# union of what all of them import.
 #   pydantic          backend/intake, recon_core -- the ReconItem model and every payload schema.
 #   PyYAML            backend/recon_core/skill_meta.py parses SKILL.md frontmatter as real YAML.
 #   extract-msg,
@@ -47,14 +47,15 @@ module "lambda_package" {
 # composed beside the recon platform so the console serves both apps behind one app rail. Off by
 # default: an existing recon deployment is unchanged until an operator flips enable_deal_pipeline.
 #
-# name_prefix is "<recon prefix>-pipeline", NOT the module's design-doc default "deal-pipeline-dev":
-# the standalone root (infra/environments/deal-pipeline) deploys that prefix into the same account
-# for local development, and two roots creating `deal-pipeline-dev-*` would fight over one bucket,
-# one set of tables and one SSM parameter.
+# name_prefix is "<recon prefix>-pipeline", NOT the design doc's "deal-pipeline-dev": the pipeline's
+# bucket, tables and parameter then read as this environment's beside the recon ones, and a
+# `deal-pipeline-dev-*` deployment that predates the composition (or belongs to another checkout)
+# in the same account cannot collide with them. This is also the prefix the deployed environment
+# already carries, so it must not change.
 #
 # The module reads region and account from its own data sources, so neither is passed. The zip is
-# the shared one above (its tzdata entry is what the parser needs). content_root is spelled out for
-# the same reason the standalone root spells it out: so a reader sees where the S3 seeds come from.
+# the shared one above (its tzdata entry is what the parser needs). content_root is spelled out
+# rather than left to the module default so a reader sees where the S3 seeds come from.
 module "deal_pipeline" {
   count  = var.enable_deal_pipeline ? 1 : 0
   source = "../../modules/deal-pipeline"
@@ -190,33 +191,20 @@ module "frontend" {
   console_admin_group        = var.console_admin_group
   console_organization_label = var.console_organization_label
 
-  # Deal-pipeline app wiring. try(..., "") because module.deal_pipeline is count-gated: with the
-  # app off there is no instance to index, and the frontend module's pipeline_* inputs default to ""
-  # -- the module then renders none of the pipeline environment and none of the pipeline grants.
-  pipeline_enabled                   = var.enable_deal_pipeline
-  pipeline_assets_bucket             = try(module.deal_pipeline[0].assets_bucket, "")
-  pipeline_assets_bucket_arn         = try(module.deal_pipeline[0].assets_bucket_arn, "")
-  pipeline_emails_table              = try(module.deal_pipeline[0].emails_table, "")
-  pipeline_emails_table_arn          = try(module.deal_pipeline[0].emails_table_arn, "")
-  pipeline_deals_table               = try(module.deal_pipeline[0].deals_table, "")
-  pipeline_deals_table_arn           = try(module.deal_pipeline[0].deals_table_arn, "")
-  pipeline_skill_proposals_table     = try(module.deal_pipeline[0].skill_proposals_table, "")
-  pipeline_skill_proposals_table_arn = try(module.deal_pipeline[0].skill_proposals_table_arn, "")
-  pipeline_knowledge_memory_id       = try(module.deal_pipeline[0].knowledge_memory_id, "")
-  pipeline_knowledge_memory_arn      = try(module.deal_pipeline[0].knowledge_memory_arn, "")
-  pipeline_chat_memory_id            = try(module.deal_pipeline[0].chat_memory_id, "")
-  pipeline_chat_memory_arn           = try(module.deal_pipeline[0].chat_memory_arn, "")
-  pipeline_parser_function_name      = try(module.deal_pipeline[0].parser_function_name, "")
-  pipeline_parser_function_arn       = try(module.deal_pipeline[0].parser_function_arn, "")
-  pipeline_oms_upload_function_name  = try(module.deal_pipeline[0].oms_upload_function_name, "")
-  pipeline_oms_upload_function_arn   = try(module.deal_pipeline[0].oms_upload_function_arn, "")
-  pipeline_agent_model_param         = try(module.deal_pipeline[0].agent_model_param, "")
-  pipeline_agent_model_param_arn     = try(module.deal_pipeline[0].agent_model_param_arn, "")
-  # The assistant has no Config-tab override, so it runs the same model the parser is seeded with.
-  pipeline_assistant_model_id = var.pipeline_agent_model_id
-  pipeline_samples_prefix     = try(module.deal_pipeline[0].samples_prefix, "samples/")
-  pipeline_skills_prefix      = try(module.deal_pipeline[0].skills_prefix, "skills/")
-  pipeline_parser_prompt_key  = try(module.deal_pipeline[0].parser_prompt_key, "prompts/parser-system.md")
+  # Deal-pipeline app wiring. The module exports the environment its BFF reads and the task-role
+  # grants on its resources (console_environment, console_task_statements), so the console module
+  # knows apps only in the abstract. try(..., []) because module.deal_pipeline is count-gated: with
+  # the app off there is no instance to index, and an empty list wires nothing. pipeline_enabled is
+  # the console-level switch (PIPELINE_ENABLED, REQUIRE_ACCESS_GROUPS); both come from the one
+  # variable so they cannot disagree.
+  pipeline_enabled = var.enable_deal_pipeline
+  app_wiring = {
+    pipeline = {
+      enabled         = var.enable_deal_pipeline
+      environment     = try(module.deal_pipeline[0].console_environment, [])
+      task_statements = try(module.deal_pipeline[0].console_task_statements, [])
+    }
+  }
 
   # BFF data access (same-origin /api/recon/* routes read these via the ECS task role).
   cases_table       = module.foundation.cases_table
@@ -323,6 +311,11 @@ module "deploy_actions" {
   # client's configuration, so this grant is deliberately not broader.
   user_pool_arn     = module.foundation.user_pool_arn
   assets_bucket_arn = module.foundation.assets_bucket_arn
+  # The pipeline's bucket too, when that app is deployed: its create-only seeds republish through
+  # the same reconciliation (aws_lambda_invocation.pipeline_seed_push below). try() rather than a
+  # conditional because module.deal_pipeline has no instance to index when the app is off; with the
+  # app off the list is empty and the module renders the policy it always has.
+  additional_assets_bucket_arns = try([module.deal_pipeline[0].assets_bucket_arn], [])
 }
 
 # Patch the Cognito SPA client's OAuth callback/logout URLs to the CloudFront domain after the
@@ -621,20 +614,25 @@ locals {
 # Seed the harness's CALLING CONTRACT to S3 (submit_proposal fields + prefixed gateway tool
 # names). This is appended after the shared policy core in system_prompt_seed below — the policy
 # itself is NOT duplicated here, so the two backends cannot drift apart. Create-only like the other
-# editable objects, so this resource writes the object once and never overwrites the live text — but
-# repo edits do NOT need a manual `aws s3 cp`: `aws_lambda_invocation.seed_push` below re-pushes
-# every changed `local.editable_seeds` entry on each apply, and fails the apply on a two-sided
-# conflict. (This comment claimed the opposite until 2026-09-04 and misled a planning pass.)
-resource "aws_s3_object" "harness_system_prompt_seed" {
+# editable objects (modules/seeded-object, create_only = true: first write only, and the module's
+# header explains why it ignores more than etag/source), so this writes the object once and never
+# overwrites the live text — but repo edits do NOT need a manual `aws s3 cp`:
+# `aws_lambda_invocation.seed_push` below re-pushes every changed `local.editable_seeds` entry on
+# each apply, and fails the apply on a two-sided conflict. (This comment claimed the opposite until
+# 2026-09-04 and misled a planning pass.)
+module "harness_system_prompt_seed" {
+  source = "../../modules/seeded-object"
+
   bucket       = module.foundation.assets_bucket
   key          = "system-prompt-harness.md"
-  source       = local.editable_seeds["system-prompt-harness.md"]
-  etag         = filemd5(local.editable_seeds["system-prompt-harness.md"])
+  source_path  = local.editable_seeds["system-prompt-harness.md"]
   content_type = "text/markdown"
+  create_only  = true
+}
 
-  lifecycle {
-    ignore_changes = [etag, source]
-  }
+moved {
+  from = aws_s3_object.harness_system_prompt_seed
+  to   = module.harness_system_prompt_seed.aws_s3_object.create_only[0]
 }
 
 # Skills-catalog BFF only. The former JWT cases API was removed — the UI's decisions run in
@@ -809,13 +807,18 @@ removed {
 
 # Seed the editable skills/ prefix and system-prompt from the repo. These are the live source
 # the BFF skills manager and the agent read at runtime; edits via the UI overwrite them in
-# place (no redeploy). Managed with lifecycle ignore so UI edits are not reverted on the
-# next apply — seeding is first-write only.
+# place (no redeploy). modules/seeded-object with create_only = true, so UI edits are not reverted
+# on the next apply — seeding is first-write only, and the module ignores every attribute whose
+# drift the provider would resolve by re-uploading the repo file, not just etag/source as the
+# inline resource this replaced did (an application write that only set a charset could have
+# reverted a skill).
 # The key => file map lives in local.editable_seeds so the deploy-time push (aws_lambda_invocation.seed_push)
 # cannot drift from what is seeded here.
-resource "aws_s3_object" "skill_seed" {
-  # Keyed on the FILE NAME, matching the `fileset()` keys this resource has always had, so the state
-  # addresses are unchanged. Re-keying on the bucket key would destroy and recreate all seven objects.
+module "skill_seed" {
+  source = "../../modules/seeded-object"
+  # Keyed on the FILE NAME, matching the `fileset()` keys the inline resource always had, so the
+  # `moved` blocks below map each live object one-to-one. Re-keying on the bucket key would destroy
+  # and recreate all seven objects.
   for_each = {
     for k, f in local.editable_seeds : basename(f) => { key = k, source = f }
     if startswith(k, "skills/")
@@ -823,14 +826,50 @@ resource "aws_s3_object" "skill_seed" {
 
   bucket       = module.foundation.assets_bucket
   key          = each.value.key
-  source       = each.value.source
-  etag         = filemd5(each.value.source)
+  source_path  = each.value.source
   content_type = "text/markdown"
-
-  lifecycle {
-    ignore_changes = [etag, source]
-  }
+  create_only  = true
 }
+
+# State-only moves of the seven skill objects from the inline aws_s3_object.skill_seed they were
+# declared as until 2026-09: one per instance, same key on both sides, same bucket, key, source and
+# content type on the other side, so a plan shows seven moves and no create, destroy or replace. A
+# skill file added later needs no entry; a `from` with nothing in state is a no-op.
+moved {
+  from = aws_s3_object.skill_seed["consult-guidance.md"]
+  to   = module.skill_seed["consult-guidance.md"].aws_s3_object.create_only[0]
+}
+
+moved {
+  from = aws_s3_object.skill_seed["correspondence-search.md"]
+  to   = module.skill_seed["correspondence-search.md"].aws_s3_object.create_only[0]
+}
+
+moved {
+  from = aws_s3_object.skill_seed["counterparty-contact-draft.md"]
+  to   = module.skill_seed["counterparty-contact-draft.md"].aws_s3_object.create_only[0]
+}
+
+moved {
+  from = aws_s3_object.skill_seed["document-cross-reference.md"]
+  to   = module.skill_seed["document-cross-reference.md"].aws_s3_object.create_only[0]
+}
+
+moved {
+  from = aws_s3_object.skill_seed["ledger-status-resolution.md"]
+  to   = module.skill_seed["ledger-status-resolution.md"].aws_s3_object.create_only[0]
+}
+
+moved {
+  from = aws_s3_object.skill_seed["record-match-review.md"]
+  to   = module.skill_seed["record-match-review.md"].aws_s3_object.create_only[0]
+}
+
+moved {
+  from = aws_s3_object.skill_seed["unknown.md"]
+  to   = module.skill_seed["unknown.md"].aws_s3_object.create_only[0]
+}
+
 
 # The one-time flat -> nested skills migration (skills/<name>.md -> skills/<name>/SKILL.md) is DONE
 # and its resource is deleted rather than ported to the deploy-actions Lambda.
@@ -885,13 +924,13 @@ resource "aws_lambda_invocation" "seed_push" {
     handler_version = module.deploy_actions.source_code_hash
   })
 
-  # Seeding is create-only (`ignore_changes = [etag, source]`), so the objects must exist before the
-  # reconciliation reads their ETags — a missing object is the "record" branch, and racing it would
-  # write a marker for content the seed resource is about to create.
+  # Seeding is create-only (modules/seeded-object ignores every later change), so the objects must
+  # exist before the reconciliation reads their ETags — a missing object is the "record" branch, and
+  # racing it would write a marker for content the seed module is about to create.
   depends_on = [
-    aws_s3_object.system_prompt_seed,
-    aws_s3_object.harness_system_prompt_seed,
-    aws_s3_object.skill_seed,
+    module.system_prompt_seed,
+    module.harness_system_prompt_seed,
+    module.skill_seed,
   ]
 }
 
@@ -905,19 +944,56 @@ removed {
   }
 }
 
+# The same reconciliation for the deal pipeline's create-only seeds (its skills and parser prompt),
+# against ITS bucket, when the app is deployed AND the operator has switched the push on. The pipeline
+# module exports the key => file map it seeds from (editable_seeds), so what is seeded and what is
+# pushed cannot disagree, and the deploy-actions role holds the same two grants on that bucket
+# (additional_assets_bucket_arns above). The bucket is SSE-S3 like recon's, which the reconciliation
+# checks before comparing anything. depends_on the whole module: the seed objects must exist before
+# their ETags are read (the "record" branch), as for recon's seeds above.
+#
+# ⚠️ Gated on enable_pipeline_seed_push (default false), not on enable_deal_pipeline alone. The
+# reconciliation's first run against a pipeline that was deployed before it existed meets objects
+# with no marker; every one the UI has rewritten since (an approved skill proposal, a Skills-tab
+# prompt edit) is then AMBIGUOUS and fails the apply -- after everything else in that apply has
+# landed. The operator adopts those keys by hand first (output pipeline_seed_push_command), then
+# flips the variable; from there this runs on every apply exactly like recon's seed_push.
+resource "aws_lambda_invocation" "pipeline_seed_push" {
+  count = var.enable_deal_pipeline && var.enable_pipeline_seed_push ? 1 : 0
+
+  function_name = module.deploy_actions.function_name
+
+  input = jsonencode({
+    action = "push_editable_seeds"
+    bucket = module.deal_pipeline[0].assets_bucket
+    seeds = {
+      for k, seed in module.deal_pipeline[0].editable_seeds : k => {
+        content = file(seed.path)
+        source  = seed.source
+      }
+    }
+    handler_version = module.deploy_actions.source_code_hash
+  })
+
+  depends_on = [module.deal_pipeline]
+}
+
 # The SHARED policy core. Read by the runtime container AND by the harness worker (which appends
 # the contract object above), and rewritten in place by the UI prompt editor and by deploying a
 # config version — so there is exactly one artifact holding the agent's instructions.
-resource "aws_s3_object" "system_prompt_seed" {
+module "system_prompt_seed" {
+  source = "../../modules/seeded-object"
+
   bucket       = module.foundation.assets_bucket
   key          = "system-prompt.md"
-  source       = local.editable_seeds["system-prompt.md"]
-  etag         = filemd5(local.editable_seeds["system-prompt.md"])
+  source_path  = local.editable_seeds["system-prompt.md"]
   content_type = "text/markdown"
+  create_only  = true
+}
 
-  lifecycle {
-    ignore_changes = [etag, source]
-  }
+moved {
+  from = aws_s3_object.system_prompt_seed
+  to   = module.system_prompt_seed.aws_s3_object.create_only[0]
 }
 
 # Publish the deterministic Tier-1 Lambda source for the Config tab's READ-ONLY viewer. Unlike

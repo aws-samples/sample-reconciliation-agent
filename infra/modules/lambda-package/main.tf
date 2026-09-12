@@ -10,21 +10,21 @@
 # whose root holds `backend/recon_core/...`, `backend/deal_pipeline/...`, etc., and handlers are
 # addressed as `backend.<pkg>.<module>.<fn>`.
 #
-# One zip per ROOT is built and shared by every Lambda that root deploys (recon: intake, tier1,
-# idp-hook, the API BFFs and the two deal-pipeline functions; the standalone deal-pipeline root:
-# just those two), so the runtime layout matches the imports in exactly one place.
+# One zip per module INSTANCE is built and shared by every Lambda it feeds (the recon root: intake,
+# tier1, idp-hook, the API BFFs and the two deal-pipeline functions), so the runtime layout matches
+# the imports in exactly one place.
 ####################################################################################
 
 locals {
   build_root = "${path.module}/.build"
 
-  # Keyed by var.name so two roots that instantiate this module from ONE checkout (recon with its
-  # full dependency list, the standalone deal-pipeline root with tzdata alone) stage into separate
-  # directories. path.module is the module SOURCE directory, identical for every instance, so a
-  # single shared directory let the standalone root's staging run overwrite recon's: recon's next
-  # plan zipped a tzdata-only tree with no terraform_data.stage replace to warn of it (recon's hash
-  # keys on recon's own inputs, which had not changed) and every recon Lambda's source_code_hash
-  # moved exactly as it does for an ordinary source edit -- a zip without pydantic, shipped.
+  # Keyed by var.name: one staging directory per module instance. path.module is the module SOURCE
+  # directory, identical for every instance, so with a single shared directory two instances in one
+  # checkout (a full dependency list and a tzdata-only one) staged over each other: the leaner run
+  # left its tree, and the other instance's next plan zipped it with no terraform_data.stage replace
+  # to warn of it (its hash keys on its own inputs, which had not changed) -- every Lambda's
+  # source_code_hash moved exactly as it does for an ordinary source edit, and a zip without pydantic
+  # shipped.
   staging_dir = "${local.build_root}/${var.name}/staging"
 
   # What stage.sh excludes (its rsync --exclude list), kept in lockstep with the script: a file

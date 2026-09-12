@@ -1,6 +1,6 @@
 # Run from this module's directory: `terraform init && terraform test`.
 #
-# PLAN-ONLY under mocked providers, for the reasons pipeline_wiring.tftest.hcl gives (two local-exec
+# PLAN-ONLY under mocked providers, for the reasons app_wiring.tftest.hcl gives (two local-exec
 # provisioners; private_vpc = true skips the data sources and CloudFront). The required inputs are
 # repeated here rather than shared because test files are independent of each other.
 #
