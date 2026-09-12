@@ -217,6 +217,60 @@ function QueueContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter]);
 
+  // How long to keep looking for a just-submitted item, and how often. Intake writes the item, a
+  // DynamoDB Stream delivers it, and only then does Tier-1 open the case — so the row does not exist
+  // when the modal closes. A single reload at that moment reliably shows "queue clear", which reads as
+  // a broken submission rather than as a race.
+  const SUBMIT_POLL_MS = 1500;
+  const SUBMIT_POLL_ATTEMPTS = 10; // ~15s, comfortably past stream latency
+
+  /** Refresh without blanking the table — a spinner on every poll tick would strobe. */
+  const refresh = (f: string) => {
+    const opts =
+      f === "OPEN"
+        ? undefined
+        : f === "ALL"
+          ? { scope: "all" as const }
+          : { status: f };
+    return listCases(opts)
+      .then((rows) => {
+        setCases(rows);
+        return rows;
+      })
+      .catch((e) => {
+        setError(String(e));
+        return [] as ReconCase[];
+      });
+  };
+
+  /**
+   * Poll until the submitted items appear, then say what happens next.
+   *
+   * Waiting for the specific ids, rather than reloading once and hoping, is what makes this
+   * deterministic. It stops as soon as they are all present.
+   */
+  const awaitSubmitted = async (itemIds: string[]) => {
+    setMsg("Submitted — waiting for Tier-1 to open the case…");
+    for (let attempt = 0; attempt < SUBMIT_POLL_ATTEMPTS; attempt++) {
+      const rows = await refresh(filter);
+      const present = new Set(rows.map((r) => r.item_id));
+      if (itemIds.length > 0 && itemIds.every((id) => present.has(id))) {
+        // Deliberately explicit about the wait that follows. Tier-1 has finished by now; the case
+        // sits PENDING until the next Tier-2 map run claims it, which is a scheduled poll rather
+        // than an immediate dispatch. Without saying so, a case that just sits there for minutes
+        // looks stuck.
+        setMsg(
+          "Submitted — case is queued (PENDING). A Tier-2 investigation run picks it up on its next scheduled pass.",
+        );
+        return;
+      }
+      await new Promise((r) => setTimeout(r, SUBMIT_POLL_MS));
+    }
+    setMsg(
+      "Submitted — not listed yet. Tier-1 may still be processing it; reload to check.",
+    );
+  };
+
   const changeFilter = (f: string) => {
     setFilter(f);
     setSelected(new Set());
@@ -645,13 +699,8 @@ function QueueContent() {
       {creating && (
         <NewItemModal
           onClose={() => setCreating(false)}
-          onSubmitted={() => {
-            // The item lands in PENDING within a second or two (DynamoDB Stream latency), so a
-            // single immediate reload can legitimately miss it. Say so rather than looking broken.
-            setMsg(
-              "Submitted — Tier-1 is running; reload in a moment if it is not listed yet.",
-            );
-            void load(filter);
+          onSubmitted={(itemIds) => {
+            void awaitSubmitted(itemIds);
           }}
         />
       )}

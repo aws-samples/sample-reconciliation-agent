@@ -52,7 +52,9 @@ this reason.
 
 `lambda` is **not** in the list, and it is the next gap of the same kind as `bedrock-agent-runtime`
 below: four in-VPC callers invoke Lambdas (the BFF's intake submission and case retry, Tier-1's GL
-lookup and its agent-worker escalation), and all four work today only because the NAT survives. Add it
+lookup, and the console's agent-worker retry), and they work today only because the NAT survives.
+The Tier-2 map run adds a different dependency: `states`, now in the endpoint list, because collect and
+the runtime container both call Step Functions from inside the VPC. Add it
 in the same change that removes the NAT — see
 [intake-http-api.md](intake-http-api.md#the-lambda-endpoint-is-a-latent-no-nat-gap-regardless).
 
@@ -63,7 +65,7 @@ inference) — and an in-VPC caller of it hangs without the endpoint in a no-NAT
 read the agent makes does **not** go through the VPC at all: `managed-kb` is a connector target, so
 the `Retrieve` call is made by the AgentCore Gateway's own service role from outside the VPC, and the
 only thing the workload has to reach is `bedrock-agentcore.gateway`. Add it if you ever put an in-VPC
-caller of `Retrieve` / `RetrieveAndGenerate` / `InvokeAgent` in. `states` is deliberately absent too.
+caller of `Retrieve` / `RetrieveAndGenerate` / `InvokeAgent` in. `states` IS now present, and must be: `backend/tier2_dispatch/collect.py` paginates `ListExecutions` for the single-flight guard, and the runtime container calls `SendTaskSuccess`/`SendTaskFailure` to release its task token. Both fail silently without it — the guard fails CLOSED so the queue stops draining while everything reports healthy, and an unreleased token waits out the state's 1800s timeout so a successful investigation is recorded as FAILED.
 
 > **AgentCore Gateway PrivateLink Support:** AgentCore publishes three PrivateLink services, and Gateway is supported on both
 > data and control plane:

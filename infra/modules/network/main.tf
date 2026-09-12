@@ -165,6 +165,19 @@ locals {
     # endpoint service resolves private REST APIs ONLY — it does not and cannot front the public
     # `recon-dev-api` HTTP API, which has no private endpoint type at all.
     "execute-api",
+    # ⚠️ Required since Tier-2 async dispatch, and its absence FAILS CLOSED rather than loudly.
+    #
+    # Two in-VPC callers now talk to Step Functions. `backend/tier2_dispatch/collect.py` paginates
+    # `ListExecutions` for the single-flight guard, and that guard deliberately fails closed — with no
+    # route it concludes a run is already in flight and collects NOTHING, so the queue silently stops
+    # draining while every component reports healthy. The AgentCore runtime container calls
+    # `SendTaskSuccess`/`SendTaskFailure` to release its task token; with no route every token instead
+    # waits out the state's 1800s timeout and the case is marked FAILED after an investigation that
+    # actually succeeded.
+    #
+    # This entry replaces an explicit note in assets/private-vpc-deployment.md that `states` was
+    # deliberately absent. That was true while nothing in the VPC called Step Functions.
+    "states",
   ]
   interface_endpoints = toset(
     var.enable_private_endpoints

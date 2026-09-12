@@ -26,6 +26,41 @@ def _notices_table_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NOTICE_SEARCH_TABLE", "recon-notice-search")
 
 
+# Attributes `Notice` actually has. Anything else a test passes is EXTRACTED content.
+_MODEL_ATTRS = frozenset(Notice.model_fields)
+
+
+def _notice(**kw) -> Notice:
+    """Build a notice, routing EXTRACTED field names into `idp_sections` where they belong.
+
+    ⚠️ Not sugar -- a guard. No extracted field is a model attribute any more, and pydantic IGNORES
+    unknown keys, so `Notice(counterparty="X")` silently drops the value and the notice becomes
+    unfindable by it. Routing makes a test that names a field mean what it reads as, and makes the
+    fixtures mirror the real shape: extraction in the sections, recon's bookkeeping at the top.
+
+    :param kw: model attributes and/or extracted field values, in either order.
+    :returns: the notice, with any extracted values merged into one section.
+    """
+    attrs = {k: v for k, v in kw.items() if k in _MODEL_ATTRS}
+    extracted = {k: v for k, v in kw.items() if k not in _MODEL_ATTRS}
+    if extracted:
+        merged = dict(extracted)
+        for section in attrs.get("idp_sections") or []:
+            merged.update(section.get("fields") or {})
+        attrs["idp_sections"] = [
+            {
+                "section_id": "1",
+                "classification": attrs.get("notice_class"),
+                "page_ids": [1],
+                "fields": merged,
+                "confidences": [],
+                "mean_confidence": None,
+                "alert_count": 0,
+            }
+        ]
+    return Notice(**attrs)
+
+
 def _put(notice: Notice) -> None:
     """Write a notice AND index it, exactly as the IDP hook does in one invocation.
 
@@ -72,7 +107,7 @@ def _seed() -> None:
     :returns: None.
     """
     _put(
-        notice=Notice(
+        notice=_notice(
             notice_id="NTC-1",
             notice_class="wire_confirmation",
             counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.",
@@ -84,7 +119,7 @@ def _seed() -> None:
         )
     )
     _put(
-        notice=Notice(
+        notice=_notice(
             notice_id="NTC-2",
             notice_class="capital_call",  # this class extracts no facility at all
             counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.",
@@ -227,9 +262,9 @@ def test_a_row_without_an_activity_type_is_annotated_not_excluded() -> None:
         "extraction_confidence": Decimal("0.9"),
         "confidence_alert_count": 0,
     }
-    _put(notice=Notice(notice_id="NTC-AGG", notice_class="remittance_advice", **common))
+    _put(notice=_notice(notice_id="NTC-AGG", notice_class="remittance_advice", **common))
     _put(
-        notice=Notice(
+        notice=_notice(
             notice_id="NTC-INT",
             notice_class="wire_confirmation",
             idp_sections=_embedded(activity_type="Interest"),
@@ -266,9 +301,9 @@ def test_a_dateless_notice_is_annotated_not_silently_excluded() -> None:
     }
     # Dateless: reachable only by the scan path while counterparty-index still keys on notice_date,
     # because DynamoDB drops an item with no range key from that index. Asserted via the scan path.
-    _put(notice=Notice(notice_id="NTC-NODATE", notice_class="incomplete_notice", **common))
+    _put(notice=_notice(notice_id="NTC-NODATE", notice_class="incomplete_notice", **common))
     _put(
-        notice=Notice(
+        notice=_notice(
             notice_id="NTC-DATED",
             notice_class="wire_confirmation",
             notice_date="2026-03-02",
@@ -296,7 +331,7 @@ def test_a_dated_notice_outside_the_window_is_still_excluded() -> None:
     """
     _make_notices_table()
     _put(
-        notice=Notice(
+        notice=_notice(
             notice_id="NTC-OLD",
             notice_class="wire_confirmation",
             counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.",
@@ -327,8 +362,8 @@ def test_a_field_only_in_idp_sections_is_filterable() -> None:
         "extraction_confidence": Decimal("0.9"),
         "confidence_alert_count": 0,
     }
-    _put(notice=Notice(notice_id="NTC-A", idp_sections=_embedded(cusip="12345AB6"), **common))
-    _put(notice=Notice(notice_id="NTC-B", idp_sections=_embedded(cusip="99999ZZ9"), **common))
+    _put(notice=_notice(notice_id="NTC-A", idp_sections=_embedded(cusip="12345AB6"), **common))
+    _put(notice=_notice(notice_id="NTC-B", idp_sections=_embedded(cusip="99999ZZ9"), **common))
 
     out = handle({"counterparty": common["counterparty"], "cusip": "12345AB6"}, None)
 
@@ -354,8 +389,8 @@ def test_the_amount_band_resolves_from_idp_sections() -> None:
         "extraction_confidence": Decimal("0.9"),
         "confidence_alert_count": 0,
     }
-    _put(notice=Notice(notice_id="NTC-IN", idp_sections=_embedded(amount="1000.25"), **common))
-    _put(notice=Notice(notice_id="NTC-OUT", idp_sections=_embedded(amount="8500.00"), **common))
+    _put(notice=_notice(notice_id="NTC-IN", idp_sections=_embedded(amount="1000.25"), **common))
+    _put(notice=_notice(notice_id="NTC-OUT", idp_sections=_embedded(amount="8500.00"), **common))
 
     out = handle(
         {
@@ -379,7 +414,7 @@ def test_a_field_carried_nowhere_is_still_annotated_not_excluded() -> None:
     """
     _make_notices_table()
     _put(
-        notice=Notice(
+        notice=_notice(
             notice_id="NTC-BARE",
             notice_class="incomplete_notice",
             counterparty="PARTIAL FAX COVER LLP",
@@ -405,7 +440,7 @@ def test_a_promoted_attribute_wins_over_the_embedded_copy() -> None:
     """
     _make_notices_table()
     _put(
-        notice=Notice(
+        notice=_notice(
             notice_id="NTC-BOTH",
             notice_class="wire_confirmation",
             counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.",
@@ -447,7 +482,7 @@ def test_per_field_confidences_are_not_returned_to_the_model() -> None:
         "alert_count": 0,
     }
     _put(
-        notice=Notice(
+        notice=_notice(
             notice_id="NTC-TRIM",
             notice_class="wire_confirmation",
             counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.",
@@ -462,7 +497,9 @@ def test_per_field_confidences_are_not_returned_to_the_model() -> None:
 
     returned = out["rows"][0]["idp_sections"][0]
     assert set(returned) == {"classification", "fields"}
-    assert returned["fields"] == {"amount": "9640.18", "cusip": "12345AB6"}
+    # The trim is about which SECTION keys survive, not which fields; the fields pass through whole.
+    assert returned["fields"]["amount"] == "9640.18"
+    assert returned["fields"]["cusip"] == "12345AB6"
     # The notice-level pair the agent IS gated on survives.
     assert out["rows"][0]["extraction_confidence"] == Decimal("0.94")
     assert out["rows"][0]["confidence_alert_count"] == 0
@@ -484,8 +521,8 @@ def test_trimming_sections_does_not_change_what_matches() -> None:
         "extraction_confidence": Decimal("0.9"),
         "confidence_alert_count": 0,
     }
-    _put(notice=Notice(notice_id="NTC-HIT", idp_sections=_embedded(cusip="12345AB6"), **common))
-    _put(notice=Notice(notice_id="NTC-MISS", idp_sections=_embedded(cusip="99999ZZ9"), **common))
+    _put(notice=_notice(notice_id="NTC-HIT", idp_sections=_embedded(cusip="12345AB6"), **common))
+    _put(notice=_notice(notice_id="NTC-MISS", idp_sections=_embedded(cusip="99999ZZ9"), **common))
 
     out = handle({"counterparty": "MISTFELL FOODS CORP.", "cusip": "12345AB6"}, None)
 
@@ -503,7 +540,7 @@ def test_page_images_are_never_returned_to_the_model() -> None:
     """
     _make_notices_table()
     _put(
-        notice=Notice(
+        notice=_notice(
             notice_id="NTC-PAGES",
             notice_class="wire_confirmation",
             counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.",
@@ -605,7 +642,7 @@ def test_idp_bookkeeping_fields_are_withheld_but_still_stored() -> None:
     """
     _make_notices_table()
     _put(
-        notice=Notice(
+        notice=_notice(
             notice_id="NTC-TRACKED",
             notice_class="wire_confirmation",
             counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.",
@@ -637,7 +674,7 @@ def test_an_empty_index_over_a_non_empty_table_raises_rather_than_returning_noth
     """
     _make_notices_table()
     NoticeStore(table_name="recon-notices").put(
-        notice=Notice(
+        notice=_notice(
             notice_id="NTC-UNINDEXED",
             notice_class="wire_confirmation",
             counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.",

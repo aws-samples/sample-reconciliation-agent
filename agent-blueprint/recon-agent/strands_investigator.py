@@ -104,11 +104,22 @@ def _default_agent_factory(model_id: str, system_prompt: str, tools: list):
     :param tools: the gateway tool callables the agent may invoke.
     :returns: a configured Strands ``Agent``.
     """
+    from botocore.config import Config as BotocoreConfig
     from strands import Agent
     from strands.models import BedrockModel
 
     return Agent(
-        model=BedrockModel(model_id=model_id, streaming=False, max_tokens=INVESTIGATOR_MAX_TOKENS),
+        model=BedrockModel(
+            model_id=model_id,
+            streaming=False,
+            max_tokens=INVESTIGATOR_MAX_TOKENS,
+            # Adaptive retry, for the reasons spelled out in `llm._default_json_caller` — the
+            # investigation loop is the larger consumer of the two, so leaving it on legacy retry
+            # would leave most of the token spend unpaced. 8 attempts for the same reason as there: a
+            # 5-attempt budget was observed exhausting against a transient ServiceUnavailableException,
+            # and a rejected Converse bills no tokens.
+            boto_client_config=BotocoreConfig(retries={"mode": "adaptive", "max_attempts": 8}),
+        ),
         system_prompt=system_prompt,
         tools=tools,
     )

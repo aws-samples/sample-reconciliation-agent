@@ -84,8 +84,8 @@ Delete them when you are done with them.
 
 ## What the repo cannot tell you
 
-Four controls are set outside the tracked tree (protected `RECON_TFVARS`, or SSM at runtime), so a
-local file is not evidence of what is live. Read them off the resource:
+Six controls are set outside the tracked tree (protected `RECON_TFVARS`, SSM at runtime, or on the
+resource itself), so a local file is not evidence of what is live. Read them off the resource:
 
 ```bash
 aws lambda get-function-configuration --function-name recon-dev-gw-interceptor \
@@ -93,6 +93,14 @@ aws lambda get-function-configuration --function-name recon-dev-gw-interceptor \
 aws ssm get-parameter --name /recon-dev/agent-backend        # which backend you are debugging
 aws ssm get-parameter --name /recon-dev/auto-resolve-threshold  # unreadable = human review
 aws ssm get-parameter --name /recon-dev/tier1-enabled
+
+# Whether Tier-2 runs AT ALL. The stream consumer dispatches nothing, so a disabled rule means
+# escalated cases accumulate in PENDING forever and nothing looks broken.
+aws events describe-rule --name recon-dev-tier2-schedule --query '[State,ScheduleExpression]'
+# The Bedrock token budget, as the Map's MaxConcurrency. Grep the definition, not the variable file.
+aws stepfunctions describe-state-machine \
+  --state-machine-arn arn:aws:states:us-east-1:<account>:stateMachine:recon-dev-tier2 \
+  --query 'definition' | grep -o '"MaxConcurrency":[0-9]*'
 ```
 
 The interceptor one matters most: it is the only place the provenance, evidence-quality and

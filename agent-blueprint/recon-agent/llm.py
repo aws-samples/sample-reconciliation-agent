@@ -190,10 +190,32 @@ def _default_json_caller(
     :returns: (reply text, stop reason, raw usage dict). The usage is this ONE sample's — the Agent
         is fresh, so its accumulated total covers nothing but this call.
     """
+    from botocore.config import Config as BotocoreConfig
     from strands import Agent
     from strands.models import BedrockModel
 
-    config: dict = {"model_id": model_id, "streaming": False, "max_tokens": max_tokens}
+    config: dict = {
+        "model_id": model_id,
+        "streaming": False,
+        "max_tokens": max_tokens,
+        # ⚠️ Not tuning. Without `boto_client_config` Strands builds its own bedrock-runtime client
+        # with `retries` unset, which resolves to botocore's LEGACY mode: 5 attempts, no client-side
+        # rate limiting. Adaptive mode is the only mode with a token-bucket rate limiter that LEARNS
+        # the throttle rate from the errors it sees and paces requests below it, instead of retrying
+        # into the same wall.
+        #
+        # It also breaks a lockstep problem. Strands' own retry sleeps un-jittered
+        # (strands/event_loop/_retry.py), so under a burst every container backs off on an identical
+        # 4→8→16→32→64s schedule, re-converges, and re-throttles together. Adaptive's per-client
+        # pacing desynchronises them.
+        #
+        # 8 attempts, not 5, and the number comes from an observed failure rather than a guess: on
+        # 2026-09-11 a classification call exhausted the budget with
+        # `ServiceUnavailableException ... (reached max retries: 4)` — five attempts — and the case
+        # failed. Extra attempts are cheap here because a rejected Converse bills no tokens, so the
+        # only cost of a higher ceiling is wall-clock, which adaptive mode is already pacing.
+        "boto_client_config": BotocoreConfig(retries={"mode": "adaptive", "max_attempts": 8}),
+    }
     if temperature is not None:
         config["temperature"] = temperature
     agent = Agent(
@@ -207,9 +229,47 @@ def _default_json_caller(
     )
 
 
-# Model ids that reject `temperature` (e.g. Claude Sonnet 5 deprecated it and returns a
-# ValidationException). Remembered after the first rejection so we only pay the retry once.
+# Substrings identifying model generations that REJECT `temperature`. The Claude 5 generation (and
+# Opus 4.7/4.8) removed the parameter and answer a ValidationException; earlier models still accept it.
+#
+# ⚠️ SEEDED, and that is the entire point of this table. `_NO_TEMPERATURE` below used to start EMPTY on
+# every cold container, so the first classification call of every container was a ValidationException
+# whose only purpose was to discover a fact this repo already documents — every id in
+# `recon_core.model_select.ALLOWED_MODEL_IDS` is in this generation, so the wasted call was guaranteed,
+# not occasional.
+#
+# It was not free. The wasted call forces the retry below, and on 2026-09-11 a case failed because that
+# RETRY (not the original call) hit a transient Bedrock `ServiceUnavailableException` — four sibling
+# investigations dispatched in the same 36 seconds succeeded. Halving the calls halves the exposure.
+_NO_TEMPERATURE_MARKERS: tuple[str, ...] = (
+    "claude-opus-5",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-sonnet-5",
+    "claude-fable-5",
+    "claude-mythos-5",
+)
+
+# Model ids observed to reject `temperature` at runtime. Retained as a SAFETY NET for a model not
+# covered by the markers above — a future id, or one selected through the Config tab — so the learning
+# behaviour still exists where it is actually needed rather than on every cold start.
 _NO_TEMPERATURE: set[str] = set()
+
+
+def _accepts_temperature(model_id: str) -> bool:
+    """Should ``temperature`` be sent to this model at all?
+
+    Omission is the DEFAULT: a model is assumed to reject the parameter when its id matches a known
+    generation that removed it, without a probe call. Only an id that matches nothing and has not
+    already been observed rejecting it gets `temperature`.
+
+    :param model_id: the model or inference-profile id about to be invoked.
+    :returns: True when ``temperature`` may be included in the request.
+    """
+    if model_id in _NO_TEMPERATURE:
+        return False
+    lowered = model_id.lower()
+    return not any(marker in lowered for marker in _NO_TEMPERATURE_MARKERS)
 
 
 def strands_json(
@@ -224,10 +284,20 @@ def strands_json(
 ) -> dict:
     """One Strands model call returning the parsed JSON object from the reply.
 
-    Newer models (e.g. Claude Sonnet 5) DEPRECATED the ``temperature`` inference parameter and
-    reject it with a ValidationException. We include ``temperature`` when the model accepts it
-    (so self-consistency sampling stays diverse on models like Nova) and transparently drop it —
-    caching that per model id — for models that reject it, rather than crashing the invocation.
+    Newer models (the Claude 5 generation, plus Opus 4.7/4.8) REMOVED the ``temperature`` inference
+    parameter and reject it with a ValidationException. **Omitting it is the default**: a model whose
+    id matches a known such generation never receives it, with no probe call — see
+    ``_accepts_temperature``. ``temperature`` is included only for a model that plausibly accepts it,
+    so self-consistency sampling stays diverse on models like Nova, and a model that rejects it despite
+    matching nothing is learned at runtime and dropped from then on.
+
+    That default is not a micro-optimisation. Every id this platform can be configured with is in the
+    rejecting generation, so learning the fact per container meant one guaranteed ValidationException
+    per cold start, and the retry it forced is what a real case died on (see ``_NO_TEMPERATURE_MARKERS``).
+
+    Note the consequence for the self-consistency signal, which is unchanged from current behaviour but
+    worth stating: on these models the k samples' diversity comes from the model's own default sampling
+    rather than an explicit 0.7, because the parameter cannot be set at all.
 
     A reply the model cut off at its token cap (``stop_reason == "max_tokens"``) is retried ONCE
     with double the cap and an explicit brevity instruction, because the truncated JSON is
@@ -259,7 +329,7 @@ def strands_json(
         :param user_text: the user message text.
         :returns: (reply text, stop reason, raw usage dict).
         """
-        want_temperature = model_id not in _NO_TEMPERATURE
+        want_temperature = _accepts_temperature(model_id)
         try:
             return call(
                 model_id=model_id,

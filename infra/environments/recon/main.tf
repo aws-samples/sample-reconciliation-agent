@@ -287,6 +287,17 @@ module "tier1" {
   agent_backend_param          = module.foundation.agent_backend_param
   agent_model_id_param         = module.foundation.agent_model_id_param
 
+  # Ceiling on simultaneous Tier-2 investigations — the Bedrock TPM budget as Lambda concurrency.
+  # Bounded on both sides (see the module variable): too high throttles the model, too low lets a
+  # burst outlive the async queue's retention.
+  max_concurrent_investigations = var.max_concurrent_investigations
+
+  # Nudge the Tier-2 runner as soon as an escalation is opened, so a submission is investigated in
+  # seconds rather than at the next scheduled tick. Composed by hand rather than referenced: the
+  # tier2_dispatch module already consumes module.tier1.worker_function_arn, so a real reference here
+  # would close a module cycle.
+  tier2_state_machine_arn = "arn:aws:states:${var.region}:${data.aws_caller_identity.current.account_id}:stateMachine:${var.name_prefix}-tier2"
+
   # Deterministic Tier-1 toggle read at runtime.
   tier1_enabled_param     = module.foundation.tier1_enabled_param
   tier1_enabled_param_arn = module.foundation.tier1_enabled_param_arn
@@ -534,8 +545,68 @@ module "lambda_logs" {
     "${var.name_prefix}-tier1",
     "${var.name_prefix}-agent-worker",
     "${var.name_prefix}-recon-status",
+    module.tier2_dispatch.dispatch_function_name,
+    module.tier2_dispatch.collect_function_name,
+    module.tier2_dispatch.case_step_function_name,
     module.api.skills_function_name,
   ]
+}
+
+# Tier-2 async dispatch: the map run that decides WHEN and HOW MANY investigations happen.
+# The Tier-1 stream consumer only opens the case PENDING; this bounds the rest.
+module "tier2_dispatch" {
+  source = "../../modules/tier2-dispatch"
+
+  name_prefix        = var.name_prefix
+  lambda_zip         = module.lambda_package.zip_path
+  lambda_source_hash = module.lambda_package.source_code_hash
+
+  agent_runtime_arn         = module.recon_agent.runtime_arn
+  agent_worker_function_arn = module.tier1.worker_function_arn
+
+  cases_table     = module.foundation.cases_table
+  cases_table_arn = module.foundation.cases_table_arn
+  audit_table     = module.foundation.audit_table
+  audit_table_arn = module.foundation.audit_table_arn
+
+  # The run's collected PENDING list. Reuses the assets bucket rather than adding one: it is already
+  # the platform's own private object store, and these objects are transient run inputs.
+  runs_bucket     = module.foundation.assets_bucket
+  runs_bucket_arn = module.foundation.assets_bucket_arn
+
+  # Read ONCE per run by the collect step, so a run cannot straddle a mid-run backend switch.
+  agent_backend_param = module.foundation.agent_backend_param
+
+  # ⚠️ NOT through the ingress gateway, unlike the blocking worker. The gateway holds the connection
+  # until the runtime session finishes, so it never forwards the container's immediate
+  # {"status": "accepted"} -- the dispatcher would block, the Task would time out, and the case would
+  # be marked FAILED while the investigation it started went on to succeed. Measured 2026-09-11.
+  # The gateway remains the audited entry point for the SYNCHRONOUS retry path in the worker.
+  use_ingress_gateway = false
+
+  # THE concurrency bound for the runtime backend. Kept equal to the worker's reserved concurrency:
+  # same Bedrock quota, two mechanisms, and they must not disagree.
+  max_concurrent_investigations = var.max_concurrent_investigations
+
+  # The schedule is now a SAFETY NET, not the primary trigger: Tier-1 nudges the runner the moment it
+  # opens an escalated case, so the normal path is seconds. This catches what a nudge cannot -- a case
+  # whose nudge lost the single-flight race and arrived while a run was already draining, a nudge that
+  # failed, or a backlog over the per-run ceiling. 1 minute because the cost of a tick is one Lambda
+  # and a Choice when there is nothing to do. 5 minutes is the added latency that buys the concurrency bound.
+  #
+  # Overlap is expected and is handled INSIDE the run, not by the cadence: MaxConcurrency is enforced
+  # per Map Run, so the collect step refuses to collect while another execution is in flight. Without
+  # that guard a 5-minute schedule against longer runs would stack runs and multiply the token budget.
+  schedule_enabled    = true
+  schedule_expression = "rate(1 minute)"
+
+  # Client-side tracing on the dispatcher. It is the runtime backend's InvokeAgentRuntime caller now,
+  # so this is where the trace linking a map run to the agent's own spans gets its client end.
+  otel_layer_arn                   = local.otel_layer_arn
+  otel_baggage_span_attribute_keys = local.otel_baggage_span_attribute_keys
+
+  vpc_subnet_ids         = local.vpc_subnets
+  vpc_security_group_ids = local.vpc_sgs
 }
 
 # AgentCore runtime observability: OTEL application logs -> CloudWatch + traces -> X-Ray.

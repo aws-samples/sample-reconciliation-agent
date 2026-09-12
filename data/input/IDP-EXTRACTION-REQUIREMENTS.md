@@ -54,7 +54,7 @@ its purpose without it, not that the extraction should fail — see §3.
 | Field key      | Type    | Required for                                           | Example (from the sample)      | Notice field   |
 | -------------- | ------- | ------------------------------------------------------ | ------------------------------ | -------------- |
 | `notice_date`  | date    | **every class**                                        | `2026-01-26`                   | `notice_date`  |
-| `value_date`   | date    | accepted as a fallback for `notice_date`               | `2026-01-26`                   | `notice_date`  |
+| `value_date`   | date    | the effective/settlement date, its own field — see the note below: NOT a fallback for `notice_date` any more | `2026-01-26` | `value_date` |
 | `counterparty` | string  | **every class**                                        | `NORTHWIND MANUFACTURING LLC`  | `counterparty` |
 | `borrower`     | string  | accepted as a fallback for `counterparty`              | `NORTHWIND MANUFACTURING LLC`  | `counterparty` |
 | `fund`         | string  | every class where the notice names a fund or portfolio | `DL Fund II`                   | `fund`         |
@@ -79,11 +79,22 @@ its purpose without it, not that the extraction should fail — see §3.
 | `notice_comment` | string | where the notice carries free-text remarks | `only interest notice` | `notice_comment` |
 | `notice_date_source_raw` | string | every class — the date **exactly as printed**, before normalisation | `26-Jan-2026` | `notice_date_source_raw` |
 
-⚠️ **`notice_date` and `counterparty` are the two that break retrieval outright.** They are the range
-key and hash key of the notice table's primary index. The mapper **raises** when neither `notice_date`
-nor `value_date` is extracted, so the document is retried and then dead-lettered. An absent
-`counterparty` is stored as the literal `unknown`, which keeps the notice retrievable by id but removes
-it from the agent's main query path. Prioritise these two above everything else in this document.
+⚠️ **No field breaks retrieval any more, and recon no longer normalises any of them.** Every extracted
+field is stored verbatim under the key you emit and indexed under that same key, so recon has no
+promoted attributes and no aliases. Three consequences replace the old warnings:
+
+- **Nothing dead-letters for a missing field.** The mapper used to raise when neither `notice_date` nor
+  `value_date` was extracted; it stores the notice regardless now, and an absent field is reported to the
+  agent in `fields_unavailable`.
+- **An absent `counterparty` is no longer defaulted to `unknown`.** It is simply absent, which the agent
+  reads as "this class does not carry it" rather than as an obligor literally named unknown.
+- ⚠️ **`value_date` is NO LONGER a fallback for `notice_date`.** The table row above still says it is;
+  that is now the one stale claim in this contract, kept visible rather than quietly deleted. Recon's date
+  window filters on `notice_date` only, so a document that prints only an effective date and follows the
+  current guidance — *"leave `notice_date` absent and populate `value_date`"* — will not match a
+  `date_from`/`date_to` search. Closing that is a CONFIGURATION change (populate `notice_date` from the
+  effective date when no issue date is printed), not a recon change, and it needs a config push plus a
+  re-extraction of the affected documents. No document in the current corpus relies on the fallback.
 
 ## 3. Section-level keys
 

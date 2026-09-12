@@ -155,7 +155,7 @@ and reported as 0.00 — a case classified there always escalates.
 
 - **Empty queue**: system shows an explicit "no open exceptions" state rather than an empty table
 - **Item stuck `IN_PROGRESS`** (agent worker failed): the case remains visible in the queue rather than disappearing, so it can be noticed and re-driven
-- **Tier-1 disabled** (Config tab): all new items escalate directly to the agent — queue volume rises but behavior is otherwise identical
+- **Tier-1 disabled** (Config tab): all new items escalate — queue volume rises, and each waits in `PENDING` for the next Tier-2 map run rather than being dispatched on the spot; behaviour is otherwise identical
 - **Session expired**: any queue action redirects through the Okta login flow and returns to the queue
 
 ---
@@ -834,7 +834,7 @@ AI Engineer
 - [ ] Threshold edit rewrites the Cedar policy statements at runtime (no redeploy) — a below-threshold `set_draw_status` is blocked **at the gateway**, not just in app code
 - [ ] Disabling auto-resolve forces all agent outcomes to `PROPOSED`
 - [ ] Tier-1 toggle takes effect for newly ingested items without redeploy, and its source is viewable read-only inline
-- [ ] Backend switch changes which backend handles subsequent escalations; in-flight items complete on the backend that started them
+- [ ] Backend switch changes which backend handles subsequent escalations; the guarantee is per-RUN: `collect` resolves the backend once and stamps every item, so a run cannot straddle a switch
 - [ ] Model selection applies per backend
 - [ ] Config values shown always reflect the current SSM/Policy state (no stale cache after save)
 
@@ -857,7 +857,7 @@ future skill with seven or more required steps, where 6/7 ≈ 0.857 would clear.
 
 - **Cedar rewrite fails** (Policy API error): the UI surfaces the failure; the admin must not be left believing the gate moved when it didn't
 - **Policy in `LOG_ONLY` mode** (operational choice): decisions are logged but not blocked — the Config threshold is then advisory; ENFORCE is the default
-- **Backend switched while items are in flight**: no items are lost; each item is driven by the worker path that picked it up
+- **Backend switched while items are in flight**: no items are lost; each run is homogeneous — the backend is resolved once per map run and stamped on every item in it
 - **Threshold set very low**: the Policy gate still applies exactly the configured value — provenance (written reference must equal the persisted proposal) and the status allowlist remain enforced in the write Lambda regardless
 
 ---
@@ -942,7 +942,9 @@ flowchart TD
     subgraph Automated pipeline
         IA[Ingest · intake API<br/>writes a ReconItem — the only path that opens a case] --> T1{Tier-1 match?}
         T1 -->|yes| AC[AUTO_CLEARED]
-        T1 -->|no| AG[Tier-2 agent investigates]
+        T1 -->|no| Q[case waits PENDING]
+    Q --> MR[Tier-2 map run claims it, MaxConcurrency-bounded]
+    MR --> AG[Tier-2 agent investigates]
         AG -->|confidence ≥ threshold + clean action| AR[Auto-resolved<br/>Policy-gated write]
         AG -->|otherwise| P[PROPOSED]
         IH[Ingest · IDP hook<br/>writes a Notice, never an item] --> NT[Notices table<br/>no stream, so no case opens here]

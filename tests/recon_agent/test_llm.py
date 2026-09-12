@@ -13,6 +13,7 @@ import json
 
 import pytest
 
+import llm
 from backend.recon_core.schema import ReconItem
 from llm import _result_text, classify_with_consistency, extract_json, strands_json
 
@@ -146,19 +147,82 @@ def test_strands_json_fails_loudly_when_the_retry_is_also_truncated():
     assert len(fc.caps) == 2  # exactly one retry, not a loop
 
 
-def test_strands_json_drops_temperature_when_model_rejects_it():
-    # Sonnet 5 deprecated `temperature`; strands_json must retry WITHOUT it rather than 500.
+@pytest.fixture(autouse=True)
+def _forget_learned_temperature_rejections():
+    """`_NO_TEMPERATURE` is module state; a learned entry would leak between tests."""
+    llm._NO_TEMPERATURE.clear()
+    yield
+    llm._NO_TEMPERATURE.clear()
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "us.anthropic.claude-sonnet-5",
+        "global.anthropic.claude-sonnet-5",
+        "us.anthropic.claude-opus-5",
+        "us.anthropic.claude-fable-5-1",
+        "us.anthropic.claude-opus-4-8",
+        "US.ANTHROPIC.CLAUDE-SONNET-5",  # id casing must not decide this
+    ],
+)
+def test_temperature_is_never_sent_to_a_model_that_removed_it(model_id):
+    """The point of the change: ONE call, not a doomed probe plus a retry.
+
+    Every id this platform can be configured with is in this generation, so learning the fact per
+    container meant a guaranteed ValidationException on every cold start — and the retry it forced is
+    what a real case died on when that retry hit a transient ServiceUnavailableException.
+    """
     fc = _FakeCaller([{"ok": 1}], reject_temperature=True)
-    out = strands_json(
-        model_id="us.anthropic.claude-sonnet-5-reject-temp",
-        system="s",
-        prompt="p",
-        temperature=0.7,
-        caller=fc,
-    )
+
+    out = strands_json(model_id=model_id, system="s", prompt="p", temperature=0.7, caller=fc)
+
     assert out == {"ok": 1}
-    # First attempt sent temperature (rejected); the retry omitted it.
+    assert fc.temps == [None], "sent temperature to a model known to reject it"
+    assert len(fc.caps) == 1, "made a wasted probe call"
+
+
+def test_temperature_is_sent_to_a_model_that_accepts_it():
+    """Omission is the default, not the only behaviour — sampling diversity still works elsewhere."""
+    fc = _FakeCaller([{"ok": 1}])
+
+    strands_json(
+        model_id="amazon.nova-pro-v1:0", system="s", prompt="p", temperature=0.7, caller=fc
+    )
+
+    assert fc.temps == [0.7]
+
+
+def test_an_unknown_model_that_rejects_temperature_is_still_learned():
+    """The runtime fallback is retained for an id the markers do not cover (a future model)."""
+    fc = _FakeCaller([{"ok": 1}], reject_temperature=True)
+
+    out = strands_json(
+        model_id="vendor.some-future-model-v9", system="s", prompt="p", temperature=0.7, caller=fc
+    )
+
+    assert out == {"ok": 1}
+    # Probed once, rejected, retried without it — and remembered.
     assert fc.temps == [0.7, None]
+    assert "vendor.some-future-model-v9" in llm._NO_TEMPERATURE
+
+
+def test_a_learned_rejection_suppresses_temperature_on_the_next_call():
+    """Learning must actually save the second container-local call, not just record a fact."""
+    llm._NO_TEMPERATURE.add("vendor.some-future-model-v9")
+    fc = _FakeCaller([{"ok": 1}], reject_temperature=True)
+
+    strands_json(
+        model_id="vendor.some-future-model-v9", system="s", prompt="p", temperature=0.7, caller=fc
+    )
+
+    assert fc.temps == [None]
+
+
+def test_accepts_temperature_is_decided_without_a_call():
+    assert llm._accepts_temperature("us.anthropic.claude-sonnet-5") is False
+    assert llm._accepts_temperature("us.anthropic.claude-sonnet-4-5") is True
+    assert llm._accepts_temperature("amazon.nova-pro-v1:0") is True
 
 
 def test_classify_with_consistency_majority_vote_and_prompt():
