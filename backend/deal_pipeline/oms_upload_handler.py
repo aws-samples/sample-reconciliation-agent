@@ -22,19 +22,16 @@ from botocore.exceptions import ClientError
 from backend.deal_pipeline.oms_schema import parse_csv
 from backend.deal_pipeline.oms_validator import VALIDATOR_VERSION, validate
 from backend.deal_pipeline.security_master import SecurityMaster
-from backend.deal_pipeline.store import is_conditional_check_failed, update_attributes, utc_now_iso
+from backend.recon_core.ddb_update import (
+    is_conditional_check_failed,
+    update_attributes,
+    utc_now_iso,
+)
 
 logger = logging.getLogger(__name__)
 
 OMS_ACTOR = "mock-oms"
 DEFAULT_COUNTERPARTIES_KEY = "security-master/counterparties.csv"
-
-
-def _env(name: str, default: str | None = None) -> str:
-    value = os.environ.get(name, default)
-    if value is None:
-        raise KeyError(f"environment variable {name} is not set")
-    return value
 
 
 def validate_csv_text(text: str, counterparties) -> list[dict]:
@@ -63,9 +60,9 @@ def handle(event, _context=None) -> dict:
     :raises KeyError: when the deal does not exist (a caller error; nothing has been changed).
     """
     deal_id = event["deal_id"]
-    deals = boto3.resource("dynamodb").Table(_env("DEALS_TABLE"))
+    deals = boto3.resource("dynamodb").Table(os.environ["DEALS_TABLE"])
     s3 = boto3.client("s3")
-    bucket = _env("ASSETS_BUCKET")
+    bucket = os.environ["ASSETS_BUCKET"]
 
     deal = deals.get_item(Key={"deal_id": deal_id}).get("Item")
     if deal is None:
@@ -74,7 +71,7 @@ def handle(event, _context=None) -> dict:
     body = s3.get_object(Bucket=bucket, Key=csv_key)["Body"].read().decode("utf-8")
 
     counterparties = SecurityMaster.counterparties_from_s3(
-        s3, bucket, _env("COUNTERPARTIES_KEY", DEFAULT_COUNTERPARTIES_KEY)
+        s3, bucket, os.environ.get("COUNTERPARTIES_KEY", DEFAULT_COUNTERPARTIES_KEY)
     )
     errors = validate_csv_text(body, counterparties)
     attempted_at = utc_now_iso()

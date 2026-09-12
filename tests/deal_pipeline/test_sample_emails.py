@@ -17,7 +17,7 @@ from backend.deal_pipeline.oms_schema import (
     to_csv,
     validate_fields,
 )
-from tests.deal_pipeline.fakes import FakeBedrock, lookup_turn, stage_turn
+from tests.fakes.bedrock import FakeBedrock, lookup_turn, stage_turn
 
 SKILLS = [
     {"name": "deal-parsing", "description": "Parse deal emails.", "body": "Term loans are Loan."}

@@ -1,22 +1,12 @@
 """Edge-case memory recall is advisory: it returns ids and text, and never fails the parse."""
 
 from backend.deal_pipeline.memory_recall import retrieve_rules
-
-
-class _Client:
-    def __init__(self, response=None, error=None):
-        self.response, self.error, self.calls = response, error, []
-
-    def retrieve_memory_records(self, **kwargs):
-        self.calls.append(kwargs)
-        if self.error:
-            raise self.error
-        return self.response
+from tests.fakes.memory import FakeMemoryClient
 
 
 def test_returns_record_ids_and_text_and_skips_empty_records():
-    client = _Client(
-        {
+    client = FakeMemoryClient(
+        response={
             "memoryRecordSummaries": [
                 {
                     "memoryRecordId": "mem-1",
@@ -44,19 +34,19 @@ def test_returns_record_ids_and_text_and_skips_empty_records():
 
 
 def test_query_is_truncated_to_the_api_limit():
-    client = _Client({"memoryRecordSummaries": []})
+    client = FakeMemoryClient()
     retrieve_rules("mem-id", "ns", "x" * 5000, top_k=3, client=client)
     assert len(client.calls[0]["searchCriteria"]["searchQuery"]) == 1000
     assert client.calls[0]["searchCriteria"]["topK"] == 3
 
 
 def test_disabled_without_memory_id_or_query():
-    client = _Client({"memoryRecordSummaries": [{"memoryRecordId": "x", "content": {"text": "y"}}]})
+    client = FakeMemoryClient([{"record_id": "x", "text": "y"}])
     assert retrieve_rules("", "ns", "query", client=client) == []
     assert retrieve_rules("mem-id", "ns", "   ", client=client) == []
     assert client.calls == []
 
 
 def test_fail_soft_on_service_errors():
-    client = _Client(error=RuntimeError("throttled"))
+    client = FakeMemoryClient(error=RuntimeError("throttled"))
     assert retrieve_rules("mem-id", "ns", "query", client=client) == []

@@ -18,6 +18,9 @@ Modules, in the order a deal flows through them:
 - ``oms_validator``    the mock OMS rule set (design section 6) with stable error codes.
 - ``oms_upload_handler`` Lambda entry point: staging CSV in, ``UploadResult`` out.
 
-Runtime dependencies are boto3 and the standard library only: the Lambda packaging module
-vendors nothing for this package.
+Shared plumbing comes from ``backend.recon_core``: ``memory.retrieve_records`` (behind
+``memory_recall``), ``model_select.get_agent_model_id``, ``ddb_update`` (the ``UpdateItem``
+helpers and ``utc_now_iso``) and ``s3_text.read_text``. Every one of those imports boto3 and the
+standard library only, which is all this package's Lambda zip vendors (plus ``tzdata``); nothing
+here may import ``recon_core.ddb`` or ``recon_core.schema``, which need pydantic.
 """

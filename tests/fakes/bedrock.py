@@ -1,4 +1,4 @@
-"""Test doubles for the deal pipeline suite.
+"""Scripted stand-in for the ``bedrock-runtime`` Converse API.
 
 Imported (not fixtures) so a test can script the model's turns inline next to its assertions:
 

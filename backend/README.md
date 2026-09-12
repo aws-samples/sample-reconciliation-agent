@@ -16,10 +16,10 @@ from a single zip. Any file in `backend/` redeploys both.
 
 | Package          | What it owns                                                                                                                                                 |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `recon_core/`    | The domain. Schemas, the notice store, evidence-completeness scoring, email policy, proposal assembly. The **only** place a reconciliation rule should live. |
+| `recon_core/`    | The domain. Schemas, the notice store, evidence-completeness scoring, email policy, proposal assembly. The **only** place a reconciliation rule should live. Also the boto3-only plumbing both apps share: `memory` (AgentCore Memory recall), `model_select` (the SSM model-id read with its allowlist), `ddb_update` (`UpdateItem` helpers), `s3_text` (optional-object reads). |
 | `cases/`         | Case lifecycle transitions and the resolution notification.                                                                                                  |
 | `harness_agent/` | The harness backend's invoke loop and stream→trace assembly. Its sibling is `agent-blueprint/recon-agent/`, the container backend.                           |
-| `deal_pipeline/` | The Deal Pipeline app, library and Lambdas in one package: `oms_schema` + `oms_fields.json` (the staging-CSV contract, mirrored in the frontend and asserted equal), `oms_validator` (one stable error code per rule), `security_master`, `skills_loader`, `memory_recall`, `store`, `coerce`, and the `agent` tool loop. Shares nothing with `recon_core/`. |
+| `deal_pipeline/` | The Deal Pipeline app, library and Lambdas in one package: `oms_schema` + `oms_fields.json` (the staging-CSV contract, mirrored in the frontend and asserted equal), `oms_validator` (one stable error code per rule), `security_master`, `skills_loader`, `memory_recall`, `coerce`, and the `agent` tool loop. Its plumbing comes from `recon_core/` — `memory.retrieve_records`, `model_select.get_agent_model_id`, `ddb_update`, `s3_text.read_text` — but never `recon_core.ddb` or `recon_core.schema`: those need pydantic, and the standalone pipeline zip vendors only `tzdata` (`tests/deal_pipeline/test_runtime_dependencies.py` pins this). |
 
 ## Lambdas
 

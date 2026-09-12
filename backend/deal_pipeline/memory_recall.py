@@ -8,9 +8,7 @@ context, so a situational correction ("project-finance TLBs are First Lien in th
 to the next matching email without a skill edit.
 """
 
-import logging
-
-logger = logging.getLogger(__name__)
+from backend.recon_core.memory import retrieve_records
 
 
 def retrieve_rules(
@@ -36,24 +34,4 @@ def retrieve_rules(
     """
     if not memory_id or not query.strip():
         return []
-    try:
-        if client is None:
-            import boto3
-
-            client = boto3.client("bedrock-agentcore")
-        resp = client.retrieve_memory_records(
-            memoryId=memory_id,
-            namespace=namespace,
-            searchCriteria={"searchQuery": query[:1000], "topK": top_k},
-        )
-        hits = []
-        for record in resp.get("memoryRecordSummaries", []):
-            text = (record.get("content") or {}).get("text", "")
-            if text:
-                hits.append({"record_id": record.get("memoryRecordId", ""), "text": text})
-        return hits
-    except Exception as exc:  # noqa: BLE001 - advisory context, never fail the parse
-        logger.warning(
-            "memory recall failed (memory %s, namespace %s): %s", memory_id, namespace, exc
-        )
-        return []
+    return retrieve_records(memory_id, namespace, query, top_k=top_k, client=client)

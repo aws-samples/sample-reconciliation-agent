@@ -1,15 +1,15 @@
 """Parser Lambda end to end against mocked DynamoDB, S3 and SSM with a scripted model."""
 
-from types import SimpleNamespace
-
 import pytest
 
 from backend.deal_pipeline import parser_handler
 from backend.deal_pipeline.agent import DEFAULT_SYSTEM_PROMPT
 from backend.deal_pipeline.oms_schema import to_csv
 from backend.deal_pipeline.parser_handler import DEFAULT_MODEL_ID, handle
+from backend.recon_core.model_select import ALLOWED_MODEL_IDS
 from tests.deal_pipeline.conftest import MODEL_PARAM
-from tests.deal_pipeline.fakes import FakeBedrock, lookup_turn, stage_turn, truncated_turn
+from tests.fakes.bedrock import FakeBedrock, lookup_turn, stage_turn, truncated_turn
+from tests.fakes.lambda_context import fake_context
 
 SKILL = "---\nname: deal-parsing\ndescription: Parse deal emails.\n---\nTerm loans are Loan; notes are Bond.\n"
 
@@ -29,10 +29,6 @@ TIERED_SKILLS = {
     "bank-notice-format": skill_md("bank-notice-format", "format", ["bank-notice"]),
     "oms-csv-format": skill_md("oms-csv-format", "reference", ["news-alert", "bank-notice"]),
 }
-
-
-def lambda_context(remaining_ms: int):
-    return SimpleNamespace(get_remaining_time_in_millis=lambda: remaining_ms)
 
 
 FIELDS = {
@@ -141,6 +137,28 @@ def test_defaults_when_prompt_skills_and_model_parameter_are_missing(aws):
     assert bedrock.calls[0]["system"] == [{"text": DEFAULT_SYSTEM_PROMPT}]
     email = aws.emails.get_item(Key={"email_id": "em_copperfield"})["Item"]
     assert email["parse"]["skills_used"] == []
+
+
+def test_a_model_id_off_the_allowlist_falls_back_to_the_default(aws):
+    # The Config tab only saves allowlisted ids; a hand-edited parameter must not reach Bedrock as
+    # a per-parse invocation error. The default itself has to be allowlisted or the fallback would
+    # be the one id the platform never exercised.
+    assert DEFAULT_MODEL_ID in ALLOWED_MODEL_IDS
+    seed_email(aws)
+    aws.ssm.put_parameter(Name=MODEL_PARAM, Value="us.example.not-a-model", Type="String")
+    bedrock = FakeBedrock([stage_turn(FIELDS)])
+    result = handle({"email_id": "em_copperfield"}, None, bedrock=bedrock)
+    assert result["status"] == "PARSED"
+    assert bedrock.calls[0]["modelId"] == DEFAULT_MODEL_ID
+
+
+def test_no_model_parameter_wired_means_the_default_without_an_ssm_read(aws, monkeypatch):
+    monkeypatch.setenv("AGENT_MODEL_PARAM", "")
+    aws.ssm.put_parameter(Name=MODEL_PARAM, Value="global.anthropic.claude-opus-5", Type="String")
+    seed_email(aws)
+    bedrock = FakeBedrock([stage_turn(FIELDS)])
+    assert handle({"email_id": "em_copperfield"}, None, bedrock=bedrock)["status"] == "PARSED"
+    assert bedrock.calls[0]["modelId"] == DEFAULT_MODEL_ID
 
 
 def test_failure_marks_the_email_parse_failed_and_returns(aws):
@@ -255,7 +273,7 @@ def test_too_little_lambda_time_left_is_recorded_as_parse_failed(aws):
     seed_email(aws)
     bedrock = FakeBedrock([stage_turn(FIELDS)])
     # 15 s remaining is inside the 20 s safety margin: the loop must not start a model call.
-    result = handle({"email_id": "em_copperfield"}, lambda_context(15_000), bedrock=bedrock)
+    result = handle({"email_id": "em_copperfield"}, fake_context(15_000), bedrock=bedrock)
     assert result["status"] == "PARSE_FAILED" and result["deal_id"] is None
     assert result["error"].startswith("TimeoutError: out of time before model round 1")
     assert bedrock.calls == []
@@ -268,7 +286,7 @@ def test_a_context_with_ample_time_parses_normally(aws):
     seed_email(aws)
     result = handle(
         {"email_id": "em_copperfield"},
-        lambda_context(300_000),
+        fake_context(300_000),
         bedrock=FakeBedrock([stage_turn(FIELDS)]),
     )
     assert result["status"] == "PARSED"
@@ -277,7 +295,7 @@ def test_a_context_with_ample_time_parses_normally(aws):
 def test_parse_deadline_keeps_a_safety_margin_before_the_lambda_timeout():
     assert parser_handler.parse_deadline(None) is None
     assert parser_handler.parse_deadline(object()) is None  # a context without the method
-    deadline = parser_handler.parse_deadline(lambda_context(300_000), clock=lambda: 1000.0)
+    deadline = parser_handler.parse_deadline(fake_context(300_000), clock=lambda: 1000.0)
     assert deadline == 1000.0 + 300.0 - parser_handler.DEADLINE_MARGIN_SECONDS
 
 

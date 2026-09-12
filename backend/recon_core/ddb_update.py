@@ -1,15 +1,24 @@
-"""Small DynamoDB and clock helpers shared by the two Lambda handlers.
+"""``UpdateItem`` helpers for records whose attribute names collide with DynamoDB reserved words.
 
-Both handlers update records whose attribute names collide with DynamoDB reserved words
-(``status``, ``error``); aliasing every name through ``ExpressionAttributeNames`` in one place
-means neither handler has to remember which ones.
+``status``, ``error`` and ``upload`` are all reserved words, so every name is aliased through
+``ExpressionAttributeNames`` here once rather than remembered at each call site. The deal
+pipeline's two Lambdas write through these; ``ItemStore`` (``ddb.py``) and ``CaseStore``
+(``cases.py``) predate them and keep their own expressions and timestamp formats.
+
+Deliberately separate from ``ddb.py``, which imports the pydantic ``ReconItem`` model at load:
+the deal pipeline's standalone Lambda zip ships boto3 and the standard library only, and this
+module has to import cleanly there.
 """
 
 from datetime import UTC, datetime
 
 
 def utc_now_iso() -> str:
-    """Current UTC time as an ISO-8601 string with second precision and a ``Z`` suffix."""
+    """Current UTC time as an ISO-8601 string with second precision and a ``Z`` suffix.
+
+    The timestamp format the deal pipeline persists on emails and deals (``updated_at``,
+    ``history[].at``, ``upload.attempted_at``).
+    """
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 

@@ -15,13 +15,10 @@ Lambda share one parser whether the bytes came from S3 or the repo's ``data/`` d
 import csv
 import difflib
 import io
-import logging
 import re
 from pathlib import Path
 
-from botocore.exceptions import ClientError
-
-logger = logging.getLogger(__name__)
+from backend.recon_core.s3_text import read_text
 
 ISSUERS_FILE = "issuers.csv"
 COUNTERPARTIES_FILE = "counterparties.csv"
@@ -50,16 +47,10 @@ def _read_optional_object(s3, bucket: str, key: str) -> str:
 
     A denied read is tolerated as empty on purpose: the two CSVs serve different Lambdas with
     different grants, and an approve must not fail with a 502 because the half this Lambda does
-    not use was never seeded. The warning names the code so a real permissions gap is visible.
+    not use was never seeded. :func:`read_text` names the code in its warning so a real
+    permissions gap is visible.
     """
-    try:
-        return s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
-    except ClientError as exc:
-        code = str(exc.response.get("Error", {}).get("Code", ""))
-        if code not in _MISSING_OBJECT_CODES:
-            raise
-        logger.warning("s3://%s/%s not loaded (%s); treating as empty", bucket, key, code)
-        return ""
+    return read_text(s3, bucket, key, default="", tolerate_codes=_MISSING_OBJECT_CODES)
 
 
 def _fold(text: str) -> str:

@@ -10,6 +10,7 @@ from moto import mock_aws
 
 from backend.deal_pipeline.oms_schema import normalize_fields
 from backend.deal_pipeline.security_master import SecurityMaster
+from tests.fakes.ddb import make_table
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SECURITY_MASTER_DIR = REPO_ROOT / "data" / "security-master"
@@ -131,28 +132,8 @@ def aws(pipeline_env):
     """
     with mock_aws():
         ddb = boto3.resource("dynamodb", region_name="us-east-1")
-        ddb.create_table(
-            TableName=EMAILS_TABLE,
-            KeySchema=[{"AttributeName": "email_id", "KeyType": "HASH"}],
-            AttributeDefinitions=[{"AttributeName": "email_id", "AttributeType": "S"}],
-            BillingMode="PAY_PER_REQUEST",
-        )
-        ddb.create_table(
-            TableName=DEALS_TABLE,
-            KeySchema=[{"AttributeName": "deal_id", "KeyType": "HASH"}],
-            AttributeDefinitions=[
-                {"AttributeName": "deal_id", "AttributeType": "S"},
-                {"AttributeName": "email_id", "AttributeType": "S"},
-            ],
-            GlobalSecondaryIndexes=[
-                {
-                    "IndexName": "by_email",
-                    "KeySchema": [{"AttributeName": "email_id", "KeyType": "HASH"}],
-                    "Projection": {"ProjectionType": "ALL"},
-                }
-            ],
-            BillingMode="PAY_PER_REQUEST",
-        )
+        emails = make_table(EMAILS_TABLE, "email_id")
+        deals = make_table(DEALS_TABLE, "deal_id", gsis=(("by_email", "email_id"),))
         s3 = boto3.client("s3", region_name="us-east-1")
         s3.create_bucket(Bucket=BUCKET)
         for name in ("issuers.csv", "counterparties.csv"):
@@ -163,8 +144,8 @@ def aws(pipeline_env):
             )
         yield SimpleNamespace(
             ddb=ddb,
-            emails=ddb.Table(EMAILS_TABLE),
-            deals=ddb.Table(DEALS_TABLE),
+            emails=emails,
+            deals=deals,
             s3=s3,
             ssm=boto3.client("ssm", region_name="us-east-1"),
             bucket=BUCKET,

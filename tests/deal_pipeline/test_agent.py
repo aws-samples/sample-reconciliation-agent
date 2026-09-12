@@ -20,7 +20,7 @@ from backend.deal_pipeline.agent import (
     tool_config,
 )
 from backend.deal_pipeline.oms_schema import FIELD_KEYS, validate_fields
-from tests.deal_pipeline.fakes import (
+from tests.fakes.bedrock import (
     FakeBedrock,
     lookup_turn,
     stage_turn,

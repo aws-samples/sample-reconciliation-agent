@@ -19,7 +19,9 @@ Environment:
 - ``ASSETS_BUCKET``                   S3 bucket holding skills, prompts, security master, CSVs.
 - ``KNOWLEDGE_MEMORY_ID``             AgentCore Memory id for edge-case recall ("" disables).
 - ``MEMORY_NAMESPACE``                default ``deal-pipeline/edge-cases/deal-desk``.
-- ``AGENT_MODEL_PARAM``               SSM parameter with the model id; falls back to the default.
+- ``AGENT_MODEL_PARAM``               SSM parameter with the model id, read through
+                                      ``recon_core.model_select``: unset, unreadable or off the
+                                      allowlist falls back to the default.
 - ``SKILLS_PREFIX``                   default ``skills/``.
 - ``PARSER_PROMPT_KEY``               default ``prompts/parser-system.md``.
 - ``SECURITY_MASTER_PREFIX``          default ``security-master/``.
@@ -40,7 +42,8 @@ from backend.deal_pipeline.memory_recall import retrieve_rules
 from backend.deal_pipeline.oms_schema import to_csv
 from backend.deal_pipeline.security_master import SecurityMaster
 from backend.deal_pipeline.skills_loader import list_skills, load_text, select_skills
-from backend.deal_pipeline.store import update_attributes, utc_now_iso
+from backend.recon_core.ddb_update import update_attributes, utc_now_iso
+from backend.recon_core.model_select import get_agent_model_id
 
 logger = logging.getLogger(__name__)
 
@@ -57,27 +60,6 @@ OPEN_DEAL_STATUSES = ("STAGED", "APPROVED", "UPLOAD_FAILED")
 # Time kept back from the Lambda's remaining budget so the failure path itself (logging, the
 # PARSE_FAILED write) always completes before the runtime stops the process.
 DEADLINE_MARGIN_SECONDS = 20.0
-
-
-def _env(name: str, default: str | None = None) -> str:
-    value = os.environ.get(name, default)
-    if value is None:
-        raise KeyError(f"environment variable {name} is not set")
-    return value
-
-
-def resolve_model_id(ssm, parameter_name: str) -> str:
-    """Read the agent model id from SSM, falling back to the default when the read fails.
-
-    A missing or unreadable parameter must not stop parsing: the default is the id the
-    environment is provisioned with, so the only loss is the operator's override.
-    """
-    try:
-        value = ssm.get_parameter(Name=parameter_name)["Parameter"]["Value"].strip()
-        return value or DEFAULT_MODEL_ID
-    except Exception as exc:  # noqa: BLE001 - config lookup is best effort
-        logger.warning("could not read %s (%s); using %s", parameter_name, exc, DEFAULT_MODEL_ID)
-        return DEFAULT_MODEL_ID
 
 
 def new_deal_id(now: datetime | None = None) -> str:
@@ -184,10 +166,10 @@ def handle(event, context=None, *, bedrock=None, agentcore=None) -> dict:
     """
     email_id = event["email_id"]
     dynamodb = boto3.resource("dynamodb")
-    emails = dynamodb.Table(_env("EMAILS_TABLE"))
-    deals = dynamodb.Table(_env("DEALS_TABLE"))
+    emails = dynamodb.Table(os.environ["EMAILS_TABLE"])
+    deals = dynamodb.Table(os.environ["DEALS_TABLE"])
     s3 = boto3.client("s3")
-    bucket = _env("ASSETS_BUCKET")
+    bucket = os.environ["ASSETS_BUCKET"]
 
     email = emails.get_item(Key={"email_id": email_id}).get("Item")
     if email is None:
@@ -199,21 +181,25 @@ def handle(event, context=None, *, bedrock=None, agentcore=None) -> dict:
     )
 
     try:
-        model_id = resolve_model_id(
-            boto3.client("ssm"), _env("AGENT_MODEL_PARAM", "/deal-pipeline-dev/agent-model-id")
+        model_id = get_agent_model_id(
+            os.environ.get("AGENT_MODEL_PARAM", ""), default=DEFAULT_MODEL_ID
         )
         system_prompt = load_text(
-            s3, bucket, _env("PARSER_PROMPT_KEY", "prompts/parser-system.md"), DEFAULT_SYSTEM_PROMPT
+            s3,
+            bucket,
+            os.environ.get("PARSER_PROMPT_KEY", "prompts/parser-system.md"),
+            DEFAULT_SYSTEM_PROMPT,
         )
         skills = select_skills(
-            list_skills(s3, bucket, _env("SKILLS_PREFIX", "skills/")), email.get("source_kind")
+            list_skills(s3, bucket, os.environ.get("SKILLS_PREFIX", "skills/")),
+            email.get("source_kind"),
         )
         security_master = SecurityMaster.from_s3(
-            s3, bucket, _env("SECURITY_MASTER_PREFIX", "security-master/")
+            s3, bucket, os.environ.get("SECURITY_MASTER_PREFIX", "security-master/")
         )
         memories = retrieve_rules(
-            _env("KNOWLEDGE_MEMORY_ID", ""),
-            _env("MEMORY_NAMESPACE", DEFAULT_MEMORY_NAMESPACE),
+            os.environ.get("KNOWLEDGE_MEMORY_ID", ""),
+            os.environ.get("MEMORY_NAMESPACE", DEFAULT_MEMORY_NAMESPACE),
             f"{email.get('subject', '')}\n{(email.get('body') or '')[:MEMORY_QUERY_BODY_CHARS]}",
             client=agentcore,
         )
@@ -226,7 +212,7 @@ def handle(event, context=None, *, bedrock=None, agentcore=None) -> dict:
             security_master=security_master,
             bedrock=bedrock,
             deadline=parse_deadline(context),
-            desk_tz=_env("DESK_TZ", DEFAULT_DESK_TZ),
+            desk_tz=os.environ.get("DESK_TZ", DEFAULT_DESK_TZ),
         )
 
         created_at = utc_now_iso()

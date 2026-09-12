@@ -12,6 +12,8 @@ email gets (:func:`select_skills`); a skill without them is always loaded.
 import logging
 import posixpath
 
+from backend.recon_core.s3_text import read_text
+
 logger = logging.getLogger(__name__)
 
 FORMAT_TIER = "format"
@@ -178,8 +180,4 @@ def load_text(s3, bucket: str, key: str, default: str) -> str:
     Used for the parser system prompt: an environment whose prompt was never seeded (or was
     deleted from the Skills tab) still parses with the built-in prompt instead of failing.
     """
-    try:
-        return s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
-    except s3.exceptions.NoSuchKey:
-        logger.info("s3://%s/%s not found; using the built-in default", bucket, key)
-        return default
+    return read_text(s3, bucket, key, default=default, tolerate_codes=("NoSuchKey",))
