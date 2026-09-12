@@ -192,3 +192,86 @@ describe("Config tab — Tier-2 model selection", () => {
     expect(saveConfig).not.toHaveBeenCalled();
   });
 });
+
+// The states around a save, pinned before the row moved into the shared `ModelSelectPanel`: what the
+// row looks like before the config arrives, after a save lands, after a save is refused, and what the
+// REST of the page does while the save is in flight.
+describe("Config tab — Tier-2 model selection, around a save", () => {
+  it("holds the controls disabled and names no id until the config arrives", async () => {
+    // Never resolves: this is the page before the first byte of config.
+    getConfig.mockReturnValue(new Promise(() => {}));
+    render(<ConfigPage />);
+    await screen.findByText("Model");
+
+    expect(screen.getByRole("button", { name: "Opus 5" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Global" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Apply" })).toBeNull();
+    // Neither a guessed id nor the "no selection" line: nothing is known yet, and the row says so.
+    expect(screen.queryByText("us.anthropic.claude-sonnet-5")).toBeNull();
+    expect(screen.queryByText(/No selection recorded/i)).toBeNull();
+    expect(screen.getAllByText("loading…").length).toBeGreaterThan(0);
+  });
+
+  it("withdraws Apply once the save has landed", async () => {
+    saveConfig.mockResolvedValue({ agentModelId: "us.anthropic.claude-opus-5" });
+    await show();
+    await click(screen.getByRole("button", { name: "Opus 5" }));
+    await click(screen.getByRole("button", { name: "Apply" }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Apply" })).toBeNull(),
+    );
+    expect(
+      screen.getByText(/Tier-2 now invokes us\.anthropic\.claude-opus-5/),
+    ).toBeTruthy();
+    // The saved selection is now the applied one: the resolved id stands and the row is clean.
+    expect(screen.getByText("us.anthropic.claude-opus-5")).toBeTruthy();
+    expect(screen.queryByText(/No selection recorded/i)).toBeNull();
+    expect(saveConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the selection pending and shows the refusal when the save fails", async () => {
+    saveConfig.mockRejectedValue(
+      new Error("config write failed: AccessDeniedException"),
+    );
+    await show();
+    await click(screen.getByRole("button", { name: "Opus 5" }));
+    await click(screen.getByRole("button", { name: "Apply" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/config write failed: AccessDeniedException/),
+      ).toBeTruthy(),
+    );
+    // Nothing is claimed: the saved selection is unchanged, so Apply is still offered for the pair.
+    expect(screen.getByRole("button", { name: "Apply" })).toBeEnabled();
+    expect(screen.queryByText(/Tier-2 now invokes/)).toBeNull();
+    expect(screen.getByText("us.anthropic.claude-opus-5")).toBeTruthy();
+  });
+
+  it("disables the rest of the page while the save is in flight, and frees it after", async () => {
+    let settle!: () => void;
+    saveConfig.mockReturnValue(
+      new Promise<void>((resolve) => {
+        settle = resolve;
+      }),
+    );
+    await show();
+    await click(screen.getByRole("button", { name: "Opus 5" }));
+    await click(screen.getByRole("button", { name: "Apply" }));
+
+    // One `busy` for the whole page: a model save must not race a backend switch or a Tier-1 toggle,
+    // and the model controls must not take a second click while the first write is out.
+    expect(screen.getByRole("switch", { name: "Enabled" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Runtime" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Sonnet 5" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Apply" })).toBeDisabled();
+
+    await act(async () => settle());
+    await waitFor(() =>
+      expect(screen.getByRole("switch", { name: "Enabled" })).toBeEnabled(),
+    );
+    expect(screen.getByRole("button", { name: "Runtime" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Sonnet 5" })).toBeEnabled();
+  });
+});

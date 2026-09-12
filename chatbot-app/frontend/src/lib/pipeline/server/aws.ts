@@ -21,7 +21,6 @@ import {
 import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
 import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { LambdaClient } from "@aws-sdk/client-lambda";
-import { SSMClient } from "@aws-sdk/client-ssm";
 import { BedrockRuntimeClient } from "@aws-sdk/client-bedrock-runtime";
 import { BedrockAgentCoreClient } from "@aws-sdk/client-bedrock-agentcore";
 import { BedrockAgentCoreControlClient } from "@aws-sdk/client-bedrock-agentcore-control";
@@ -40,7 +39,6 @@ function lazy<T>(build: () => T): () => T {
 export const ddb = lazy(() => new DynamoDBClient({ region: env.region() }));
 export const s3 = lazy(() => new S3Client({ region: env.region() }));
 export const lambda = lazy(() => new LambdaClient({ region: env.region() }));
-export const ssm = lazy(() => new SSMClient({ region: env.region() }));
 export const bedrock = lazy(
   () => new BedrockRuntimeClient({ region: env.region() }),
 );

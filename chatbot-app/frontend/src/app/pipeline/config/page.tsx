@@ -4,60 +4,22 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { getConfig, saveConfig } from "@/lib/pipelineApi";
 import { useAppSubject } from "@/hooks/useAppSubject";
-import { Eyebrow, Notice, Panel, Placeholder, type ActionOutcome } from "@/components/app-ui/ui";
-import { DEFAULT_MODEL_ID, MODEL_ENDPOINTS, MODEL_FAMILIES, splitModelId } from "@/lib/models/presets";
-
-/** One row of preset buttons. */
-function Choice<T extends string>({
-  options,
-  value,
-  onChange,
-  disabled,
-}: {
-  options: readonly { value: T; label: string; hint?: string }[];
-  value: string;
-  onChange: (v: T) => void;
-  disabled: boolean;
-}) {
-  return (
-    <div className="flex gap-2">
-      {options.map((o) => (
-        <button
-          key={o.value}
-          type="button"
-          onClick={() => onChange(o.value)}
-          disabled={disabled}
-          title={o.hint ?? o.value}
-          className="rc-mono rounded px-3 py-2 text-[11px] uppercase tracking-[0.08em] disabled:opacity-40"
-          style={{
-            color: value === o.value ? "var(--rc-ink)" : "var(--rc-ink-faint)",
-            background: value === o.value ? "var(--rc-panel-2)" : "transparent",
-            border: value === o.value ? "1px solid var(--rc-cyan)" : "1px solid var(--rc-line)",
-          }}
-        >
-          {o.label}
-        </button>
-      ))}
-    </div>
-  );
-}
+import { Eyebrow, Notice, Panel, type ActionOutcome } from "@/components/app-ui/ui";
+import { ModelSelectPanel } from "@/components/app-ui/ModelSelectPanel";
+import { DEFAULT_MODEL_ID, splitModelId } from "@/lib/models/presets";
 
 export default function ConfigPage() {
   const { isAdmin } = useAppSubject("pipeline");
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
-  // The SAVED selection, and the family/endpoint the controls currently show. Separate because the two
-  // controls compose into one id: picking a family has not chosen anything until the pair is applied,
-  // and showing the composed id before the write is the point — "Opus" plus "Global" is a
-  // data-residency change the operator should see spelled out first.
+  // The SAVED selection; the family/endpoint controls and the pending pair they compose live in the
+  // shared `ModelSelectPanel`, which hands back the composed id on Apply.
   const [modelId, setModelId] = useState<string | null>(null);
   const [allowed, setAllowed] = useState<readonly string[]>([]);
-  // The console-wide default model, when the console has one (`/console/settings`, Defaults). Offered as
-  // a one-click fill for the controls; Apply still writes THIS app's parameter, because the parser reads
-  // that parameter and nothing else.
+  // The console-wide default model, when the console has one (`/console/settings`, Defaults). The panel
+  // offers it as a one-click fill for the controls; Apply still writes THIS app's parameter, because the
+  // parser reads that parameter and nothing else.
   const [consoleDefault, setConsoleDefault] = useState<string | null>(null);
-  const [family, setFamily] = useState(splitModelId(null).family);
-  const [endpoint, setEndpoint] = useState(splitModelId(null).endpoint);
   const [busy, setBusy] = useState(false);
   // Carries its tone: a refused PutParameter must not read like "the parser now invokes …".
   const [msg, setMsg] = useState<ActionOutcome | null>(null);
@@ -69,34 +31,13 @@ export default function ConfigPage() {
         setAllowed(c.modelIds ?? []);
         // Absent or null when the console layer is off, in which case there is nothing to offer.
         setConsoleDefault(c.consoleDefaultModelId || null);
-        const { endpoint: ep, family: fam } = splitModelId(c.modelId);
-        setEndpoint(ep);
-        setFamily(fam);
         setLoaded(true);
       })
       .catch((e) => setError(String(e)));
   }, []);
 
-  /** Fill the two controls from the console default; the composed id then equals it exactly. */
-  const useConsoleDefault = () => {
-    if (!consoleDefault) return;
-    const { endpoint: ep, family: fam } = splitModelId(consoleDefault);
-    setEndpoint(ep);
-    setFamily(fam);
-  };
-
-  // Composed from the two controls; deliberately NOT saved as it changes.
-  const pending = `${endpoint}.${family}`;
-  const pendingAllowed = allowed.length === 0 || allowed.includes(pending);
-  const dirty = loaded && pending !== modelId;
-  // A stored id outside the presets (a bare foundation-model id, say) still shows, so the page never
-  // claims a selection it cannot represent with its buttons.
-  const storedIsPreset =
-    modelId === null ||
-    (MODEL_FAMILIES.some((f) => f.suffix === splitModelId(modelId).family) &&
-      MODEL_ENDPOINTS.some((e) => e.value === splitModelId(modelId).endpoint));
-
-  const apply = async () => {
+  /** Apply the id the panel composed. Called by the panel only for a dirty, server-accepted pair. */
+  const apply = async (pending: string) => {
     setBusy(true);
     setMsg(null);
     // Not optimistic: the panel's job is to state which model the parser actually invokes, so it
@@ -108,7 +49,9 @@ export default function ConfigPage() {
         tone: "success",
         text:
           `The parser now invokes ${pending} on its next run.` +
-          (endpoint === "global" ? " The global endpoint may serve requests from outside the US." : ""),
+          (splitModelId(pending).endpoint === "global"
+            ? " The global endpoint may serve requests from outside the US."
+            : ""),
       });
     } catch (e) {
       setMsg({ tone: "error", text: String(e) });
@@ -127,79 +70,31 @@ export default function ConfigPage() {
       </header>
 
       <Panel className="rc-rise p-6">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="max-w-xl">
-            <div className="rc-mono text-[15px] font-medium text-[var(--rc-ink)]">Parser model</div>
-            <p className="mt-2 text-[13px] leading-relaxed text-[var(--rc-ink-dim)]">
+        <ModelSelectPanel
+          title="Parser model"
+          value={modelId}
+          loaded={loaded}
+          allowed={allowed}
+          consoleDefault={consoleDefault}
+          deployedDefault={`the parser is using its deployed default, ${DEFAULT_MODEL_ID}.`}
+          onApply={apply}
+          readOnly={!isAdmin}
+          busy={busy}
+          error={error}
+          description={
+            <>
               Which model the parsing agent invokes. Read from the SSM parameter on every run, so a
               change applies to the next email with no redeploy. The endpoint is a{" "}
               <strong>data-residency</strong> choice, not a speed one:{" "}
               <span className="rc-mono">global</span> may serve the request from outside the US.
-            </p>
-            {!isAdmin && (
-              <p className="rc-mono mt-2 text-[11.5px] text-[var(--rc-ink-faint)]">
-                Changing it requires membership of the admin group; the controls below are read-only.
-              </p>
-            )}
-          </div>
-
-          {error ? (
-            <Placeholder kind="error">Failed to load — {error}</Placeholder>
-          ) : !loaded ? (
-            <Placeholder kind="loading">◆ loading…</Placeholder>
-          ) : (
-            <div className="flex flex-col items-end gap-2">
-              <Choice options={MODEL_FAMILIES.map((f) => ({ value: f.suffix, label: f.label }))} value={family} onChange={setFamily} disabled={busy || !isAdmin} />
-              <Choice options={MODEL_ENDPOINTS} value={endpoint} onChange={setEndpoint} disabled={busy || !isAdmin} />
-              {/* The resolved id, always visible: the two controls compose into it, so an operator who
-                  cannot see the result cannot tell a family change from a residency change. */}
-              <span className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">{pending}</span>
-              {isAdmin && dirty && pendingAllowed && (
-                <button
-                  type="button"
-                  onClick={apply}
-                  disabled={busy}
-                  className="rc-mono rounded border border-[var(--rc-cyan)] bg-[var(--rc-panel-2)] px-3 py-2 text-[11px] uppercase tracking-[0.08em] text-[var(--rc-ink)] disabled:opacity-40"
-                >
-                  {busy ? "Applying…" : "Apply"}
-                </button>
+              {!isAdmin && (
+                <p className="rc-mono mt-2 text-[11.5px] text-[var(--rc-ink-faint)]">
+                  Changing it requires membership of the admin group; the controls below are read-only.
+                </p>
               )}
-              {dirty && !pendingAllowed && (
-                <span className="rc-mono text-[11px] text-[var(--rc-amber)]">not an accepted combination</span>
-              )}
-            </div>
-          )}
-        </div>
-        {loaded && modelId === null && (
-          <p className="rc-mono mt-3 text-[11px] text-[var(--rc-ink-faint)]">
-            No selection recorded — the parser is using its deployed default, {DEFAULT_MODEL_ID}.
-          </p>
-        )}
-        {loaded && !storedIsPreset && (
-          <p className="rc-mono mt-3 text-[11px] text-[var(--rc-amber)]">
-            The stored id, {modelId}, is not one of the presets above; applying a preset replaces it.
-          </p>
-        )}
-        {loaded && consoleDefault && (
-          <div
-            className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-[var(--rc-ink-faint)]"
-            data-testid="console-default-model"
-          >
-            <span className="rc-mono">
-              Console default: <span className="text-[var(--rc-ink-dim)]">{consoleDefault}</span>
-            </span>
-            {isAdmin && (
-              <button
-                type="button"
-                onClick={useConsoleDefault}
-                disabled={busy || pending === consoleDefault}
-                className="rc-mono rounded border border-[var(--rc-line)] px-3 py-1.5 text-[11px] uppercase tracking-[0.08em] text-[var(--rc-ink-dim)] hover:text-[var(--rc-ink)] disabled:opacity-40"
-              >
-                Use console default
-              </button>
-            )}
-          </div>
-        )}
+            </>
+          }
+        />
         {msg && (
           <Notice tone={msg.tone} className="mt-4 text-[12px]">
             {msg.text}

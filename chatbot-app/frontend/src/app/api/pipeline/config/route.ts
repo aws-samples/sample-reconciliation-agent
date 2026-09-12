@@ -1,13 +1,12 @@
 import { NextResponse } from "next/server";
-import { GetParameterCommand, PutParameterCommand } from "@aws-sdk/client-ssm";
 
 import { requireActor } from "@/lib/api-auth";
 import { consoleDefaultModelId } from "@/lib/console/settings";
 import { requireAppAdmin } from "@/lib/auth/app-admin";
 import { AGENT_MODEL_IDS, isAllowedModelId } from "@/lib/server/agentModels";
-import { ssm } from "@/lib/pipeline/server/aws";
 import { env } from "@/lib/pipeline/server/env";
 import { jsonError, readJsonObject, stringField } from "@/lib/server/http";
+import { readParam, writeParam } from "@/lib/server/ssm";
 
 // Runtime configuration: which Bedrock model the parsing agent invokes, held in the SSM parameter
 // `AGENT_MODEL_PARAM` and read by the parser Lambda on every run. GET is open (the Config tab
@@ -28,13 +27,7 @@ export async function GET(req: Request) {
   const who = await requireActor(req);
   if ("error" in who) return who.error;
   try {
-    let value: string | null = null;
-    try {
-      const got = await ssm().send(new GetParameterCommand({ Name: env.agentModelParam() }));
-      value = got.Parameter?.Value?.trim() ?? null;
-    } catch (err) {
-      if ((err as { name?: string }).name !== "ParameterNotFound") throw err;
-    }
+    const value = (await readParam(env.agentModelParam()))?.trim() ?? null;
     return NextResponse.json({
       modelId: value && isAllowedModelId(value) ? value : null,
       modelIds: AGENT_MODEL_IDS,
@@ -55,14 +48,7 @@ export async function PUT(req: Request) {
     return jsonError(400, `modelId must be one of: ${AGENT_MODEL_IDS.join(", ")}`);
   }
   try {
-    await ssm().send(
-      new PutParameterCommand({
-        Name: env.agentModelParam(),
-        Value: modelId,
-        Type: "String",
-        Overwrite: true,
-      }),
-    );
+    await writeParam(env.agentModelParam(), modelId);
     return NextResponse.json({ modelId });
   } catch (err) {
     return jsonError(500, `config write failed: ${(err as Error).message}`);

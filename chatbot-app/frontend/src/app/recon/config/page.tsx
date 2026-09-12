@@ -14,7 +14,8 @@ import { SourceViewer } from "@/components/recon/SourceViewer";
 import { ContactsPanel } from "@/components/recon/ContactsPanel";
 import { TemplatesPanel } from "@/components/recon/TemplatesPanel";
 import { WorkflowTypesPanel } from "@/components/recon/WorkflowTypesPanel";
-import { MODEL_ENDPOINTS, MODEL_FAMILIES, splitModelId } from "@/lib/models/presets";
+import { ModelSelectPanel } from "@/components/app-ui/ModelSelectPanel";
+import { splitModelId } from "@/lib/models/presets";
 
 type PlatformConfigCommentMode = "required" | "optional" | "disapprove-only";
 
@@ -56,16 +57,12 @@ export default function ConfigPage() {
   const [agentBackend, setAgentBackend] = useState<string | null>(null);
   const [backendMsg, setBackendMsg] = useState<string | null>(null);
 
-  // The SAVED model selection, and the family/endpoint the controls currently show. They are separate
-  // state because the two controls compose into one id: an operator picking a family has not yet
-  // chosen anything until the pair is applied, and showing the composed id before the write is the
-  // point — "Opus" plus "Global" is a data-residency change they should see spelled out first.
-  // `agentModelId === null` means no selection is recorded and each backend uses its deployed default.
+  // The SAVED model selection; the family/endpoint controls and the pending pair they compose live in
+  // the shared `ModelSelectPanel`, which hands back the composed id on Apply. `agentModelId === null`
+  // means no selection is recorded and each backend uses its deployed default.
   const [agentModelId, setAgentModelId] = useState<string | null>(null);
   const [modelIdsLoaded, setModelIdsLoaded] = useState(false);
   const [allowedModelIds, setAllowedModelIds] = useState<readonly string[]>([]);
-  const [modelFamily, setModelFamily] = useState("anthropic.claude-sonnet-5");
-  const [modelEndpoint, setModelEndpoint] = useState("us");
   const [modelMsg, setModelMsg] = useState<string | null>(null);
   const [harnessInfo, setHarnessInfo] = useState<HarnessInfo | null>(null);
   const [harnessErr, setHarnessErr] = useState<string | null>(null);
@@ -99,9 +96,6 @@ export default function ConfigPage() {
         setAgentModelId(c.agentModelId ?? null);
         setAllowedModelIds(c.agentModelIds ?? []);
         setModelIdsLoaded(true);
-        const { endpoint, family } = splitModelId(c.agentModelId ?? null);
-        setModelEndpoint(endpoint);
-        setModelFamily(family);
       })
       .catch((e) => setError(String(e)));
     getLambdaSource()
@@ -209,31 +203,19 @@ export default function ConfigPage() {
     }
   };
 
-  // Composed from the two controls. Deliberately NOT saved as it changes: switching family and
-  // endpoint one click at a time would write an intermediate pair nobody chose — and half of those
-  // intermediates are a data-residency change.
-  const pendingModelId = `${modelEndpoint}.${modelFamily}`;
-  // Checked against the ids the SERVER said it accepts, not against the local list. The two are
-  // hand-maintained copies, and offering Apply for a pair the PUT would reject with a 400 turns a
-  // drifted allowlist into an error the operator sees instead of one the developer does.
-  const pendingModelIdAllowed =
-    !modelIdsLoaded ||
-    allowedModelIds.length === 0 ||
-    allowedModelIds.includes(pendingModelId);
-  const modelDirty = modelIdsLoaded && pendingModelId !== agentModelId;
-
-  const saveModel = async () => {
+  /** Apply the id the panel composed. Called by the panel only for a dirty, server-accepted pair. */
+  const saveModel = async (modelId: string) => {
     setBusy(true);
     setModelMsg(null);
     // Not optimistic, unlike the backend switch above. There is nothing to be optimistic about: the
     // panel's job here is to state which model is actually being invoked, so it should not claim the
     // new one until the parameter holds it.
     try {
-      await saveConfig({ agentModelId: pendingModelId });
-      setAgentModelId(pendingModelId);
+      await saveConfig({ agentModelId: modelId });
+      setAgentModelId(modelId);
       setModelMsg(
-        `Tier-2 now invokes ${pendingModelId} — picked up by both backends on the next escalation.` +
-          (modelEndpoint === "global"
+        `Tier-2 now invokes ${modelId} — picked up by both backends on the next escalation.` +
+          (splitModelId(modelId).endpoint === "global"
             ? " The global endpoint may serve requests from outside the US."
             : ""),
       );
@@ -520,114 +502,36 @@ export default function ConfigPage() {
             an operator comparing two models on one queue is doing the same kind of experiment as one
             comparing the two backends. --- */}
         <div className="mt-6 border-t border-[var(--rc-line)] pt-5">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div className="max-w-xl">
-              <div className="rc-mono text-[15px] font-medium text-[var(--rc-ink)]">
-                Model
-              </div>
-              <p className="mt-2 text-[13px] leading-relaxed text-[var(--rc-ink-dim)]">
+          {/* No selection recorded is a real state, not a missing value: it means neither backend has
+              been told which model to use, so each uses the one it was deployed with. The panel says
+              so in these words rather than naming an id this page cannot actually verify. */}
+          <ModelSelectPanel
+            value={agentModelId}
+            loaded={modelIdsLoaded}
+            allowed={allowedModelIds}
+            deployedDefault="each backend is using the model it was deployed with."
+            onApply={saveModel}
+            busy={busy}
+            description={
+              <>
                 Which Anthropic model the Tier-2 agent invokes. Read per
                 invocation by whichever backend is selected above, so a change
                 applies to the next escalation with no redeploy. The endpoint is
                 a <strong>data-residency</strong> choice, not a speed one:{" "}
                 <span className="rc-mono">global</span> may serve the request
                 from outside the US.
-              </p>
-              {agentBackend === "harness" && (
-                <p className="mt-2 text-[13px] leading-relaxed text-[var(--rc-ink-dim)]">
-                  A deployed harness config version pins its own model and
-                  overrides this selection — deliberately, so a scored
-                  configuration in the Evals tab stays reproducible. The{" "}
-                  <strong>Model</strong> line below is the one actually in
-                  effect.
-                </p>
-              )}
-            </div>
-            <div className="flex flex-col items-end gap-2">
-              <div className="flex gap-2">
-                {MODEL_FAMILIES.map((f) => (
-                  <button
-                    key={f.suffix}
-                    onClick={() => setModelFamily(f.suffix)}
-                    disabled={busy || !modelIdsLoaded}
-                    title={f.suffix}
-                    className="rc-mono rounded px-3 py-2 text-[11px] uppercase tracking-[0.08em] disabled:opacity-40"
-                    style={{
-                      color:
-                        modelFamily === f.suffix
-                          ? "var(--rc-ink)"
-                          : "var(--rc-ink-faint)",
-                      background:
-                        modelFamily === f.suffix
-                          ? "var(--rc-panel-2)"
-                          : "transparent",
-                      border:
-                        modelFamily === f.suffix
-                          ? "1px solid var(--rc-cyan)"
-                          : "1px solid var(--rc-line)",
-                    }}
-                  >
-                    {f.label}
-                  </button>
-                ))}
-              </div>
-              <div className="flex gap-2">
-                {MODEL_ENDPOINTS.map((e) => (
-                  <button
-                    key={e.value}
-                    onClick={() => setModelEndpoint(e.value)}
-                    disabled={busy || !modelIdsLoaded}
-                    title={e.hint}
-                    className="rc-mono rounded px-3 py-2 text-[11px] uppercase tracking-[0.08em] disabled:opacity-40"
-                    style={{
-                      color:
-                        modelEndpoint === e.value
-                          ? "var(--rc-ink)"
-                          : "var(--rc-ink-faint)",
-                      background:
-                        modelEndpoint === e.value
-                          ? "var(--rc-panel-2)"
-                          : "transparent",
-                      border:
-                        modelEndpoint === e.value
-                          ? "1px solid var(--rc-cyan)"
-                          : "1px solid var(--rc-line)",
-                    }}
-                  >
-                    {e.label}
-                  </button>
-                ))}
-              </div>
-              {/* The resolved id, always visible. The two controls compose into it, so an operator who
-                  cannot see the result cannot tell a family change from a residency change. */}
-              <span className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">
-                {!modelIdsLoaded ? "loading…" : pendingModelId}
-              </span>
-              {modelDirty && pendingModelIdAllowed && (
-                <button
-                  onClick={saveModel}
-                  disabled={busy}
-                  className="rc-mono rounded border border-[var(--rc-cyan)] bg-[var(--rc-panel-2)] px-3 py-2 text-[11px] uppercase tracking-[0.08em] text-[var(--rc-ink)] disabled:opacity-40"
-                >
-                  Apply
-                </button>
-              )}
-              {modelDirty && !pendingModelIdAllowed && (
-                <span className="rc-mono text-[11px] text-[var(--rc-amber)]">
-                  not an accepted combination
-                </span>
-              )}
-            </div>
-          </div>
-          {/* No selection recorded is a real state, not a missing value: it means neither backend has
-              been told which model to use, so each uses the one it was deployed with. Saying so beats
-              naming an id this page cannot actually verify. */}
-          {modelIdsLoaded && agentModelId === null && (
-            <p className="rc-mono mt-3 text-[11px] text-[var(--rc-ink-faint)]">
-              No selection recorded — each backend is using the model it was
-              deployed with.
-            </p>
-          )}
+                {agentBackend === "harness" && (
+                  <p className="mt-2">
+                    A deployed harness config version pins its own model and
+                    overrides this selection — deliberately, so a scored
+                    configuration in the Evals tab stays reproducible. The{" "}
+                    <strong>Model</strong> line below is the one actually in
+                    effect.
+                  </p>
+                )}
+              </>
+            }
+          />
           {modelMsg && (
             <p className="rc-mono mt-4 text-[12px] text-[var(--rc-cyan)]">
               {modelMsg}
