@@ -34,8 +34,8 @@ vi.mock("@/lib/pipelineApi", () => ({
 }));
 // An admin viewer: the write controls are only rendered for one, and the server's refusal is what
 // these cases exercise — a token that lost the group mid-session, or a put the service rejected.
-vi.mock("@/hooks/usePipelineSubject", () => ({
-  usePipelineSubject: () => ({ subject: "sub-1", groups: ["deal-desk-admins"], isAdmin: true }),
+vi.mock("@/hooks/useAppSubject", () => ({
+  useAppSubject: () => ({ subject: "sub-1", groups: ["deal-desk-admins"], isAdmin: true }),
 }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 vi.mock("next/link", () => ({

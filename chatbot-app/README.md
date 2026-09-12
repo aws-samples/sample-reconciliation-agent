@@ -9,6 +9,12 @@ or locally with `npm run dev`.
 ```
 frontend/src/app/page.tsx         the landing chooser; /api/me reports the viewer's per-app access
 frontend/src/lib/auth/apps.ts     the app registry: paths, BFF prefixes, access + admin group names
+frontend/src/lib/auth/            the rest of the identity spine both apps and the shell share:
+                                  client-token.ts (the browser's ID-token reader), authed-fetch.ts (the
+                                  one 401-aware fetch every BFF client is built on), app-admin.ts (the
+                                  admin gate every admin-only write route calls, parameterised by app)
+frontend/src/lib/shell/viewer.ts  the one /api/me read: the viewer store the rail, the landing page and
+                                  every app page derive the signed-in viewer from
 frontend/src/lib/console/        the console-wide settings layer: types.ts (the contract: SSM layout,
                                   resolution order, /api/console/* shapes), settings.ts (the SSM
                                   overlay + 30 s cache), validation, admin gate
@@ -20,8 +26,8 @@ frontend/src/app/app-theme.css    the shared "instrument" theme every app render
 frontend/src/components/app-ui/   chrome and primitives shared by the apps: AppChrome (header, AppNav,
                                   UserMenu), DataTable, ui.tsx (Panel, Pill, Modal, Notice, buttons)
 frontend/src/hooks/useAppSubject.ts
-                                  the viewer for one app, from /api/me, via lib/auth/authed-fetch.ts
-                                  (the one 401-aware fetch every BFF client is built on)
+                                  the viewer for one app (subject, groups, isAdmin), projected from the
+                                  viewer store; useReconSubject.ts is its recon-named binding
 
 frontend/src/app/recon/           screens: dashboard, queue, case/[id], skills, lessons, evals,
                                   idp-documents, config
@@ -67,6 +73,17 @@ pipeline app off entirely (hidden from `/api/me`, 403 from the proxy); unset mea
 pre-shell names `RECON_ALLOW_ANONYMOUS_API` and `PIPELINE_ALLOW_ANONYMOUS_API` still mean the same
 thing, and none of the three belongs in a deployment. `frontend/.env.example` is the template for
 both apps.
+
+Identity is read once. `/api/me` is the only "who am I" route — there is no `/api/recon/me` or
+`/api/pipeline/me` — and `src/lib/shell/viewer.ts` asks it once per page load for the rail, the landing
+page and every app page alike. An app page derives its viewer from that one read through
+`useAppSubject("recon" | "pipeline")` (`useReconSubject` is the recon-named binding): the subject keys
+stored column layouts and `isAdmin`, read from the body's per-app block, hides admin-only tabs. Both
+are advisory; the routes decide. Every BFF client (`reconApi`, `pipelineApi`, `consoleApi`) sends
+through `src/lib/auth/authed-fetch.ts`, which attaches the token and turns a 401 into the shared
+re-authentication, and every admin-only write route re-checks the group through
+`src/lib/auth/app-admin.ts` (`requireAppAdmin`, or `requireAppActor` where a route is open to all but
+behaves differently for admins; `reconAdmin.ts` keeps the recon-named entry points).
 
 Admin gating differs between the apps, and it matters for what an access group buys. Every pipeline
 write route re-checks `PIPELINE_ADMIN_GROUP`. On the recon side only `config/*`, `memory` DELETE and

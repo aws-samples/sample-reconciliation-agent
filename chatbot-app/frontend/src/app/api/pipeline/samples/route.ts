@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { requireActor } from "@/lib/api-auth";
-import { jsonError } from "@/lib/pipeline/server/http";
+import { jsonError } from "@/lib/server/http";
 import { listSamples } from "@/lib/pipeline/server/samples";
 
 // The simulated inbox's menu: the fictional corpus from `SAMPLE_EMAILS_DIR` on disk, or from the

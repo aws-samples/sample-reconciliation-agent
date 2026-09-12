@@ -96,4 +96,18 @@ describe("authedFetch", () => {
     );
     error.mockRestore();
   });
+
+  it("logs under a neutral default label when the caller gives none", async () => {
+    // A client that forgets the label must still be identifiable in the console, and must not be
+    // blamed on whichever app happened to own the copy this replaced.
+    reauthenticate.mockRejectedValue(new Error("popup blocked"));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 401 }));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await authedFetch("/api/pipeline/deals");
+    await settle();
+
+    expect(error).toHaveBeenCalledWith("[AuthedFetch] re-authentication failed:", expect.any(Error));
+    error.mockRestore();
+  });
 });

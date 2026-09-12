@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
 
 import { requireActor } from "@/lib/api-auth";
-import { requirePipelineAdmin } from "@/lib/pipelineAdmin";
+import { requireAppAdmin } from "@/lib/auth/app-admin";
 import type { FieldValues } from "@/lib/pipeline/types";
 import { normalizeFields, validateFields } from "@/lib/pipeline/omsSchema";
 import { isConditionalCheckFailed } from "@/lib/pipeline/server/aws";
 import { applyEdit, getDeal, isOpen } from "@/lib/pipeline/server/dealStore";
-import { jsonError, readJsonObject } from "@/lib/pipeline/server/http";
+import { jsonError, readJsonObject } from "@/lib/server/http";
 import { parseFieldsBody } from "@/lib/pipeline/server/requests";
 
 // One deal: read it, or edit its staged fields before approval (design §9).
@@ -43,7 +43,7 @@ export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const admin = await requirePipelineAdmin(req);
+  const admin = await requireAppAdmin("pipeline", req);
   if ("error" in admin) return admin.error;
   const { id } = await params;
 

@@ -1,20 +1,23 @@
 /**
- * The pipeline BFF client: the one error path every call shares, and the SSE reader the assistant
- * depends on. Both are the kind of code that works on the happy path and fails on the boundary — a
- * non-JSON 502, a chunk split in the middle of a JSON frame — so that is what these pin.
+ * The pipeline BFF client: the list and record calls over the shared JSON reader (pinned itself in
+ * lib/api/client.test.ts), and the SSE reader the assistant depends on — the kind of code that works
+ * on the happy path and fails on the boundary, a chunk split in the middle of a JSON frame, so that is
+ * what these pin.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const pipelineFetch = vi.fn();
-vi.mock("@/lib/pipeline-auth", () => ({
-  pipelineFetch: (...args: unknown[]) => pipelineFetch(...args),
+// Stand in for the shared authenticated transport. Its own header merging and 401 handling are
+// covered in authed-fetch.test.ts; what matters here is that pipelineApi routes EVERY call through
+// it under the pipeline's label — a bare fetch would 401 against the proxy.
+const authedFetch = vi.fn();
+vi.mock("@/lib/auth/authed-fetch", () => ({
+  authedFetch: (...args: unknown[]) => authedFetch(...args),
 }));
 
 import {
   approveDeal,
   deleteMemory,
   getDealCsv,
-  json,
   listEmails,
   listProposals,
   readSseStream,
@@ -52,51 +55,24 @@ function stream(chunks: string[]): ReadableStream<Uint8Array> {
 }
 
 beforeEach(() => {
-  pipelineFetch.mockReset();
-});
-
-describe("json()", () => {
-  it("returns the parsed body on success", async () => {
-    expect(await json(response(200, { a: 1 }))).toEqual({ a: 1 });
-  });
-
-  it("resolves to undefined on an empty 2xx body rather than failing to parse", async () => {
-    expect(await json(response(204, "", { raw: true }))).toBeUndefined();
-  });
-
-  it("throws the server's own error message when the body carries one", async () => {
-    await expect(
-      json(response(403, { error: 'this endpoint requires membership of the "deal-desk-admins" group' })),
-    ).rejects.toThrow('requires membership of the "deal-desk-admins" group');
-  });
-
-  it("falls back to the status when the error body is not JSON", async () => {
-    // A proxy error page or an empty 502 must still produce a readable message, not "Unexpected token".
-    await expect(json(response(502, "<html>bad gateway</html>", { raw: true }))).rejects.toThrow(
-      "pipeline API error 502",
-    );
-  });
-
-  it("falls back to the status when the JSON error body has no `error` string", async () => {
-    await expect(json(response(500, { message: "nope" }))).rejects.toThrow("pipeline API error 500");
-  });
+  authedFetch.mockReset();
 });
 
 describe("list routes", () => {
   it("accepts a bare array", async () => {
-    pipelineFetch.mockResolvedValue(response(200, [{ email_id: "em_1" }]));
+    authedFetch.mockResolvedValue(response(200, [{ email_id: "em_1" }]));
     expect(await listEmails()).toEqual([{ email_id: "em_1" }]);
-    expect(pipelineFetch).toHaveBeenCalledWith("/api/pipeline/emails");
+    expect(authedFetch).toHaveBeenCalledWith("/api/pipeline/emails", undefined, "PipelineAuth");
   });
 
   it("accepts an envelope keyed by the collection name", async () => {
-    pipelineFetch.mockResolvedValue(response(200, { emails: [{ email_id: "em_2" }] }));
+    authedFetch.mockResolvedValue(response(200, { emails: [{ email_id: "em_2" }] }));
     expect(await listEmails()).toEqual([{ email_id: "em_2" }]);
   });
 
   it("filters proposals by status client-side as well as asking the server", async () => {
     // A route that ignores the query must not leak APPROVED rows into the PENDING view.
-    pipelineFetch.mockResolvedValue(
+    authedFetch.mockResolvedValue(
       response(200, [
         { proposal_id: "p1", status: "PENDING" },
         { proposal_id: "p2", status: "APPROVED" },
@@ -104,28 +80,32 @@ describe("list routes", () => {
     );
     const pending = await listProposals("PENDING");
     expect(pending.map((p) => p.proposal_id)).toEqual(["p1"]);
-    expect(pipelineFetch).toHaveBeenCalledWith("/api/pipeline/skills/proposals?status=PENDING");
+    expect(authedFetch).toHaveBeenCalledWith(
+      "/api/pipeline/skills/proposals?status=PENDING",
+      undefined,
+      "PipelineAuth",
+    );
   });
 });
 
 describe("single-record routes", () => {
   it("POSTs approve with no body and returns the updated deal", async () => {
-    pipelineFetch.mockResolvedValue(response(200, { deal_id: "dl_1", status: "UPLOAD_FAILED" }));
+    authedFetch.mockResolvedValue(response(200, { deal_id: "dl_1", status: "UPLOAD_FAILED" }));
     const deal = await approveDeal("dl_1");
     expect(deal.status).toBe("UPLOAD_FAILED");
-    expect(pipelineFetch).toHaveBeenCalledWith("/api/pipeline/deals/dl_1/approve", { method: "POST" });
+    expect(authedFetch).toHaveBeenCalledWith("/api/pipeline/deals/dl_1/approve", { method: "POST" }, "PipelineAuth");
   });
 
   it("returns the CSV as text and surfaces a failure through the shared error path", async () => {
-    pipelineFetch.mockResolvedValueOnce(response(200, "A,B\n1,2\n", { raw: true }));
+    authedFetch.mockResolvedValueOnce(response(200, "A,B\n1,2\n", { raw: true }));
     expect(await getDealCsv("dl_1")).toBe("A,B\n1,2\n");
 
-    pipelineFetch.mockResolvedValueOnce(response(404, { error: "deal not found" }));
+    authedFetch.mockResolvedValueOnce(response(404, { error: "deal not found" }));
     await expect(getDealCsv("dl_missing")).rejects.toThrow("deal not found");
   });
 
   it("treats a bodiless delete as every id deleted", async () => {
-    pipelineFetch.mockResolvedValue(response(204, "", { raw: true }));
+    authedFetch.mockResolvedValue(response(204, "", { raw: true }));
     expect(await deleteMemory(["m1", "m2"])).toEqual({ deleted: ["m1", "m2"], failed: [] });
   });
 });
@@ -167,7 +147,7 @@ describe("readSseStream()", () => {
 
 describe("streamChat()", () => {
   it("posts the turn and streams the reply", async () => {
-    pipelineFetch.mockResolvedValue({
+    authedFetch.mockResolvedValue({
       ok: true,
       status: 200,
       body: stream(['data: {"type":"text","delta":"hi"}\n', 'data: {"type":"done","session_id":"s1"}\n']),
@@ -178,7 +158,7 @@ describe("streamChat()", () => {
       (e) => events.push(e),
     );
 
-    const [url, init] = pipelineFetch.mock.calls[0] as [string, RequestInit];
+    const [url, init] = authedFetch.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("/api/pipeline/chat");
     expect(init.method).toBe("POST");
     expect(JSON.parse(String(init.body))).toEqual({
@@ -193,7 +173,7 @@ describe("streamChat()", () => {
   });
 
   it("throws the server's message on a non-2xx response before dispatching anything", async () => {
-    pipelineFetch.mockResolvedValue(response(503, { error: "ASSISTANT_MODEL_ID is not configured" }));
+    authedFetch.mockResolvedValue(response(503, { error: "ASSISTANT_MODEL_ID is not configured" }));
     const onEvent = vi.fn();
     await expect(streamChat({ session_id: "s", message: "m" }, onEvent)).rejects.toThrow(
       "ASSISTANT_MODEL_ID is not configured",

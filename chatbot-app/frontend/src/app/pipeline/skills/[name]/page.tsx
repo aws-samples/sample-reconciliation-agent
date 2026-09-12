@@ -4,7 +4,7 @@ import { use, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { deleteSkill, getSkill, saveSkill } from "@/lib/pipelineApi";
-import { usePipelineSubject } from "@/hooks/usePipelineSubject";
+import { useAppSubject } from "@/hooks/useAppSubject";
 import {
   BTN_CONFIRM,
   BTN_DANGER,
@@ -30,7 +30,7 @@ export default function SkillEditorPage({ params }: { params: Promise<{ name: st
     }
   }, [rawName]);
   const router = useRouter();
-  const { isAdmin } = usePipelineSubject();
+  const { isAdmin } = useAppSubject("pipeline");
   const [content, setContent] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);

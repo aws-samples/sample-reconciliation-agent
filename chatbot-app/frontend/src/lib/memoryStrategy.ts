@@ -34,9 +34,9 @@ export interface MemoryStrategyInfo {
   consolidation: MemoryStrategyOverride | null;
 }
 
-/** Response shape of `GET /api/recon/memory/strategy`. */
+/** Response shape of each app's `GET /api/<app>/memory/strategy`. */
 export interface MemoryStrategyResponse {
-  /** False when RECON_MEMORY_ID is unset — the same feature-gate contract the records route uses. */
+  /** False when the app's memory id is unset — the same feature-gate contract the records route uses. */
   configured: boolean;
   memoryStatus: string | null;
   strategies: MemoryStrategyInfo[];

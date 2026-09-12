@@ -9,7 +9,7 @@ import {
   type NewEmailInput,
 } from "@/lib/pipeline/server/emailStore";
 import { env } from "@/lib/pipeline/server/env";
-import { jsonError, readJsonObject } from "@/lib/pipeline/server/http";
+import { jsonError, readJsonObject } from "@/lib/server/http";
 import { invokeAsync } from "@/lib/pipeline/server/lambdaInvoke";
 import {
   parseCreateEmailBody,

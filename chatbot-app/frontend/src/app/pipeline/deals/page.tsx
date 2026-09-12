@@ -4,7 +4,7 @@ import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { listDeals } from "@/lib/pipelineApi";
 import type { DealRecord, DealStatus } from "@/lib/pipeline/types";
-import { usePipelineSubject } from "@/hooks/usePipelineSubject";
+import { useAppSubject } from "@/hooks/useAppSubject";
 import { DataTable, type DataTableColumn } from "@/components/app-ui/DataTable";
 import { formatDateTime } from "@/components/pipeline/format";
 import { Eyebrow, Placeholder } from "@/components/app-ui/ui";
@@ -52,7 +52,7 @@ function sizeOf(d: DealRecord): string {
 function DealsContent() {
   const router = useRouter();
   const params = useSearchParams();
-  const { subject } = usePipelineSubject();
+  const { subject } = useAppSubject("pipeline");
   const initial = params.get("status");
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>(
     initial && FILTERS.includes(initial as DealStatus) ? (initial as DealStatus) : "ALL",

@@ -279,7 +279,9 @@ into the recon item. After that the runtime never touches IDP storage.
 ```
 backend/                Python 3.12 Lambda handlers
   recon_core/           Shared domain: schema, cases, status, confidence, auto_resolve,
-                        lessons_recall, errors (ToolDenied), email_policy + templating (the
+                        lessons_recall, memory (AgentCore record retrieval, used by both apps),
+                        ddb_update + s3_text (helpers both apps' Lambdas import),
+                        errors (ToolDenied), email_policy + templating (the
                         authority on which recipient and which wording a send may carry —
                         the BFF, the interceptor and the browser all defer to it),
                         skills_s3, prompt_source
@@ -322,7 +324,7 @@ backend/                Python 3.12 Lambda handlers
   deal_pipeline/        Deal Pipeline: parser_handler (Bedrock Converse tool loop with
                         lookup_security_master + stage_deal), oms_upload_handler (mock OMS
                         validator), oms_schema + oms_fields.json (the staging-CSV contract),
-                        security_master, skills_loader, memory_recall, store, coerce
+                        security_master, skills_loader, memory_recall, coerce
 
 agent-blueprint/
   recon-agent/          AgentCore Runtime container: agent.py, strands_investigator.py, llm.py,
@@ -977,7 +979,7 @@ providers:
 - `entra` is Microsoft Entra ID via MSAL. It is the Terraform variable's default, so it applies when
   `auth_provider` is unset.
 
-`UserMenu` shows the signed-in user's name and a Logout button. Cognito survives only as the intake
+`UserMenu` (`src/components/app-ui/UserMenu.tsx`, shared by both apps' headers) shows the signed-in user's name and a Logout button. Cognito survives only as the intake
 HTTP API's JWT authorizer; it is not the frontend login.
 
 Which apps a signed-in user may open, and where they are an admin, comes from the token's group claim

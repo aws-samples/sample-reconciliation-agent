@@ -3,44 +3,9 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { getConfig, saveConfig } from "@/lib/pipelineApi";
-import { usePipelineSubject } from "@/hooks/usePipelineSubject";
+import { useAppSubject } from "@/hooks/useAppSubject";
 import { Eyebrow, Notice, Panel, Placeholder, type ActionOutcome } from "@/components/app-ui/ui";
-
-// A model id is one family plus one endpoint, composed rather than listed: the two are independent
-// choices with different consequences, and a flat list of six ids invites reading `global.` as a
-// capability tier. The hints are the family's own profile id — factual, and the string that appears
-// in traces and Bedrock metrics — rather than a capability ranking this UI is in no position to
-// assert.
-//
-// The GET may also return the ids the PUT accepts; when it does, the composed value is checked against
-// them before Apply is offered, so a family listed here but refused there cannot be saved.
-const MODEL_FAMILIES = [
-  { suffix: "anthropic.claude-opus-5", label: "Opus 5" },
-  { suffix: "anthropic.claude-sonnet-5", label: "Sonnet 5" },
-  { suffix: "anthropic.claude-fable-5-1", label: "Fable 5.1" },
-];
-
-// Not a speed or price tier. `global.` may serve the request from a region outside the US, which is a
-// data-residency decision and is invisible in the id — so it is spelled out here rather than left to
-// be inferred from a name that looks like a performance setting.
-const MODEL_ENDPOINTS = [
-  { value: "us", label: "US", hint: "inference served from US regions only" },
-  {
-    value: "global",
-    label: "Global",
-    hint: "may serve the request from outside the US (data residency, not latency)",
-  },
-];
-
-/** The deployed default (design §3), pre-selected when the parameter holds nothing yet. */
-const DEFAULT_MODEL_ID = "us.anthropic.claude-sonnet-5";
-
-/** The family/endpoint pair a stored model id decomposes into, for pre-selecting the controls. */
-function splitModelId(modelId: string | null): { endpoint: string; family: string } {
-  const id = modelId ?? DEFAULT_MODEL_ID;
-  const dot = id.indexOf(".");
-  return { endpoint: id.slice(0, dot), family: id.slice(dot + 1) };
-}
+import { DEFAULT_MODEL_ID, MODEL_ENDPOINTS, MODEL_FAMILIES, splitModelId } from "@/lib/models/presets";
 
 /** One row of preset buttons. */
 function Choice<T extends string>({
@@ -49,7 +14,7 @@ function Choice<T extends string>({
   onChange,
   disabled,
 }: {
-  options: { value: T; label: string; hint?: string }[];
+  options: readonly { value: T; label: string; hint?: string }[];
   value: string;
   onChange: (v: T) => void;
   disabled: boolean;
@@ -78,7 +43,7 @@ function Choice<T extends string>({
 }
 
 export default function ConfigPage() {
-  const { isAdmin } = usePipelineSubject();
+  const { isAdmin } = useAppSubject("pipeline");
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   // The SAVED selection, and the family/endpoint the controls currently show. Separate because the two

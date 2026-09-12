@@ -14,6 +14,7 @@ import { SourceViewer } from "@/components/recon/SourceViewer";
 import { ContactsPanel } from "@/components/recon/ContactsPanel";
 import { TemplatesPanel } from "@/components/recon/TemplatesPanel";
 import { WorkflowTypesPanel } from "@/components/recon/WorkflowTypesPanel";
+import { MODEL_ENDPOINTS, MODEL_FAMILIES, splitModelId } from "@/lib/models/presets";
 
 type PlatformConfigCommentMode = "required" | "optional" | "disapprove-only";
 
@@ -34,51 +35,6 @@ const COMMENT_MODES: {
   },
   { value: "optional", label: "Optional", hint: "comments never mandatory" },
 ];
-
-// A model id is one family plus one endpoint, composed rather than listed: the two are independent
-// choices with different consequences, and a flat list of six ids invites reading `global.` as a
-// capability tier. The hints are the family's own profile id — factual, and the string that appears in
-// traces and Bedrock metrics — rather than a capability ranking this UI is in no position to assert.
-//
-// KEEP IN SYNC with AGENT_MODEL_IDS in src/app/api/recon/config/route.ts (and, through it, with
-// ALLOWED_MODEL_IDS in backend/recon_core/model_select.py). The GET also returns the accepted ids, and
-// the composed value is checked against them before the Apply button is offered, so a family added
-// here but not there cannot be saved.
-const MODEL_FAMILIES = [
-  { suffix: "anthropic.claude-opus-5", label: "Opus 5" },
-  { suffix: "anthropic.claude-sonnet-5", label: "Sonnet 5" },
-  { suffix: "anthropic.claude-fable-5-1", label: "Fable 5.1" },
-];
-
-// Not a speed or price tier. `global.` may serve the request from a region outside the US, which is a
-// data-residency decision and is invisible in the id — so it is spelled out here rather than left to
-// be inferred from a name that looks like a performance setting.
-const MODEL_ENDPOINTS = [
-  { value: "us", label: "US", hint: "inference served from US regions only" },
-  {
-    value: "global",
-    label: "Global",
-    hint: "may serve the request from outside the US (data residency, not latency)",
-  },
-];
-
-/** The family/endpoint pair a stored model id decomposes into, for pre-selecting the controls. */
-function splitModelId(modelId: string | null): {
-  endpoint: string;
-  family: string;
-} {
-  const dot = modelId ? modelId.indexOf(".") : -1;
-  if (!modelId || dot < 0) {
-    // No selection recorded. Pre-select the seed both backends deploy with, so the controls show what
-    // is actually running rather than a blank the operator has to guess at — but `agentModelId` stays
-    // null, which is what keeps the panel saying "deployed default" instead of claiming a selection.
-    return { endpoint: "us", family: "anthropic.claude-sonnet-5" };
-  }
-  return {
-    endpoint: modelId.slice(0, dot),
-    family: modelId.slice(dot + 1),
-  };
-}
 
 // Config tab: operators toggle the deterministic Tier-1 route and review (read-only) the exact
 // Lambda source that runs it. The toggle is backed by SSM; the Tier-1 Lambda reads it per batch.

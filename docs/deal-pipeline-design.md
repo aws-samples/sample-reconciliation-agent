@@ -59,7 +59,7 @@ mock upload with structured failures, chatbot + memory manager, skills tab with 
 | DynamoDB | `deal-pipeline-dev-emails`, `deal-pipeline-dev-deals`, `deal-pipeline-dev-skill-proposals` |
 | Memories | `deal_pipeline_dev_knowledge` (strategy `edge_cases`), `deal_pipeline_dev_chat` (no strategy, 7-day expiry) |
 | Lambdas | `deal-pipeline-dev-parser`, `deal-pipeline-dev-oms-upload` |
-| SSM | `/deal-pipeline-dev/agent-model-id` (default `us.anthropic.claude-sonnet-5`) |
+| SSM | `/deal-pipeline-dev/agent-model-id` (default `us.anthropic.claude-sonnet-5`; the parser reads it through `recon_core.model_select`, so a stored id outside the six-entry allowlist the BFF enforces falls back to the default) |
 | Tag | `Project = deal-pipeline-demo` on everything the standalone root creates; the module itself tags nothing, so the composed root's resources carry only what the recon provider applies (none) |
 
 S3 layout:
@@ -235,12 +235,12 @@ Stream protocol (`text/event-stream`, one JSON object per `data:` line):
 ## 9. BFF API (all under `/api/pipeline`, gated by `src/proxy.ts`)
 
 The proxy verifies the token and, in the console, matches the caller's groups against
-`PIPELINE_ACCESS_GROUP` before any handler below runs (§13). The shell's own `/api/me` reports
-per-app access; this app's `/me` keeps answering for its own hooks.
+`PIPELINE_ACCESS_GROUP` before any handler below runs (§13). Identity comes from the shell's one
+`/api/me` read (`src/lib/shell/viewer.ts`), projected into this app by `useAppSubject("pipeline")`;
+this app has no `/me` route of its own.
 
 | route | verbs | notes |
 | --- | --- | --- |
-| `/me` | GET | subject, groups, isAdmin |
 | `/samples` | GET | corpus list `{id, subject, source_kind, sent, from}`; read from `SAMPLE_EMAILS_DIR` when that directory exists, else from the assets bucket under `PIPELINE_SAMPLES_PREFIX` (§13). Ids are the file/object name without `.json` in both |
 | `/emails` | GET, POST | list; POST `{sample_id}` or `{raw:{from,subject,body,sent}}` → creates email, async-invokes parser, returns email; `raw.body` ≤ 200 KB and each header line ≤ 1 KB (UTF-8), else 400 |
 | `/emails/[id]` | GET | email incl. parse |
@@ -290,9 +290,11 @@ redirect target), the liveness endpoints `/health` and `/api/health`, and the BF
 carries the one console-aware control in this app: **Use console default** beside the parser-model
 presets, which copies the console-wide default model id into this app's own parameter through the
 same admin-gated PUT (§14); every other setting on that screen is this app's own. This app's own
-primitives live in `src/components/pipeline/` (`ui.tsx`,
-`DataTable.tsx`, `nav.tsx`, `UserMenu.tsx`, `EmailViewer.tsx`); nothing in them is imported by
-the recon app or imports from it. Theme CSS: `src/app/pipeline/pipeline-theme.css`.
+primitives are `src/components/pipeline/ui.tsx` (its `StatusPill` and `ConfidenceChip`) and its panels
+(`EmailViewer.tsx`, `DealFieldGrid.tsx`, ...). The header chrome (`AppChrome`, `AppNav`, `UserMenu`),
+the column-preferences `DataTable` and the generic primitives (Panel, Pill, Modal, Notice, buttons)
+are shared with the recon app in `src/components/app-ui/`; neither app imports the other. Theme CSS:
+`src/app/app-theme.css`, shared, `rc-` prefix, scoped to `.app-root`.
 
 ## 11. Environment (`chatbot-app/frontend/.env.local`)
 
@@ -343,7 +345,7 @@ or only the comma-separated groups in `ANONYMOUS_GROUPS`. `RECON_ALLOW_ANONYMOUS
 same switch, so a deployment must carry none of the three. `PIPELINE_ACCESS_GROUP` (unset = open
 to every authenticated user, or denied when `REQUIRE_ACCESS_GROUPS=true`) and
 `PIPELINE_ADMIN_GROUP` (unset = nobody) are read through `accessGroupFor` / `adminGroupFor` in
-`src/lib/auth/apps.ts` and by `src/lib/pipelineAdmin.ts`; `PIPELINE_ENABLED` (exact `false` =
+`src/lib/auth/apps.ts` and by `src/lib/auth/app-admin.ts`; `PIPELINE_ENABLED` (exact `false` =
 app off) is the pipeline entry's `enabledEnv` in the same registry.
 
 Four more console names are read by the shell's `src/lib/console/`, not by this app's BFF (§14):
@@ -387,8 +389,9 @@ then this app's.
 ## 13. Integration into the console
 
 Decided 2026-09-11: the pipeline ships as the second application of the reconciliation console
-rather than as a separate deployment. The recon app's routes, hooks, tabs and theme are untouched
-and so are this app's; a shell around both adds what neither had.
+rather than as a separate deployment. The recon app's routes, hooks and tabs are untouched and so are
+this app's; its theme is now the shared `app-theme.css` with the same tokens; a shell around both adds
+what neither had.
 
 **Shell.** `/` is a landing chooser with one card per app the signed-in viewer may open (a viewer
 with exactly one app is sent straight into it). Inside an app a collapsible vertical rail on the
@@ -459,7 +462,7 @@ same ids (the file or object name without `.json`), so a sample picked from the 
 environment reads back on the next request. Nothing is cached in either mode; a new sample on disk
 shows up on the next open, and a new sample in S3 after the apply that seeded it.
 
-**Decoupling.** The two apps share the auth module (`src/lib/auth/`, including `client-token.ts`, the one browser-side ID-token reader both `recon-auth.ts` and `pipeline-auth.ts` re-export; `src/lib/api-auth.ts`,
+**Decoupling.** The two apps share the identity spine (`src/lib/auth/`, including `client-token.ts`, the one browser-side ID-token reader, `authed-fetch.ts`, which `recon-auth.ts` binds for recon and `pipelineApi.ts` imports directly, and `app-admin.ts`; `src/lib/api-auth.ts`,
 `src/lib/reauth.ts`), the `src/components/ui/` primitives and a few app-agnostic helpers, and
 nothing else: no import crosses from `src/{app,components,lib,hooks}/*pipeline*` into `*recon*` or
 back. Adding a third app is one entry in `APPS` plus its own route trees.
@@ -504,7 +507,7 @@ are dropped on read, so a blank parameter behaves like an absent one.
    environment value as it is.
 3. Hand that overlaid environment (`effectiveEnv()`) to the readers the registry already has —
    `resolveAppAccess`, `isAppEnabled`, `accessGroupFor` / `adminGroupFor`, `decideApiAccess` in the
-   proxy, and the two admin helpers `reconAdmin.ts` / `pipelineAdmin.ts`. None of them changes; the
+   proxy, and the admin gate `lib/auth/app-admin.ts` (`reconAdmin.ts` binds it for recon). None of them changes; the
    `env` parameter they already accept for tests is the seam. When the layer is off,
    `effectiveEnv()` returns `process.env` itself.
 4. Report each resolved value with its `SettingSource` — `stored`, `env` or `default` — and the

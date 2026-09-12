@@ -1,7 +1,7 @@
-import { requirePipelineActor } from "@/lib/pipelineAdmin";
+import { requireAppActor } from "@/lib/auth/app-admin";
 import type { ChatStreamEvent } from "@/lib/pipeline/types";
 import { runAssistantTurn } from "@/lib/pipeline/server/chatAgent";
-import { jsonError, readJsonObject } from "@/lib/pipeline/server/http";
+import { jsonError, readJsonObject } from "@/lib/server/http";
 import { parseChatBody, type ChatRequest } from "@/lib/pipeline/server/requests";
 
 // The assistant, as a server-sent event stream (design §7, §9).
@@ -25,7 +25,7 @@ function frame(event: ChatStreamEvent): string {
 }
 
 export async function POST(req: Request) {
-  const who = await requirePipelineActor(req);
+  const who = await requireAppActor("pipeline", req);
   if ("error" in who) return who.error;
 
   let body: ChatRequest;

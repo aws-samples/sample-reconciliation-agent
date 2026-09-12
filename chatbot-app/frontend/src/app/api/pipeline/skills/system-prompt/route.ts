@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 
 import { requireActor } from "@/lib/api-auth";
-import { requirePipelineAdmin } from "@/lib/pipelineAdmin";
+import { requireAppAdmin } from "@/lib/auth/app-admin";
 import { env } from "@/lib/pipeline/server/env";
-import { jsonError, readJsonObject, stringField } from "@/lib/pipeline/server/http";
+import { jsonError, readJsonObject, stringField } from "@/lib/server/http";
 import { getParserPrompt, putParserPrompt } from "@/lib/pipeline/server/skillsStore";
 
 // The parsing agent's system prompt (`PARSER_PROMPT_KEY`, default `prompts/parser-system.md`).
@@ -26,7 +26,7 @@ export async function GET(req: Request) {
 
 /** Replace the prompt: body `{ content }`. Admin-gated — it changes every future parse. */
 export async function PUT(req: Request) {
-  const admin = await requirePipelineAdmin(req);
+  const admin = await requireAppAdmin("pipeline", req);
   if ("error" in admin) return admin.error;
   const body = await readJsonObject(req);
   const content = body ? stringField(body, "content") : undefined;

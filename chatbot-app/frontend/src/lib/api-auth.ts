@@ -14,7 +14,7 @@
  *     for. One token, one verification, shared by both apps, because the two apps are one OIDC client
  *     on one origin.
  *  2. App access (`lib/auth/apps.ts`, applied by the proxy): may this caller use THIS app at all.
- *  3. App administration (`reconAdmin.ts`, `pipelineAdmin.ts`, applied inside the write routes): may
+ *  3. App administration (`lib/auth/app-admin.ts`, applied inside the write routes): may
  *     this caller change how the app behaves.
  *
  * Kept separate from the proxy so it is unit-testable without booting a Next.js server.
@@ -288,7 +288,7 @@ function statusForVerifyError(error: unknown): 401 | 503 {
  *
  * Authentication only: the result says who is calling and which groups they hold. Whether those
  * groups admit them to the app the path belongs to is the proxy's decision (`lib/auth/access.ts`),
- * and whether they may administer it is each write route's (`reconAdmin.ts`, `pipelineAdmin.ts`).
+ * and whether they may administer it is each write route's (`lib/auth/app-admin.ts`).
  *
  * @param request the incoming request (only its `authorization` header is read).
  * @param config resolved auth configuration (injected in tests).

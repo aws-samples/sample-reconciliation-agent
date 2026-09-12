@@ -9,7 +9,6 @@
 import { describe, expect, it } from "vitest";
 
 import { resolveSettingsTab, settingsTabHref } from "@/components/console/tabs";
-import { composeModelId, splitModelId } from "@/components/console/modelPresets";
 import type { ConsoleSettings } from "@/lib/console/types";
 import { CONSOLE_SETTINGS_PATH, isConsolePath } from "@/lib/shell/consolePaths";
 import {
@@ -140,16 +139,5 @@ describe("resolveSettingsTab", () => {
     expect(resolveSettingsTab(null, true)).toBe("access");
     expect(resolveSettingsTab(null, false)).toBe("preferences");
     expect(resolveSettingsTab("nonsense", true)).toBe("access");
-  });
-});
-
-describe("model presets", () => {
-  it("splits at the first dot and composes back to the same id", () => {
-    expect(splitModelId("global.anthropic.claude-opus-5")).toEqual({
-      endpoint: "global",
-      family: "anthropic.claude-opus-5",
-    });
-    expect(composeModelId("us", "anthropic.claude-sonnet-5")).toBe("us.anthropic.claude-sonnet-5");
-    expect(splitModelId("nodots")).toEqual({ endpoint: "", family: "" });
   });
 });

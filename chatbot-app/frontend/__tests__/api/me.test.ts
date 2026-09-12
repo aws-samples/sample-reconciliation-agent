@@ -13,9 +13,9 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GET, type MeResponse } from "@/app/api/me/route";
+import { isAppAdmin } from "@/lib/auth/app-admin";
 import type { Viewer } from "@/lib/auth/apps";
 import { invalidate, preferencesParameterName } from "@/lib/console/settings";
-import { isPipelineAdmin } from "@/lib/pipelineAdmin";
 import { isReconAdmin } from "@/lib/reconAdmin";
 
 import {
@@ -197,7 +197,7 @@ describe("GET /api/me", () => {
     expect(viewer.apps.recon.admin).toBe(true);
     expect(viewer.apps.pipeline.admin).toBe(true);
     expect(isReconAdmin(viewer.groups)).toBe(true);
-    expect(isPipelineAdmin(viewer.groups)).toBe(true);
+    expect(isAppAdmin("pipeline", viewer.groups)).toBe(true);
   });
 
   it("401s without a token rather than inventing a viewer", async () => {

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireActor } from "@/lib/api-auth";
 import { validateSkill } from "@/lib/skillFrontmatter";
-import { jsonError, readJsonObject, stringField } from "@/lib/pipeline/server/http";
+import { jsonError, readJsonObject, stringField } from "@/lib/server/http";
 import { createProposal, listProposals } from "@/lib/pipeline/server/proposalStore";
 
 // Skill proposals: the assistant's suggested SKILL.md rewrites, and manual ones, awaiting a decision.

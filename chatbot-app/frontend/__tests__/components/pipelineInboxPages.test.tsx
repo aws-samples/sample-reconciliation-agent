@@ -19,8 +19,8 @@ vi.mock("@/lib/pipelineApi", () => ({
   listSamples: vi.fn(),
   createEmail: vi.fn(),
 }));
-vi.mock("@/hooks/usePipelineSubject", () => ({
-  usePipelineSubject: () => ({ subject: "sub-1", groups: [], isAdmin: false }),
+vi.mock("@/hooks/useAppSubject", () => ({
+  useAppSubject: () => ({ subject: "sub-1", groups: [], isAdmin: false }),
 }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 vi.mock("next/link", () => ({

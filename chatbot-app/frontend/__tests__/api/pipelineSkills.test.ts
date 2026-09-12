@@ -19,10 +19,10 @@ process.env.PARSER_PROMPT_KEY = "prompts/parser-system.md";
 const ddbSend = vi.fn();
 const s3Send = vi.fn();
 const requireActor = vi.fn();
-const requirePipelineAdmin = vi.fn();
+const requireAppAdmin = vi.fn();
 
 vi.mock("@/lib/api-auth", () => ({ requireActor }));
-vi.mock("@/lib/pipelineAdmin", () => ({ requirePipelineAdmin }));
+vi.mock("@/lib/auth/app-admin", () => ({ requireAppAdmin }));
 vi.mock("@aws-sdk/client-dynamodb", () => ({
   DynamoDBClient: vi.fn().mockImplementation(() => ({ send: ddbSend })),
   GetItemCommand: vi.fn().mockImplementation((i) => ({ __cmd: "GetItem", ...i })),
@@ -130,7 +130,7 @@ beforeEach(() => {
   objects["skills/README.md"] = "not a skill";
   table.sp_1 = pending();
   requireActor.mockResolvedValue({ actor: "reviewer" });
-  requirePipelineAdmin.mockResolvedValue({ actor: "admin-1" });
+  requireAppAdmin.mockResolvedValue({ actor: "admin-1" });
 });
 
 describe("POST /api/pipeline/skills/proposals/[id]", () => {
@@ -212,7 +212,7 @@ describe("POST /api/pipeline/skills/proposals/[id]", () => {
     expect((await decide("sp_1", "maybe")).status).toBe(400);
     expect((await decide("sp_9", "approve")).status).toBe(404);
     const { NextResponse } = await import("next/server");
-    requirePipelineAdmin.mockResolvedValue({
+    requireAppAdmin.mockResolvedValue({
       error: NextResponse.json({ error: "not an admin" }, { status: 403 }),
     });
     expect((await decide("sp_1", "approve")).status).toBe(403);

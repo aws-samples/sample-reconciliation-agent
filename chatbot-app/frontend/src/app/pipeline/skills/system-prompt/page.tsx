@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { getParserPrompt, saveParserPrompt } from "@/lib/pipelineApi";
-import { usePipelineSubject } from "@/hooks/usePipelineSubject";
+import { useAppSubject } from "@/hooks/useAppSubject";
 import {
   BTN_CONFIRM,
   Eyebrow,
@@ -17,7 +17,7 @@ import {
 // The parsing agent's system prompt: how it approaches an email before any skill is applied. Stored
 // in S3 and read on every run, so an edit applies without a redeploy.
 export default function ParserPromptPage() {
-  const { isAdmin } = usePipelineSubject();
+  const { isAdmin } = useAppSubject("pipeline");
   const [content, setContent] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);

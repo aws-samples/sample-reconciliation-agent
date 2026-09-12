@@ -25,10 +25,10 @@ const ddbSend = vi.fn();
 const s3Send = vi.fn();
 const lambdaSend = vi.fn();
 const requireActor = vi.fn();
-const requirePipelineAdmin = vi.fn();
+const requireAppAdmin = vi.fn();
 
 vi.mock("@/lib/api-auth", () => ({ requireActor }));
-vi.mock("@/lib/pipelineAdmin", () => ({ requirePipelineAdmin }));
+vi.mock("@/lib/auth/app-admin", () => ({ requireAppAdmin }));
 vi.mock("@aws-sdk/client-dynamodb", () => ({
   DynamoDBClient: vi.fn().mockImplementation(() => ({ send: ddbSend })),
   GetItemCommand: vi.fn().mockImplementation((i) => ({ __cmd: "GetItem", ...i })),
@@ -187,7 +187,7 @@ beforeEach(() => {
   table.dl_1 = stagedDeal();
   s3Send.mockResolvedValue({});
   requireActor.mockResolvedValue({ actor: "reviewer" });
-  requirePipelineAdmin.mockResolvedValue({ actor: "admin-1" });
+  requireAppAdmin.mockResolvedValue({ actor: "admin-1" });
 });
 
 describe("GET /api/pipeline/deals", () => {
@@ -308,7 +308,7 @@ describe("PATCH /api/pipeline/deals/[id]", () => {
     expect((await patch("dl_9", { fields: { notes: "x" } })).status).toBe(404);
     ddbSend.mockClear();
     const { NextResponse } = await import("next/server");
-    requirePipelineAdmin.mockResolvedValue({
+    requireAppAdmin.mockResolvedValue({
       error: NextResponse.json({ error: "not an admin" }, { status: 403 }),
     });
     expect((await patch("dl_1", { fields: { notes: "x" } })).status).toBe(403);
@@ -466,7 +466,7 @@ describe("POST /api/pipeline/deals/[id]/approve", () => {
 
   it("honours the admin gate", async () => {
     const { NextResponse } = await import("next/server");
-    requirePipelineAdmin.mockResolvedValue({
+    requireAppAdmin.mockResolvedValue({
       error: NextResponse.json({ error: "not an admin" }, { status: 403 }),
     });
     expect((await approvePost("dl_1")).status).toBe(403);

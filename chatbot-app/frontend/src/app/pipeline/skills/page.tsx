@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createSkill, listProposals, listSkills, type SkillSummary } from "@/lib/pipelineApi";
-import { usePipelineSubject } from "@/hooks/usePipelineSubject";
+import { useAppSubject } from "@/hooks/useAppSubject";
 import {
   BTN_CONFIRM,
   BTN_LINK,
@@ -34,7 +34,7 @@ format belongs in memory instead — save it from the Assistant tab.
 
 export default function SkillsPage() {
   const router = useRouter();
-  const { isAdmin } = usePipelineSubject();
+  const { isAdmin } = useAppSubject("pipeline");
   const [skills, setSkills] = useState<SkillSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<number | null>(null);

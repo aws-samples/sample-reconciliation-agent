@@ -1,7 +1,7 @@
 /**
  * Browser-side `fetch` for any BFF call: the ID token attached, a 401 turned into a re-authentication.
  *
- * The one wrapper behind the recon client (`recon-auth.ts`), the pipeline client (`pipeline-auth.ts`)
+ * The one wrapper behind the recon client (`recon-auth.ts`), the pipeline client (`pipelineApi.ts`)
  * and the console client (`consoleApi.ts`). Each of those carried its own copy of these twenty lines;
  * the copies were identical apart from the prefix on the log line, which is what `label` is for. The
  * token itself comes from `client-token.ts` (one OIDC client, one reader) and the redirect from

@@ -8,6 +8,7 @@
 // route handler runs. Use reconFetch — never a bare fetch — for anything under /api/recon.
 
 import { reconFetch } from "@/lib/recon-auth";
+import { parseJsonResponse } from "@/lib/api/client";
 // Re-exported below so callers get the strategy types from this module like every other API type.
 import type { MemoryStrategyResponse } from "@/lib/memoryStrategy";
 
@@ -304,18 +305,9 @@ export interface Lesson {
   user_comment?: string;
 }
 
-async function json<T>(resp: Response): Promise<T> {
-  if (!resp.ok) {
-    let detail = `recon API error ${resp.status}`;
-    try {
-      const body = (await resp.json()) as { error?: string };
-      if (body?.error) detail = body.error;
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new Error(detail);
-  }
-  return (await resp.json()) as T;
+// The shared JSON reader under the recon label, so every call site below reads unchanged.
+function json<T>(resp: Response): Promise<T> {
+  return parseJsonResponse<T>(resp, "recon API");
 }
 
 export async function listCases(

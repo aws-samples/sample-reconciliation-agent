@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { requirePipelineAdmin } from "@/lib/pipelineAdmin";
+import { requireAppAdmin } from "@/lib/auth/app-admin";
 import { isConditionalCheckFailed } from "@/lib/pipeline/server/aws";
 import {
   getDeal,
@@ -11,7 +11,7 @@ import {
   type UploadLambdaResult,
 } from "@/lib/pipeline/server/dealStore";
 import { env } from "@/lib/pipeline/server/env";
-import { jsonError } from "@/lib/pipeline/server/http";
+import { jsonError } from "@/lib/server/http";
 import { invokeSync } from "@/lib/pipeline/server/lambdaInvoke";
 
 // Approve a staged deal and push it to the (mock) OMS (design §9).
@@ -39,7 +39,7 @@ export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const admin = await requirePipelineAdmin(req);
+  const admin = await requireAppAdmin("pipeline", req);
   if ("error" in admin) return admin.error;
   const { id } = await params;
 

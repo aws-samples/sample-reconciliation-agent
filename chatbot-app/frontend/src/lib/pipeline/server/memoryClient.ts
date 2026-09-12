@@ -27,8 +27,8 @@ import { GetMemoryCommand } from "@aws-sdk/client-bedrock-agentcore-control";
 import type { ChatMessage, MemoryRecord } from "@/lib/pipeline/types";
 import { agentcore, agentcoreControl } from "./aws";
 import { env } from "./env";
-import { memorySafeId } from "./ids";
-import { toStrategyInfo, type MemoryStrategyResponse } from "./memoryStrategy";
+import { toStrategyInfo, type MemoryStrategyResponse } from "@/lib/memoryStrategy";
+import { memorySafeId } from "@/lib/server/memoryRequests";
 
 /** The desk is one actor: every edge-case rule is shared by everyone who reviews deals. */
 export const KNOWLEDGE_ACTOR_ID = "deal-desk";

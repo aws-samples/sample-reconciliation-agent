@@ -4,14 +4,14 @@
  * Kept out of the route files for two reasons. Next validates a `route.ts`'s exports at build time
  * and rejects anything that is not a handler or a segment config, so helpers that tests need to
  * import cannot live there. And every parser here THROWS a message naming the problem rather than
- * returning a sanitised body: a request that says both `sample_id` and `raw`, or asks to delete 60
- * records, or edits `issue_size` instead of `issue_size_mm`, is a client bug that must surface as a
- * 400, not be quietly resolved one way.
+ * returning a sanitised body: a request that says both `sample_id` and `raw`, or edits `issue_size`
+ * instead of `issue_size_mm`, is a client bug that must surface as a 400, not be quietly resolved one
+ * way. (The memory delete parser both apps share lives in `lib/server/memoryRequests.ts`.)
  */
 
 import type { FieldValues } from "@/lib/pipeline/types";
 import { fieldDef } from "@/lib/pipeline/omsSchema";
-import { stringField } from "./http";
+import { stringField } from "@/lib/server/http";
 
 // ---------------------------------------------------------------------------------------------
 // POST /emails
@@ -172,42 +172,4 @@ export function parseChatBody(body: Record<string, unknown> | null): ChatRequest
     context = { deal_id: stringField(c, "deal_id"), email_id: stringField(c, "email_id") };
   }
   return { session_id: sessionId, message, context };
-}
-
-// ---------------------------------------------------------------------------------------------
-// DELETE /memory
-// ---------------------------------------------------------------------------------------------
-
-// Ceiling on one delete request. The panel shows one page, so a legitimate "select all and delete"
-// never approaches this; a request that does is a client bug or an attempt to wipe the memory in one
-// call, and both are better refused than serviced.
-export const MAX_DELETE_IDS = 50;
-
-/**
- * Validate the id list a delete request carries.
- *
- * @returns the de-duplicated record ids to delete.
- * @throws Error when the body is not `{ ids: string[] }`, is empty, holds a blank or non-string id,
- *   or exceeds `MAX_DELETE_IDS` after de-duplication.
- */
-export function parseMemoryDeleteIds(body: unknown): string[] {
-  const ids = (body as { ids?: unknown } | null)?.ids;
-  if (!Array.isArray(ids)) {
-    throw new Error("body must be an object with an `ids` array");
-  }
-  if (ids.length === 0) {
-    throw new Error("`ids` must name at least one memory record");
-  }
-  for (const id of ids) {
-    if (typeof id !== "string" || id.trim().length === 0) {
-      throw new Error("every entry in `ids` must be a non-empty string");
-    }
-  }
-  const unique = [...new Set((ids as string[]).map((id) => id.trim()))];
-  if (unique.length > MAX_DELETE_IDS) {
-    throw new Error(
-      `at most ${MAX_DELETE_IDS} memory records may be deleted per request (got ${unique.length})`,
-    );
-  }
-  return unique;
 }

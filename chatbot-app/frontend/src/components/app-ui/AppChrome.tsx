@@ -56,7 +56,7 @@ export function AppChrome({ appId, homeHref, brand, links, children }: AppChrome
             </span>
           </a>
           <AppNav appId={appId} links={links} />
-          <UserMenu appId={appId} />
+          <UserMenu />
         </div>
       </header>
       <main className="mx-auto max-w-[1400px] px-6 py-8">{children}</main>

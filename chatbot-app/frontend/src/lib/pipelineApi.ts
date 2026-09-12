@@ -1,12 +1,15 @@
 // Typed client for the deal-pipeline BFF. Calls SAME-ORIGIN Next.js API routes (`/api/pipeline/*`,
 // design §9) which reach AWS with the developer's credentials — no cross-origin fetch, no CORS.
 //
-// Every call goes through `pipelineFetch`, which attaches the caller's OIDC ID token and starts a
-// re-authentication redirect on a 401. That is not optional: `src/proxy.ts` rejects an
-// unauthenticated request to `/api/pipeline/*` before the route handler runs. Use `pipelineFetch` —
-// never a bare `fetch` — for anything under `/api/pipeline`.
+// Every call goes through `pipelineFetch` below — the shared `authedFetch` under the pipeline's log
+// label — which attaches the caller's OIDC ID token and starts a re-authentication redirect on a
+// 401. That is not optional: `src/proxy.ts` rejects an unauthenticated request to `/api/pipeline/*`
+// before the route handler runs. Use `pipelineFetch` — never a bare `fetch` — for anything under
+// `/api/pipeline`.
 
-import { pipelineFetch } from "@/lib/pipeline-auth";
+import { jsonInit, listOf, parseJsonResponse } from "@/lib/api/client";
+import { authedFetch } from "@/lib/auth/authed-fetch";
+import type { MemoryStrategyResponse } from "@/lib/memoryStrategy";
 import type {
   ChatMessage,
   ChatStreamEvent,
@@ -19,77 +22,15 @@ import type {
   SkillProposal,
 } from "@/lib/pipeline/types";
 
-/**
- * Unwrap a successful JSON response, or throw the server's own explanation.
- *
- * The BFF answers every failure as `{ error: string }`; that message names the missing group, the
- * unset variable or the rejected field, which is what an operator needs to see. A non-JSON error body
- * (a proxy page, an empty 502) falls back to the status so the message is never blank.
- *
- * An empty 2xx body (a 204, or a route that answers with no content) resolves to `undefined` rather
- * than throwing on the parse — callers that do not need the body simply ignore it.
- *
- * @param resp the raw response from `pipelineFetch`.
- * @returns the parsed body.
- * @throws Error carrying `body.error` when present, else `pipeline API error <status>`.
- */
-export async function json<T>(resp: Response): Promise<T> {
-  if (!resp.ok) {
-    let detail = `pipeline API error ${resp.status}`;
-    try {
-      const body = (await resp.json()) as { error?: unknown };
-      if (typeof body?.error === "string" && body.error) detail = body.error;
-    } catch {
-      // Non-JSON error body: the status alone is the most honest message available.
-    }
-    throw new Error(detail);
-  }
-  const text = await resp.text();
-  return (text ? JSON.parse(text) : undefined) as T;
-}
+/** The one authenticated `fetch` for `/api/pipeline/*`, so a failed redirect is logged as the pipeline's. */
+const pipelineFetch = (input: string, init?: RequestInit): Promise<Response> =>
+  authedFetch(input, init, "PipelineAuth");
 
 /**
- * A list route's body as an array.
- *
- * The routes are being built alongside this client, and a list is the one shape two people write two
- * ways: a bare array, or an envelope like `{ emails: [...] }`. Accepting both here keeps every page
- * working whichever way a route settled, and the envelope key is named per call so a wrong guess is
- * an empty table rather than a crash.
- *
- * @param body the parsed response body.
- * @param key the envelope key to try when the body is not itself an array.
- * @returns the items, or an empty array when neither shape matches.
+ * The shared JSON reader (`lib/api/client.ts`) under the pipeline label: `body.error` when the route
+ * explained itself, `pipeline API error <status>` when it did not, `undefined` for an empty 2xx body.
  */
-function listOf<T>(body: unknown, key: string): T[] {
-  if (Array.isArray(body)) return body as T[];
-  const wrapped = (body as Record<string, unknown> | null | undefined)?.[key];
-  return Array.isArray(wrapped) ? (wrapped as T[]) : [];
-}
-
-/** Standard init for a JSON-bodied request. */
-function jsonInit(method: string, body: unknown): RequestInit {
-  return {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  };
-}
-
-// --- Identity --------------------------------------------------------------------------------------
-
-/**
- * Who the server thinks is calling, and whether they are in the admin group.
- *
- * Typed loosely on purpose: `usePipelineSubject` validates each field before trusting it, so a route
- * that answers with a partial body still yields a viewer the nav can render.
- */
-export async function getMe(): Promise<{
-  subject?: string;
-  groups?: string[];
-  isAdmin?: boolean;
-}> {
-  return json(await pipelineFetch("/api/pipeline/me"));
-}
+const json = <T>(resp: Response): Promise<T> => parseJsonResponse<T>(resp, "pipeline API");
 
 // --- Inbox -----------------------------------------------------------------------------------------
 
@@ -316,33 +257,14 @@ export async function deleteMemory(ids: string[]): Promise<MemoryDeleteResult> {
   return { deleted: body?.deleted ?? ids, failed: body?.failed ?? [] };
 }
 
-/** One overridden phase of a memory strategy: which override kind, the model, and the live prompt. */
-export interface MemoryStrategyOverride {
-  kind: string;
-  modelId: string;
-  /** Named after the API field; in practice this REPLACES the built-in instructions. */
-  appendToPrompt: string;
-}
-
-/** A strategy projected for display, as `GET /api/pipeline/memory/strategy` flattens it. */
-export interface MemoryStrategyInfo {
-  id: string;
-  name: string;
-  description: string | null;
-  type: string;
-  configurationType: string | null;
-  status: string;
-  namespaces: string[];
-  extraction: MemoryStrategyOverride | null;
-  consolidation: MemoryStrategyOverride | null;
-}
-
-export interface MemoryStrategyResponse {
-  /** False when `KNOWLEDGE_MEMORY_ID` is unset. */
-  configured: boolean;
-  memoryStatus: string | null;
-  strategies: MemoryStrategyInfo[];
-}
+// The strategy projection is the same module the route flattens with, re-exported so callers get the
+// types from this client like every other API type. `configured` is false when KNOWLEDGE_MEMORY_ID is
+// unset.
+export type {
+  MemoryStrategyInfo,
+  MemoryStrategyOverride,
+  MemoryStrategyResponse,
+} from "@/lib/memoryStrategy";
 
 /** The live extraction strategy behind the records. Read-only: Terraform owns it. */
 export async function getMemoryStrategy(): Promise<MemoryStrategyResponse> {

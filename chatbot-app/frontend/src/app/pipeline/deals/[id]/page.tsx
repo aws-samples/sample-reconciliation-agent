@@ -11,7 +11,7 @@ import {
 } from "@/lib/pipelineApi";
 import type { DealRecord, FieldValues } from "@/lib/pipeline/types";
 import { changedKeys, toCsv, validateFields } from "@/lib/pipeline/omsSchema";
-import { usePipelineSubject } from "@/hooks/usePipelineSubject";
+import { useAppSubject } from "@/hooks/useAppSubject";
 import { DealFieldGrid } from "@/components/pipeline/DealFieldGrid";
 import { UploadResultPanel } from "@/components/pipeline/UploadResultPanel";
 import { formatDateTime } from "@/components/pipeline/format";
@@ -55,7 +55,7 @@ function downloadText(filename: string, text: string): void {
 
 export default function DealDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const { isAdmin } = usePipelineSubject();
+  const { isAdmin } = useAppSubject("pipeline");
   const [deal, setDeal] = useState<DealRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Non-null while editing. The grid edits this copy; Save sends it, Cancel drops it.

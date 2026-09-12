@@ -10,9 +10,9 @@ import { normalizePreferences } from "@/lib/shell/preferences";
 
 // The console viewer: who is signed in and which applications they may open, as `/api/me` reports it.
 //
-// This is the shell's ONE identity read. The app rail, the landing page and the no-access panel all
-// consume it, and each app keeps its own `/api/<app>/me` hook for its own admin gating — the shell does
-// not replace those, it sits beside them. Every field here is advisory for rendering only: the proxy
+// This is the console's ONE identity read. The app rail, the landing page and the no-access panel
+// consume it directly, and each app projects it through `useAppSubject(appId)` (`hooks/useAppSubject.ts`)
+// for its own admin gating and column-preference keys. Every field here is advisory for rendering only: the proxy
 // already 403s an API call the viewer may not make, so a client that lies to itself about `apps` gets
 // an empty page, not data.
 //
@@ -259,7 +259,26 @@ export function resetViewerCache(): void {
 }
 
 /**
+ * The console viewer as the store currently knows it, WITHOUT starting or retrying the request.
+ *
+ * For components that live inside the shell's gated content (an app's nav, a table keying its column
+ * layout on the subject): the frame that mounted them is the one initiator, and after a failure the
+ * banner's Retry is the one retrier. If these components called `useViewer()` instead, a failed
+ * `/api/me` would loop — the frame swaps the content for its skeleton while loading, the retry started by
+ * a remounting child settles as the same failure, the children mount again and start another.
+ *
+ * @returns the same state `useViewer()` returns, read from the same store.
+ */
+export function useViewerSnapshot(): ViewerState {
+  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+}
+
+/**
  * The console viewer, for rendering decisions.
+ *
+ * Mounting this hook is what starts the request (and, after a failure, retries it). Use it from the
+ * shell frame and the pages that render without the frame; inside the frame's gated content use
+ * `useViewerSnapshot()` or `useAppSubject()`, which only read.
  *
  * @returns `loading: true` until `/api/me` answers (or immediately the cached viewer when it already
  *   has), then either the viewer or the error string. Never throws into the tree, and updates in place

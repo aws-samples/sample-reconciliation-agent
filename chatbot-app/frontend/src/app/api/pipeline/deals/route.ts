@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireActor } from "@/lib/api-auth";
 import { listDeals } from "@/lib/pipeline/server/dealStore";
-import { jsonError } from "@/lib/pipeline/server/http";
+import { jsonError } from "@/lib/server/http";
 
 // Staged deals, newest first. `?limit=N` caps the list for callers that only want the latest.
 export const runtime = "nodejs";

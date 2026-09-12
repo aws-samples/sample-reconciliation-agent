@@ -66,8 +66,8 @@ export function loadColumnPrefs(
   sub: string,
   defaults: ColumnPref[],
 ): ColumnPref[] {
-  // No subject, no read. The caller renders defaults for one frame and asks again once the app's own
-  // `/me` route has answered; guessing a key here is how every viewer ends up sharing one.
+  // No subject, no read. The caller renders defaults for one frame and asks again once the shell's
+  // `/api/me` has answered; guessing a key here is how every viewer ends up sharing one.
   if (!sub) return defaults;
   let raw: string | null = null;
   try {

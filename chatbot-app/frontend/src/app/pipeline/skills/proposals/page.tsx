@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { decideProposal, listProposals } from "@/lib/pipelineApi";
 import type { ProposalStatus, SkillProposal } from "@/lib/pipeline/types";
-import { usePipelineSubject } from "@/hooks/usePipelineSubject";
+import { useAppSubject } from "@/hooks/useAppSubject";
 import { LineDiff } from "@/components/pipeline/LineDiff";
 import { formatDateTime } from "@/components/pipeline/format";
 import {
@@ -26,7 +26,7 @@ import { StatusPill } from "@/components/pipeline/ui";
 const FILTERS: ("ALL" | ProposalStatus)[] = ["PENDING", "APPROVED", "REJECTED", "ALL"];
 
 export default function ProposalsPage() {
-  const { isAdmin } = usePipelineSubject();
+  const { isAdmin } = useAppSubject("pipeline");
   const [proposals, setProposals] = useState<SkillProposal[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>("PENDING");

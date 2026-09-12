@@ -4,7 +4,7 @@ import { useEffect, useState, type FormEvent } from "react";
 
 import { type AdminTabProps, UpdatedLine } from "@/components/console/AccessTab";
 import { AdminDataFallback } from "@/components/console/AdminDataFallback";
-import { MODEL_ENDPOINTS, MODEL_FAMILIES, composeModelId, splitModelId } from "@/components/console/modelPresets";
+import { MODEL_ENDPOINTS, MODEL_FAMILIES, composeModelId, splitModelId } from "@/lib/models/presets";
 import {
   BUTTON_PRIMARY,
   BUTTON_QUIET,
@@ -125,7 +125,9 @@ export function DefaultsTab({ store, editable, readOnlyNote }: AdminTabProps) {
   const update = defaultsUpdateFrom(initial, draft);
   const modelError = modelIdError(draft.modelId);
   const labelError = organizationLabelError(draft.organizationLabel);
-  const { endpoint, family } = splitModelId(draft.modelId);
+  // Blanks, not the deployed default, for an id no preset covers: a free-text id must not light up
+  // a preset it does not match.
+  const { endpoint, family } = splitModelId(draft.modelId, null);
   const modelSetting = settings.defaults.modelId;
   const labelSetting = settings.defaults.organizationLabel;
 

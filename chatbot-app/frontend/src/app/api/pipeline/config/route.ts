@@ -3,11 +3,11 @@ import { GetParameterCommand, PutParameterCommand } from "@aws-sdk/client-ssm";
 
 import { requireActor } from "@/lib/api-auth";
 import { consoleDefaultModelId } from "@/lib/console/settings";
-import { requirePipelineAdmin } from "@/lib/pipelineAdmin";
-import { AGENT_MODEL_IDS, isAllowedModelId } from "@/lib/pipeline/server/agentModels";
+import { requireAppAdmin } from "@/lib/auth/app-admin";
+import { AGENT_MODEL_IDS, isAllowedModelId } from "@/lib/server/agentModels";
 import { ssm } from "@/lib/pipeline/server/aws";
 import { env } from "@/lib/pipeline/server/env";
-import { jsonError, readJsonObject, stringField } from "@/lib/pipeline/server/http";
+import { jsonError, readJsonObject, stringField } from "@/lib/server/http";
 
 // Runtime configuration: which Bedrock model the parsing agent invokes, held in the SSM parameter
 // `AGENT_MODEL_PARAM` and read by the parser Lambda on every run. GET is open (the Config tab
@@ -47,7 +47,7 @@ export async function GET(req: Request) {
 
 /** Set the model: body `{ modelId }` from the allowlist. */
 export async function PUT(req: Request) {
-  const admin = await requirePipelineAdmin(req);
+  const admin = await requireAppAdmin("pipeline", req);
   if ("error" in admin) return admin.error;
   const body = await readJsonObject(req);
   const modelId = body ? stringField(body, "modelId") : undefined;

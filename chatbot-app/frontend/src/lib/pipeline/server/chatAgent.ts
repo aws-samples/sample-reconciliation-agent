@@ -380,7 +380,7 @@ export async function executeTool(
 ): Promise<ToolOutcome> {
   const input = (rawInput ?? {}) as Record<string, unknown>;
   // Checked before the switch so no admin-only case can be reached without it — the REST routes
-  // make the same check in `requirePipelineAdmin`, and this is the same write by another door.
+  // make the same check in `requireAppAdmin`, and this is the same write by another door.
   if (ADMIN_ONLY_TOOLS.has(name) && !ctx.canWrite) {
     return {
       ok: false,

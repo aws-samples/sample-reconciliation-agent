@@ -8,7 +8,7 @@ import {
 } from "@/lib/pipeline/server/emailStore";
 import { isConditionalCheckFailed } from "@/lib/pipeline/server/aws";
 import { env } from "@/lib/pipeline/server/env";
-import { jsonError } from "@/lib/pipeline/server/http";
+import { jsonError } from "@/lib/server/http";
 import { invokeAsync } from "@/lib/pipeline/server/lambdaInvoke";
 
 // Run the parser again on an email — after a skill or memory change, or after a failure.

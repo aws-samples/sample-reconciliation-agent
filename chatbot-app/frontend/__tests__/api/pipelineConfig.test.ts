@@ -14,10 +14,10 @@ process.env.PIPELINE_AGENT_MODEL_PARAM = "/deal-pipeline-test/agent-model-id";
 
 const ssmSend = vi.fn();
 const requireActor = vi.fn();
-const requirePipelineAdmin = vi.fn();
+const requireAppAdmin = vi.fn();
 
 vi.mock("@/lib/api-auth", () => ({ requireActor }));
-vi.mock("@/lib/pipelineAdmin", () => ({ requirePipelineAdmin }));
+vi.mock("@/lib/auth/app-admin", () => ({ requireAppAdmin }));
 vi.mock("@aws-sdk/client-ssm", () => ({
   SSMClient: vi.fn().mockImplementation(() => ({ send: ssmSend })),
   GetParameterCommand: vi.fn().mockImplementation((i) => ({ __cmd: "Get", ...i })),
@@ -27,7 +27,7 @@ vi.mock("@aws-sdk/client-ssm", () => ({
 }));
 
 const { GET, PUT } = await import("@/app/api/pipeline/config/route");
-const { AGENT_MODEL_IDS } = await import("@/lib/pipeline/server/agentModels");
+const { AGENT_MODEL_IDS } = await import("@/lib/server/agentModels");
 const { invalidate } = await import("@/lib/console/settings");
 
 const CONSOLE_PREFIX = "/deal-pipeline-test/console";
@@ -48,7 +48,7 @@ function put(body: unknown) {
 beforeEach(() => {
   vi.clearAllMocks();
   requireActor.mockResolvedValue({ actor: "reviewer" });
-  requirePipelineAdmin.mockResolvedValue({ actor: "admin" });
+  requireAppAdmin.mockResolvedValue({ actor: "admin" });
   // The console layer is off unless a case turns it on; its cache must not carry between cases.
   delete process.env.CONSOLE_SETTINGS_PREFIX;
   delete process.env.CONSOLE_DEFAULT_MODEL_ID;
@@ -142,7 +142,7 @@ describe("PUT /api/pipeline/config", () => {
 
   it("honours the admin gate", async () => {
     const { NextResponse } = await import("next/server");
-    requirePipelineAdmin.mockResolvedValue({
+    requireAppAdmin.mockResolvedValue({
       error: NextResponse.json({ error: "not an admin" }, { status: 403 }),
     });
     expect((await put({ modelId: "us.anthropic.claude-opus-5" })).status).toBe(403);

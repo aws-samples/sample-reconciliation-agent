@@ -46,12 +46,6 @@ describe("ids", () => {
     expect(ids.newProposalId()).toMatch(/^sp_[0-9A-HJKMNP-TV-Z]{26}$/);
     expect(earlier < later).toBe(true);
   });
-
-  it("makes ids safe for AgentCore actor/session fields", () => {
-    expect(ids.memorySafeId("user@example.test|abc def")).toBe("user-example-test-abc-def");
-    expect(ids.memorySafeId("")).toBe("unknown");
-    expect(ids.memorySafeId("x".repeat(150))).toHaveLength(100);
-  });
 });
 
 describe("env", () => {

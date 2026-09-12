@@ -14,10 +14,10 @@ process.env.AWS_REGION = "us-east-1";
 const agentcoreSend = vi.fn();
 const controlSend = vi.fn();
 const requireActor = vi.fn();
-const requirePipelineAdmin = vi.fn();
+const requireAppAdmin = vi.fn();
 
 vi.mock("@/lib/api-auth", () => ({ requireActor }));
-vi.mock("@/lib/pipelineAdmin", () => ({ requirePipelineAdmin }));
+vi.mock("@/lib/auth/app-admin", () => ({ requireAppAdmin }));
 vi.mock("@aws-sdk/client-bedrock-agentcore", () => ({
   BedrockAgentCoreClient: vi.fn().mockImplementation(() => ({ send: agentcoreSend })),
   RetrieveMemoryRecordsCommand: vi.fn().mockImplementation((i) => ({ __cmd: "Retrieve", ...i })),
@@ -34,8 +34,7 @@ vi.mock("@aws-sdk/client-bedrock-agentcore-control", () => ({
 const memory = await import("@/app/api/pipeline/memory/route");
 const strategy = await import("@/app/api/pipeline/memory/strategy/route");
 const client = await import("@/lib/pipeline/server/memoryClient");
-const { toStrategyInfo } = await import("@/lib/pipeline/server/memoryStrategy");
-const { parseMemoryDeleteIds } = await import("@/lib/pipeline/server/requests");
+const { parseMemoryDeleteIds } = await import("@/lib/server/memoryRequests");
 
 const MEMORY_ID = "deal_pipeline_test_knowledge-abc123";
 
@@ -51,7 +50,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   process.env.KNOWLEDGE_MEMORY_ID = MEMORY_ID;
   requireActor.mockResolvedValue({ actor: "reviewer" });
-  requirePipelineAdmin.mockResolvedValue({ actor: "admin-1" });
+  requireAppAdmin.mockResolvedValue({ actor: "admin-1" });
 });
 
 describe("with no knowledge memory configured", () => {
@@ -144,7 +143,7 @@ describe("POST /api/pipeline/memory", () => {
   it("requires a rule and honours the admin gate", async () => {
     expect((await memory.POST(req("POST", {}))).status).toBe(400);
     const { NextResponse } = await import("next/server");
-    requirePipelineAdmin.mockResolvedValue({
+    requireAppAdmin.mockResolvedValue({
       error: NextResponse.json({ error: "not an admin" }, { status: 403 }),
     });
     expect((await memory.POST(req("POST", { rule: "x" }))).status).toBe(403);
@@ -275,33 +274,5 @@ describe("memoryClient", () => {
       includePayloads: true,
       actorId: "user-example-test",
     });
-  });
-});
-
-describe("toStrategyInfo", () => {
-  it("survives a strategy stripped of every optional field", () => {
-    expect(toStrategyInfo({})).toMatchObject({
-      id: "",
-      type: "—",
-      configurationType: null,
-      namespaces: [],
-      extraction: null,
-      consolidation: null,
-    });
-  });
-
-  it("falls back to namespaceTemplates and treats an empty prompt as no override", () => {
-    const info = toStrategyInfo({
-      namespaces: [],
-      namespaceTemplates: ["deal-pipeline/edge-cases/{actorId}"],
-      configuration: {
-        type: "SEMANTIC_OVERRIDE",
-        extraction: {
-          customExtractionConfiguration: { semanticExtractionOverride: { appendToPrompt: "", modelId: "m" } },
-        },
-      },
-    });
-    expect(info.namespaces).toEqual(["deal-pipeline/edge-cases/{actorId}"]);
-    expect(info.extraction).toBeNull();
   });
 });

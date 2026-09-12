@@ -3,7 +3,8 @@
  * identity-provider groups grant access to and administration of each.
  *
  * Shared by the proxy (per-app API access), the `/api/me` route (what the shell may show), the
- * landing page, the app rail, and the two admin helpers (`reconAdmin.ts`, `pipelineAdmin.ts`). Adding
+ * landing page, the app rail, and the admin gate (`lib/auth/app-admin.ts`, which `reconAdmin.ts` binds
+ * to recon). Adding
  * an app is one entry here plus its own route trees; nothing else in the shell needs to change.
  *
  * Access model (decided 2026-09-11): permissions come from the IdP group claim the existing auth
@@ -153,7 +154,7 @@ export function accessGroupFor(app: AppDefinition | AppId, env: Env = process.en
 /**
  * The configured ADMIN group of an app, trimmed, or "" when none is configured.
  *
- * The single source for `resolveAppAccess`, `isReconAdmin`, `isPipelineAdmin` and their 403 wording,
+ * The single source for `resolveAppAccess`, `isAppAdmin` / `requireAppAdmin` and their 403 wording,
  * so the rail's admin chip and the write routes can never disagree about the group's spelling.
  *
  * @param app the app, by definition or id.

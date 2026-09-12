@@ -9,6 +9,10 @@ import {
 
 import { authorizeRequest } from "@/lib/api-auth";
 import { requireReconAdmin } from "@/lib/reconAdmin";
+import { parseMemoryDeleteIds } from "@/lib/server/memoryRequests";
+
+// Re-exported because __tests__/api/reconMemoryDelete.test.ts reads the parser from this route.
+export { parseMemoryDeleteIds };
 
 // Same-origin BFF: read the agent's CONSOLIDATED LONG-TERM MEMORY directly from AgentCore
 // Memory (distinct from the DynamoDB recon-lessons ledger that /api/recon/lessons serves).
@@ -25,10 +29,6 @@ const LESSONS_TABLE = process.env.LESSONS_TABLE ?? "recon-lessons";
 const DEFAULT_DOMAIN = "lending";
 // Consolidated lessons per domain — a generous top_k so the tab shows the full recalled set.
 const TOP_K = 25;
-// Ceiling on one delete request. The panel shows one topK-bounded page per domain, so a legitimate
-// "select all and delete" never approaches this; a request that does is a client bug or an attempt to
-// wipe the agent's memory in one call, and both are better refused than serviced.
-const MAX_DELETE_IDS = 50;
 
 interface MemoryRecord {
   id: string;
@@ -84,39 +84,6 @@ async function retrieveForDomain(
     );
     return [];
   }
-}
-
-/**
- * Validate the id list a delete request carries.
- *
- * Throws rather than sanitising: a request asking to delete 60 records must be refused, not quietly
- * trimmed to 50, and a blank id must not silently become a no-op the caller reads as a success.
- *
- * @param body the parsed JSON request body.
- * @returns the de-duplicated record ids to delete.
- * @throws Error when the body is not `{ ids: string[] }`, is empty, holds a blank or non-string id,
- *   or exceeds `MAX_DELETE_IDS` after de-duplication.
- */
-export function parseMemoryDeleteIds(body: unknown): string[] {
-  const ids = (body as { ids?: unknown } | null)?.ids;
-  if (!Array.isArray(ids)) {
-    throw new Error("body must be an object with an `ids` array");
-  }
-  if (ids.length === 0) {
-    throw new Error("`ids` must name at least one memory record");
-  }
-  for (const id of ids) {
-    if (typeof id !== "string" || id.trim().length === 0) {
-      throw new Error("every entry in `ids` must be a non-empty string");
-    }
-  }
-  const unique = [...new Set((ids as string[]).map((id) => id.trim()))];
-  if (unique.length > MAX_DELETE_IDS) {
-    throw new Error(
-      `at most ${MAX_DELETE_IDS} memory records may be deleted per request (got ${unique.length})`,
-    );
-  }
-  return unique;
 }
 
 export async function GET(req: Request) {

@@ -15,8 +15,8 @@ vi.mock("@/lib/pipelineApi", () => ({
   saveConfig: (...a: unknown[]) => api.saveConfig(...a),
 }));
 let isAdmin = true;
-vi.mock("@/hooks/usePipelineSubject", () => ({
-  usePipelineSubject: () => ({ subject: "sub-1", groups: [], isAdmin }),
+vi.mock("@/hooks/useAppSubject", () => ({
+  useAppSubject: () => ({ subject: "sub-1", groups: [], isAdmin }),
 }));
 vi.mock("next/link", () => ({
   default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => (

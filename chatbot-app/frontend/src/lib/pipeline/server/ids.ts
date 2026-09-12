@@ -76,14 +76,3 @@ export function newDealId(now: Date = new Date()): string {
 export function newProposalId(now: Date = new Date()): string {
   return `sp_${ulid(now)}`;
 }
-
-/**
- * Restrict a value to the character set AgentCore Memory accepts for actor and session ids.
- *
- * OIDC subjects and chat session ids can carry `|`, `@`, `:` or spaces; the memory API rejects them
- * with a validation error that names none of the offending characters, so replace them here.
- */
-export function memorySafeId(value: string): string {
-  const safe = value.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 100);
-  return safe || "unknown";
-}

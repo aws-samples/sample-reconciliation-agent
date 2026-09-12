@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { requireActor } from "@/lib/api-auth";
-import { jsonError } from "@/lib/pipeline/server/http";
+import { jsonError } from "@/lib/server/http";
 import { listChatEvents } from "@/lib/pipeline/server/memoryClient";
 import { SESSION_ID } from "@/lib/pipeline/server/requests";
 

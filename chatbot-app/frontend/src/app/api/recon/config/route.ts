@@ -5,6 +5,7 @@ import {
   PutParameterCommand,
 } from "@aws-sdk/client-ssm";
 import { requireReconAdmin } from "@/lib/reconAdmin";
+import { AGENT_MODEL_IDS } from "@/lib/server/agentModels";
 
 // Same-origin BFF for platform config, backed by SSM parameters read at runtime:
 //   tier1Enabled          — deterministic Tier-1 route on/off (Tier-1 Lambda reads per batch)
@@ -38,23 +39,6 @@ const AGENT_MODEL_PARAM =
   process.env.AGENT_MODEL_PARAM ?? "/recon-dev/agent-model-id";
 const COMMENT_MODES = ["required", "optional", "disapprove-only"] as const;
 const AGENT_BACKENDS = ["runtime", "harness"] as const;
-// Selectable Tier-2 model ids, as cross-region inference profiles.
-//
-// KEEP IN SYNC with ALLOWED_MODEL_IDS in backend/recon_core/model_select.py, which enforces the same
-// list when the agent reads the parameter. There is no shared schema layer between the Python runtime
-// and this BFF, so the duplication is deliberate — but an id accepted here and rejected there is a
-// save that appears to work and then silently falls back to the deployed default.
-//
-// The `global.` variants are not a faster tier: they may route the request outside the US, which is a
-// data-residency decision and is invisible in the id. The Config tab labels it as such.
-const AGENT_MODEL_IDS = [
-  "us.anthropic.claude-opus-5",
-  "global.anthropic.claude-opus-5",
-  "us.anthropic.claude-sonnet-5",
-  "global.anthropic.claude-sonnet-5",
-  "us.anthropic.claude-fable-5-1",
-  "global.anthropic.claude-fable-5-1",
-] as const;
 
 function ssm() {
   return new SSMClient({ region: REGION });

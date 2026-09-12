@@ -2,24 +2,24 @@
  * Typed client for the console-level BFF: `/api/console/*`, the layer above the two apps.
  *
  * Same shape as the two apps' clients (`reconApi.ts`, `pipelineApi.ts`) but importing neither: the
- * console must keep working when an app is removed. Every call attaches the ID token through the
- * shared `lib/auth/client-token` helper — the one reader all three clients present to the one
- * verifier — and a 401 starts the same re-authentication redirect the apps' wrappers start, because
- * under `/api/console/*` a 401 can only mean the token is missing or rejected.
+ * console must keep working when an app is removed. Every call goes through the shared
+ * `lib/auth/authed-fetch` wrapper — the one reader all three clients present to the one verifier —
+ * which attaches the ID token and, on a 401, starts the same re-authentication redirect the apps'
+ * clients start, because under `/api/console/*` a 401 can only mean the token is missing or rejected.
  *
  * Failures throw `Error(body.error)` when the route explained itself and
  * `Error("console API error <status>")` when it did not, so the Settings screen shows the server's
  * own words ("group name too long", "console admins only") rather than a generic line.
  */
 
-import { authHeaders } from "@/lib/auth/client-token";
+import { jsonInit, parseJsonResponse } from "@/lib/api/client";
+import { authedFetch } from "@/lib/auth/authed-fetch";
 import type {
   AccessCheckResult,
   ConsoleSettings,
   ConsoleSettingsUpdate,
   UserPreferences,
 } from "@/lib/console/types";
-import { reauthenticate } from "@/lib/reauth";
 import { normalizePreferences } from "@/lib/shell/preferences";
 
 /**
@@ -29,45 +29,11 @@ import { normalizePreferences } from "@/lib/shell/preferences";
  * @param init standard fetch init; headers given here are merged over the auth header.
  * @returns the raw `Response`; status handling stays with `json()`.
  */
-export async function consoleFetch(input: string, init: RequestInit = {}): Promise<Response> {
-  const auth = await authHeaders();
-  const response = await fetch(input, {
-    ...init,
-    headers: { ...auth, ...(init.headers as Record<string, string> | undefined) },
-  });
-  if (response.status === 401) {
-    // Not awaited: the redirect resolves as the page unloads, and blocking here would keep the caller
-    // from ever reporting the failure if the loop guard refuses the redirect.
-    void reauthenticate("unauthorized").catch((error: unknown) =>
-      console.error("[ConsoleApi] re-authentication failed:", error),
-    );
-  }
-  return response;
-}
+export const consoleFetch = (input: string, init: RequestInit = {}): Promise<Response> =>
+  authedFetch(input, init, "ConsoleApi");
 
-/**
- * Unwrap a successful JSON body, or throw the server's own explanation.
- *
- * @throws Error carrying `body.error` when present, else `console API error <status>`.
- */
-export async function json<T>(resp: Response): Promise<T> {
-  if (!resp.ok) {
-    let detail = `console API error ${resp.status}`;
-    try {
-      const body = (await resp.json()) as { error?: unknown };
-      if (typeof body?.error === "string" && body.error) detail = body.error;
-    } catch {
-      // Non-JSON error body (a load balancer page, an empty 502): the status is the honest message.
-    }
-    throw new Error(detail);
-  }
-  const text = await resp.text();
-  return (text ? JSON.parse(text) : undefined) as T;
-}
-
-function jsonInit(method: string, body: unknown): RequestInit {
-  return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
-}
+/** The shared JSON reader (`lib/api/client.ts`) under the console label. */
+const json = <T>(resp: Response): Promise<T> => parseJsonResponse<T>(resp, "console API");
 
 /** Every console-wide setting with its resolved value and source. Console admins only (403 otherwise). */
 export async function getConsoleSettings(): Promise<ConsoleSettings> {

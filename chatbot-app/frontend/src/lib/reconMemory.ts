@@ -27,6 +27,8 @@ export interface LessonEvent {
 
 function sanitizeId(s: string): string {
   // Memory actor/session ids permit a restricted charset; item ids can carry '#', spaces, etc.
+  // Deliberately not the shared `memorySafeId` (lib/server/memoryRequests.ts): that one maps an empty
+  // input to "unknown", and `domain ?? "unknown"` below lets an empty-string domain through unchanged.
   return s.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 100);
 }
 

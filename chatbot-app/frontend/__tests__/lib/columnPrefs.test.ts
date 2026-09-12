@@ -129,7 +129,7 @@ describe("columnPrefs", () => {
   });
 
   it("refuses an empty subject instead of storing under a shared key", () => {
-    // The state before /api/recon/me answers. A placeholder key would work perfectly on one laptop and
+    // The state before /api/me answers. A placeholder key would work perfectly on one laptop and
     // silently merge two people's layouts on a shared one, so nothing is written and nothing is read.
     saveColumnPrefs("recon", "cases", "", [{ id: "id", visible: false }]);
 

@@ -2,7 +2,7 @@
 
 import { Suspense, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { usePipelineSubject } from "@/hooks/usePipelineSubject";
+import { useAppSubject } from "@/hooks/useAppSubject";
 import { ChatPanel } from "@/components/pipeline/ChatPanel";
 import { MemoryManagerPanel } from "@/components/pipeline/MemoryManagerPanel";
 import { Eyebrow, Placeholder } from "@/components/app-ui/ui";
@@ -15,7 +15,7 @@ function AssistantContent() {
   const params = useSearchParams();
   const dealId = params.get("deal");
   const emailId = params.get("email");
-  const { isAdmin } = usePipelineSubject();
+  const { isAdmin } = useAppSubject("pipeline");
   // Bumped after every completed assistant turn so the memory panel picks up a `save_memory`.
   const [turns, setTurns] = useState(0);
 

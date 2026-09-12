@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { requireActor } from "@/lib/api-auth";
 import { toCsv } from "@/lib/pipeline/omsSchema";
 import { getDeal } from "@/lib/pipeline/server/dealStore";
-import { jsonError } from "@/lib/pipeline/server/http";
+import { jsonError } from "@/lib/server/http";
 
 // The staging CSV as a download.
 //

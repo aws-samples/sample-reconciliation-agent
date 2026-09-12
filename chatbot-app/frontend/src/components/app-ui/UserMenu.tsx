@@ -3,8 +3,6 @@
 import { useEffect, useState } from "react";
 import { signOut } from "@/components/AuthWrapper";
 import { oktaUserName } from "@/components/OktaAuthWrapper";
-import { useAppSubject } from "@/hooks/useAppSubject";
-import type { AppId } from "@/lib/auth/apps";
 
 const PROVIDER = process.env.NEXT_PUBLIC_AUTH_PROVIDER ?? "entra";
 
@@ -31,13 +29,11 @@ async function resolveName(): Promise<string> {
   }
 }
 
-export function UserMenu({ appId }: { appId: AppId }) {
+export function UserMenu() {
+  // The name comes from the provider, as it always has. Should the menu ever want the server's view
+  // of the viewer (an admin marker, say), `useAppSubject` reads the shell's already-loaded viewer
+  // store at no extra request — there is nothing to prefetch here.
   const [name, setName] = useState<string | null>(null);
-  // The viewer as the server sees them. Nothing from it is rendered yet — the name shown comes from
-  // the provider, as it always has — but the header's two identity consumers (this and `AppNav`)
-  // resolve it through the same cached request, so the menu can grow an admin marker later without a
-  // new data path or a second fetch.
-  useAppSubject(appId);
 
   useEffect(() => {
     resolveName().then(setName);

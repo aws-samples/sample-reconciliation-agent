@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { listEmails } from "@/lib/pipelineApi";
 import type { EmailRecord } from "@/lib/pipeline/types";
-import { usePipelineSubject } from "@/hooks/usePipelineSubject";
+import { useAppSubject } from "@/hooks/useAppSubject";
 import { DataTable, type DataTableColumn } from "@/components/app-ui/DataTable";
 import { SimulateEmailModal } from "@/components/pipeline/SimulateEmailModal";
 import { formatDateTime, sourceLabel } from "@/components/pipeline/format";
@@ -22,7 +22,7 @@ function inFlight(e: EmailRecord): boolean {
 
 export default function InboxPage() {
   const router = useRouter();
-  const { subject } = usePipelineSubject();
+  const { subject } = useAppSubject("pipeline");
   const [emails, setEmails] = useState<EmailRecord[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);

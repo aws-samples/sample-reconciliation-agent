@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 
 import { requireActor } from "@/lib/api-auth";
-import { requirePipelineAdmin } from "@/lib/pipelineAdmin";
-import { jsonError, readJsonObject, stringField } from "@/lib/pipeline/server/http";
+import { requireAppAdmin } from "@/lib/auth/app-admin";
+import { jsonError, readJsonObject, stringField } from "@/lib/server/http";
 import { newProposalId } from "@/lib/pipeline/server/ids";
 import {
   batchDelete,
@@ -10,7 +10,7 @@ import {
   EDGE_CASES_NAMESPACE,
   listRecords,
 } from "@/lib/pipeline/server/memoryClient";
-import { parseMemoryDeleteIds } from "@/lib/pipeline/server/requests";
+import { parseMemoryDeleteIds } from "@/lib/server/memoryRequests";
 
 // The Memory Manager (design §8, §9): the consolidated edge-case records the parser recalls before
 // every run — list them, add a rule by hand, delete the ones an operator selects.
@@ -38,7 +38,7 @@ export async function GET(req: Request) {
  *   listable yet; 400 without a `rule`; 409 when the knowledge memory is not configured.
  */
 export async function POST(req: Request) {
-  const admin = await requirePipelineAdmin(req);
+  const admin = await requireAppAdmin("pipeline", req);
   if ("error" in admin) return admin.error;
   const body = await readJsonObject(req);
   const rule = body ? stringField(body, "rule") : undefined;
@@ -66,7 +66,7 @@ export async function POST(req: Request) {
  *   deleted nothing must not look like a success).
  */
 export async function DELETE(req: Request) {
-  const admin = await requirePipelineAdmin(req);
+  const admin = await requireAppAdmin("pipeline", req);
   if ("error" in admin) return admin.error;
 
   let ids: string[];

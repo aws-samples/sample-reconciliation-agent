@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 
 import { requireActor } from "@/lib/api-auth";
-import { requirePipelineAdmin } from "@/lib/pipelineAdmin";
+import { requireAppAdmin } from "@/lib/auth/app-admin";
 import { validateSkill } from "@/lib/skillFrontmatter";
-import { jsonError, readJsonObject, stringField } from "@/lib/pipeline/server/http";
+import { jsonError, readJsonObject, stringField } from "@/lib/server/http";
 import {
   deleteSkill,
   getSkill,
@@ -43,7 +43,7 @@ export async function PUT(
   req: Request,
   { params }: { params: Promise<{ name: string }> },
 ) {
-  const admin = await requirePipelineAdmin(req);
+  const admin = await requireAppAdmin("pipeline", req);
   if ("error" in admin) return admin.error;
   const { name } = await params;
   const invalid = badName(name);
@@ -65,7 +65,7 @@ export async function DELETE(
   req: Request,
   { params }: { params: Promise<{ name: string }> },
 ) {
-  const admin = await requirePipelineAdmin(req);
+  const admin = await requireAppAdmin("pipeline", req);
   if ("error" in admin) return admin.error;
   const { name } = await params;
   const invalid = badName(name);

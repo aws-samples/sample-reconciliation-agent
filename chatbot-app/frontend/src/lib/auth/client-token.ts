@@ -6,11 +6,11 @@
  * token rather than an access token, and what would replace it.
  *
  * One copy, under `lib/auth/`, because there is one OIDC client: the shell (`/api/me`), the recon
- * client (`recon-auth.ts`) and the pipeline client (`pipeline-auth.ts`) all present the same token to
- * the same verifier. Each app's helper adds only its own `fetch` wrapper (401 handling) on top of
- * this, and the shell imports this module directly, so removing an app cannot take the shell's token
- * reader with it, and a token-read failure is logged under a neutral prefix instead of being blamed
- * on whichever app happened to own the copy.
+ * client (`recon-auth.ts`) and the pipeline client (`pipelineApi.ts`) all present the same token to
+ * the same verifier, through the one `fetch` wrapper in `authed-fetch.ts` (401 handling). The shell
+ * imports this module directly, so removing an app cannot take the shell's token reader with it, and
+ * a token-read failure is logged under a neutral prefix instead of being blamed on whichever app
+ * happened to own the copy.
  *
  * Both providers' clients are reached through the instance the auth wrapper stashes on `window`
  * (`__okta_instance` / `__msal_instance`); when the wrapper has not built one yet, one is constructed

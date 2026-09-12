@@ -28,11 +28,11 @@ const s3Send = vi.fn();
 const bedrockSend = vi.fn();
 const agentcoreSend = vi.fn();
 const requireActor = vi.fn();
-const requirePipelineActor = vi.fn();
+const requireAppActor = vi.fn();
 
 // The history route names the actor only; the chat route also needs the admin flag.
 vi.mock("@/lib/api-auth", () => ({ requireActor }));
-vi.mock("@/lib/pipelineAdmin", () => ({ requirePipelineActor }));
+vi.mock("@/lib/auth/app-admin", () => ({ requireAppActor }));
 vi.mock("@aws-sdk/client-dynamodb", () => ({
   DynamoDBClient: vi.fn().mockImplementation(() => ({ send: ddbSend })),
   GetItemCommand: vi.fn().mockImplementation((i) => ({ __cmd: "GetItem", ...i })),
@@ -136,7 +136,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   process.env.KNOWLEDGE_MEMORY_ID = "";
   requireActor.mockResolvedValue({ actor: "user@example.test" });
-  requirePipelineActor.mockResolvedValue({ actor: "user@example.test", isAdmin: true });
+  requireAppActor.mockResolvedValue({ actor: "user@example.test", isAdmin: true });
   // No seeded assistant prompt → built-in prompt; deal lookups hit the fake table below.
   s3Send.mockRejectedValue(Object.assign(new Error("nsk"), { name: "NoSuchKey" }));
   ddbSend.mockImplementation(async (cmd: { __cmd: string; Key?: never }) => {
@@ -284,7 +284,7 @@ describe("POST /api/pipeline/chat", () => {
 
   it("honours an authorization refusal", async () => {
     const { NextResponse } = await import("next/server");
-    requirePipelineActor.mockResolvedValue({ error: NextResponse.json({ error: "no" }, { status: 401 }) });
+    requireAppActor.mockResolvedValue({ error: NextResponse.json({ error: "no" }, { status: 401 }) });
     expect((await post({ session_id: "s", message: "x" })).status).toBe(401);
   });
 
@@ -292,7 +292,7 @@ describe("POST /api/pipeline/chat", () => {
     // A configured knowledge memory, so a gate that leaked would show up as a real BatchDelete call
     // rather than being masked by the "not configured" no-op.
     process.env.KNOWLEDGE_MEMORY_ID = "deal_pipeline_test_knowledge-abc";
-    requirePipelineActor.mockResolvedValue({ actor: "analyst@example.test", isAdmin: false });
+    requireAppActor.mockResolvedValue({ actor: "analyst@example.test", isAdmin: false });
     bedrockSend
       .mockResolvedValueOnce({ stream: toolRound("tu-3", "delete_memory", { record_id: "rec-1" }) })
       .mockResolvedValueOnce({ stream: textRound("An admin can remove that record from the Memory Manager.") });

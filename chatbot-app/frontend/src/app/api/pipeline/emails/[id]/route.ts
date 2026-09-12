@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireActor } from "@/lib/api-auth";
 import { getEmail } from "@/lib/pipeline/server/emailStore";
-import { jsonError } from "@/lib/pipeline/server/http";
+import { jsonError } from "@/lib/server/http";
 
 // One email with its parse output — the Inbox detail view's "raw email beside parsed fields".
 export const runtime = "nodejs";

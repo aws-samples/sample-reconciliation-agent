@@ -17,7 +17,6 @@ import {
   accessCheck,
   getConsoleSettings,
   getPreferences,
-  json,
   putPreferences,
   updateConsoleSettings,
 } from "@/lib/consoleApi";
@@ -42,25 +41,6 @@ function serve(status: number, body: unknown, opts: { raw?: boolean } = {}) {
 beforeEach(() => {
   authHeaders.mockReset().mockResolvedValue({ Authorization: "Bearer id-token-1" });
   reauthenticate.mockReset().mockResolvedValue(true);
-});
-
-describe("json()", () => {
-  it("throws the server's own message when the body carries one", async () => {
-    await expect(json(response(403, { error: "console settings require the console-admins group" }))).rejects.toThrow(
-      "console settings require the console-admins group",
-    );
-  });
-
-  it("falls back to the status when the error body is not JSON or has no message", async () => {
-    await expect(json(response(502, "<html>bad gateway</html>", { raw: true }))).rejects.toThrow(
-      "console API error 502",
-    );
-    await expect(json(response(500, { detail: "x" }))).rejects.toThrow("console API error 500");
-  });
-
-  it("resolves an empty 2xx body to undefined", async () => {
-    expect(await json(response(204, undefined))).toBeUndefined();
-  });
 });
 
 describe("getConsoleSettings", () => {

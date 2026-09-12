@@ -73,19 +73,23 @@ either app's edges:
 | `chatbot-app/frontend/src/lib/console/types.ts`     | The console-wide configuration contract: the SSM layout under `CONSOLE_SETTINGS_PREFIX`, the stored → env → default resolution as an overlay on the names `apps.ts` reads, the `/api/console/*` route shapes, the env-only switches (`REQUIRE_ACCESS_GROUPS`, `ALLOW_ANONYMOUS_API` and its two pre-shell names, `CONSOLE_ADMIN_GROUP`) and the validation limits. §14 of the design doc is the prose |
 | `chatbot-app/frontend/src/lib/api-auth.ts`          | Token verification, the groups claim, anonymous mode — three switch names mean the same thing (`ALLOW_ANONYMOUS_API`, plus the pre-shell `RECON_ALLOW_ANONYMOUS_API` and `PIPELINE_ALLOW_ANONYMOUS_API`), narrowed by `ANONYMOUS_GROUPS` |
 | `chatbot-app/frontend/src/proxy.ts`                 | The deny-by-default gate: every `/api/recon/*` and `/api/pipeline/*` request is verified and matched against that app's access group before a handler runs; a disabled app's BFF is a 403 |
-| `src/lib/reconAdmin.ts`, `src/lib/pipelineAdmin.ts` | The admin re-check inside the write routes that carry one — every pipeline write, but only part of recon's (see the access-groups rule below). The rail hiding a button is not the gate |
+| `src/lib/auth/app-admin.ts` (`reconAdmin.ts` is recon's named binding) | The admin re-check inside the write routes that carry one — every pipeline write, but only part of recon's (see the access-groups rule below). The rail hiding a button is not the gate |
 | `src/lib/pipeline/server/env.ts`                    | Every environment name the pipeline BFF reads                                                                                                                            |
 | `docs/deal-pipeline-design.md`                      | The pipeline's data model, OMS rules, routes, environment and demo script; §13 is the console integration                                                               |
 
 Rules that follow:
 
 - **The two apps stay decoupled.** Nothing under `src/{app,components,lib,hooks}` that is recon's
-  imports from the pipeline's tree, or the reverse. The shared surface is the auth module
-  (`src/lib/auth/` — including `client-token.ts`, the one browser-side `authHeaders()` / `idToken()`
-  helper that `recon-auth.ts`, `pipeline-auth.ts` and the shell all import — `src/lib/api-auth.ts`,
-  `src/lib/reauth.ts`, the auth wrappers), the `src/components/ui/` primitives, and app-agnostic
-  helpers with no app state (`columnPrefs`, whose storage keys carry the app id, `skillFrontmatter`).
-  A feature both apps need goes into one of those, never into one app for the other to reach into.
+  imports from the pipeline's tree, or the reverse. The shared surface is the identity spine
+  (`src/lib/auth/`: the registry, `client-token.ts`, `authed-fetch.ts` behind every BFF client,
+  `app-admin.ts` behind every admin-gated write; `src/lib/api-auth.ts`, `src/lib/reauth.ts`, the auth
+  wrappers; `src/hooks/useAppSubject.ts` over the shell's `/api/me` store), the instrument theme
+  (`src/app/app-theme.css`) with the chrome and primitives built on it (`src/components/app-ui/`), the
+  `src/components/ui/` primitives, and app-agnostic helpers with no app state (`src/lib/server/` —
+  HTTP envelope, memory request parsing, the model allowlist; `src/lib/api/client.ts`;
+  `src/lib/models/presets.ts`; `src/lib/memoryStrategy.ts`; `columnPrefs`, whose storage keys carry the
+  app id; `skillFrontmatter`). A feature both apps need goes into one of those, never into one app for
+  the other to reach into.
 - **Access groups: unset access = open, unset admin = closed — until `REQUIRE_ACCESS_GROUPS`.**
   `RECON_ACCESS_GROUP` / `PIPELINE_ACCESS_GROUP` unset keeps that app open to every authenticated
   user (what a recon-only deployment had before the shell). `REQUIRE_ACCESS_GROUPS=true` (exact

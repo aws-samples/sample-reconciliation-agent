@@ -1,7 +1,7 @@
 /**
  * The console-admin gate for `/api/console/settings` and `/api/console/access-check`.
  *
- * Same shape as `requireReconAdmin` / `requirePipelineAdmin` so a route reads the same way whichever
+ * Same shape as `requireAppAdmin` (`lib/auth/app-admin.ts`) so a route reads the same way whichever
  * layer it belongs to: verify the token here (defense in depth; the proxy already did, but a matcher
  * change must not turn the settings PUT into an anonymous write), then check the group.
  *
