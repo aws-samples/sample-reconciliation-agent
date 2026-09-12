@@ -16,7 +16,7 @@ import {
   Panel,
   Placeholder,
   type ActionOutcome,
-} from "@/components/pipeline/ui";
+} from "@/components/app-ui/ui";
 
 export default function SkillEditorPage({ params }: { params: Promise<{ name: string }> }) {
   const { name: rawName } = use(params);
@@ -85,16 +85,16 @@ export default function SkillEditorPage({ params }: { params: Promise<{ name: st
       <div className="flex items-center justify-between">
         <Link
           href="/pipeline/skills"
-          className="dp-mono text-[12px] uppercase tracking-[0.14em] text-[var(--dp-ink-faint)] hover:text-[var(--dp-ink)]"
+          className="rc-mono text-[12px] uppercase tracking-[0.14em] text-[var(--rc-ink-faint)] hover:text-[var(--rc-ink)]"
         >
           ← Skills
         </Link>
-        <span className="dp-mono text-[11px] text-[var(--dp-ink-faint)]">skills/{name}/SKILL.md</span>
+        <span className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">skills/{name}/SKILL.md</span>
       </div>
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <Eyebrow>{isAdmin ? "Skill · editable · applies on the next run" : "Skill · read-only"}</Eyebrow>
-          <h1 className="dp-display mt-2 text-[34px] font-black leading-none text-[var(--dp-ink)]">
+          <h1 className="rc-display mt-2 text-[34px] font-black leading-none text-[var(--rc-ink)]">
             {name}
           </h1>
         </div>
@@ -112,7 +112,7 @@ export default function SkillEditorPage({ params }: { params: Promise<{ name: st
 
       {msg && <Notice tone={msg.tone}>{msg.text}</Notice>}
       {!isAdmin && (
-        <p className="dp-mono text-[11.5px] text-[var(--dp-ink-faint)]">
+        <p className="rc-mono text-[11.5px] text-[var(--rc-ink-faint)]">
           Editing requires membership of the admin group. Propose a change through the Assistant
           instead; it lands on the proposals page for review.
         </p>
@@ -123,7 +123,7 @@ export default function SkillEditorPage({ params }: { params: Promise<{ name: st
       ) : content === null ? (
         <Placeholder kind="loading">◆ loading {name}…</Placeholder>
       ) : (
-        <Panel className="dp-rise p-5">
+        <Panel className="rc-rise p-5">
           <textarea
             aria-label="Skill content"
             value={content}

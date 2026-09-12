@@ -82,9 +82,9 @@ describe("ParsedFieldsPanel", () => {
     expect(bands.sort()).toEqual(["high", "high", "low", "medium"]);
     // Bands are colour-coded through the chip's inline colour, one CSS variable per band.
     const byBand = (b: string) => document.querySelector(`[data-confidence="${b}"]`) as HTMLElement;
-    expect(byBand("high").style.color).toContain("--dp-green");
-    expect(byBand("medium").style.color).toContain("--dp-amber");
-    expect(byBand("low").style.color).toContain("--dp-red");
+    expect(byBand("high").style.color).toContain("--rc-green");
+    expect(byBand("medium").style.color).toContain("--rc-amber");
+    expect(byBand("low").style.color).toContain("--rc-red");
   });
 
   it("shows the run metadata, skills, memory hits and enrichment", () => {

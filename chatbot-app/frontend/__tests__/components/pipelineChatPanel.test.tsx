@@ -98,14 +98,14 @@ describe("ChatPanel", () => {
 
     const refused = await screen.findByText(/✕ save_memory/);
     expect(refused).toHaveAttribute("data-tool-state", "failed");
-    expect(refused.style.color).toContain("--dp-red");
+    expect(refused.style.color).toContain("--rc-red");
     const fine = screen.getByText(/✓ get_deal/);
     expect(fine).toHaveAttribute("data-tool-state", "ok");
-    expect(fine.style.color).toContain("--dp-cyan");
+    expect(fine.style.color).toContain("--rc-cyan");
     // The reason is written out under the chips, not left in a hover-only tooltip.
     const reason = screen.getByRole("alert");
     expect(reason).toHaveTextContent(REFUSAL);
-    expect(reason.style.color).toContain("--dp-red");
+    expect(reason.style.color).toContain("--rc-red");
   });
 
   it("shows a refusal streamed mid-turn as a failure, not a completed write", async () => {

@@ -1,14 +1,15 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { AppId } from "@/lib/auth/apps";
 import {
   loadColumnPrefs,
   saveColumnPrefs,
   type ColumnPref,
 } from "@/lib/columnPrefs";
 
-// One table, used by every list in the console. What it adds over hand-written markup is the three
-// things a reviewer asks for on the second day: sort by a column, hide the columns they never read, and
+// One table, used by every list in every app. What it adds over hand-written markup is the three
+// things a viewer asks for on the second day: sort by a column, hide the columns they never read, and
 // put the ones they do read next to each other. Visibility and order survive a reload, per viewer.
 //
 // Sorting is client-side, over the rows the caller has already fetched. When the caller is paging
@@ -46,12 +47,18 @@ export interface DataTableColumn<T> {
 }
 
 export interface DataTableProps<T> {
+  /**
+   * Which app this table belongs to. The first segment of the storage key, ahead of `tableId`, so two
+   * apps that happen to pick the same table id can never read each other's layouts.
+   */
+  appId: AppId;
   /** Namespaces the stored layout. Stable across releases; changing it discards everyone's layout. */
   tableId: string;
   /**
-   * The viewer's OIDC subject, from `usePipelineSubject()`. Empty until `/api/pipeline/me` answers — the
-   * table then renders the default columns and stores nothing. Never pass a placeholder: one shared
-   * key means one shared layout, and on a shared browser that is somebody else's.
+   * The viewer's OIDC subject, from the app's subject hook (`useAppSubject(appId)`). Empty until the
+   * identity route answers — the table then renders the default columns and stores nothing. Never pass
+   * a placeholder: one shared key means one shared layout, and on a shared browser that is somebody
+   * else's.
    */
   sub: string;
   columns: DataTableColumn<T>[];
@@ -87,6 +94,7 @@ function defaultsOf<T>(columns: DataTableColumn<T>[]): ColumnPref[] {
 }
 
 export function DataTable<T>({
+  appId,
   tableId,
   sub,
   columns,
@@ -107,12 +115,12 @@ export function DataTable<T>({
   // Re-read when the subject arrives (one render later than the first paint) and when the table's own
   // column set changes under us.
   useEffect(() => {
-    setPrefs(loadColumnPrefs("pipeline", tableId, sub, defaults));
-  }, [tableId, sub, defaults]);
+    setPrefs(loadColumnPrefs(appId, tableId, sub, defaults));
+  }, [appId, tableId, sub, defaults]);
 
   const persist = (next: ColumnPref[]) => {
     setPrefs(next);
-    saveColumnPrefs("pipeline", tableId, sub, next);
+    saveColumnPrefs(appId, tableId, sub, next);
   };
 
   const byId = useMemo(() => new Map(columns.map((c) => [c.id, c])), [columns]);
@@ -230,7 +238,7 @@ export function DataTable<T>({
     <div className="space-y-2">
       <div className="flex items-center justify-end gap-3">
         {paginated && sort && (
-          <span className="dp-mono text-[11px] text-[var(--dp-ink-faint)]">
+          <span className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">
             Sorted within the {rows.length} rows loaded here, not the whole
             table.
           </span>
@@ -239,18 +247,19 @@ export function DataTable<T>({
           <button
             type="button"
             onClick={() => setPicking((p) => !p)}
-            className="dp-mono rounded border border-[var(--dp-line)] px-3 py-1 text-[11px] uppercase tracking-[0.1em] text-[var(--dp-ink-dim)] hover:text-[var(--dp-ink)]"
+            className="rc-mono rounded border border-[var(--rc-line)] px-3 py-1 text-[11px] uppercase tracking-[0.1em] text-[var(--rc-ink-dim)] hover:text-[var(--rc-ink)]"
           >
             Columns
           </button>
           {/* The list scrolls, and the heading, the search box and Reset stay put while it does. A
-              table with many optional columns — the deals list offers one per summary field — would
-              otherwise put Reset below the bottom of the viewport with no way back to it.
+              table whose columns are derived from its data — submitted attributes, extracted fields,
+              one column per summary field — offers dozens of them, and a fixed-height list would put
+              Reset below the bottom of the viewport with no way back to it.
               The search box is there for the same reason: thirty checkboxes is a list you read, not a
               menu you pick from. */}
           {picking && (
-            <div className="absolute right-0 z-20 mt-1 flex max-h-[60vh] w-72 flex-col rounded border border-[var(--dp-line)] bg-[var(--dp-panel-2)] p-3 shadow-lg">
-              <p className="dp-eyebrow mb-2">Show columns</p>
+            <div className="absolute right-0 z-20 mt-1 flex max-h-[60vh] w-72 flex-col rounded border border-[var(--rc-line)] bg-[var(--rc-panel-2)] p-3 shadow-lg">
+              <p className="rc-eyebrow mb-2">Show columns</p>
               {/* Shown only when there is enough to hunt through — on a five-column table the box
                   would be one more thing between the operator and the checkbox they came for. */}
               {prefs.length > SEARCHABLE_FROM && (
@@ -259,19 +268,19 @@ export function DataTable<T>({
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Find a column…"
                   aria-label="Find a column"
-                  className="dp-mono mb-2 w-full rounded border border-[var(--dp-line)] bg-transparent px-2 py-1 text-[12px] text-[var(--dp-ink)] outline-none focus:border-[var(--dp-cyan)]"
+                  className="rc-mono mb-2 w-full rounded border border-[var(--rc-line)] bg-transparent px-2 py-1 text-[12px] text-[var(--rc-ink)] outline-none focus:border-[var(--rc-cyan)]"
                 />
               )}
               <div className="min-h-0 flex-1 overflow-y-auto pr-1">
                 {matching.length === 0 ? (
-                  <p className="dp-mono py-1 text-[12px] text-[var(--dp-ink-faint)]">
+                  <p className="rc-mono py-1 text-[12px] text-[var(--rc-ink-faint)]">
                     ◇ no column matches “{search.trim()}”
                   </p>
                 ) : (
                   matching.map((p) => (
                     <label
                       key={p.id}
-                      className="dp-mono flex items-center gap-2 py-1 text-[12px] text-[var(--dp-ink-dim)]"
+                      className="rc-mono flex items-center gap-2 py-1 text-[12px] text-[var(--rc-ink-dim)]"
                     >
                       <input
                         type="checkbox"
@@ -283,7 +292,7 @@ export function DataTable<T>({
                             ),
                           )
                         }
-                        className="h-3.5 w-3.5 accent-[var(--dp-cyan)]"
+                        className="h-3.5 w-3.5 accent-[var(--rc-cyan)]"
                       />
                       {labelOf(p.id)}
                     </label>
@@ -293,7 +302,7 @@ export function DataTable<T>({
               <button
                 type="button"
                 onClick={() => persist(defaults)}
-                className="dp-mono mt-2 shrink-0 text-left text-[11px] uppercase tracking-[0.1em] text-[var(--dp-ink-faint)] hover:text-[var(--dp-ink)]"
+                className="rc-mono mt-2 shrink-0 text-left text-[11px] uppercase tracking-[0.1em] text-[var(--rc-ink-faint)] hover:text-[var(--rc-ink)]"
               >
                 Reset
               </button>
@@ -302,13 +311,13 @@ export function DataTable<T>({
         </div>
       </div>
 
-      {/* `dp-panel` carries the surface, not just the border. Without it the page's grid background
+      {/* `rc-panel` carries the surface, not just the border. Without it the page's grid background
           shows straight through the rows, and a row you can see the backdrop through is a row you have
           to work to read. The header takes a second, fainter fill so the column labels read as
           chrome rather than as a first row of data. */}
-      <div className="dp-panel dp-rise overflow-hidden">
+      <div className="rc-panel rc-rise overflow-hidden">
         <div
-          className="grid items-center gap-4 border-b border-[var(--dp-line)] bg-[var(--dp-line-soft)]/40 px-5 py-3"
+          className="grid items-center gap-4 border-b border-[var(--rc-line)] bg-[var(--rc-line-soft)]/40 px-5 py-3"
           style={{ gridTemplateColumns: template }}
         >
           {shownColumns.map((c) => {
@@ -329,7 +338,7 @@ export function DataTable<T>({
                 // `min-w-0` to match the body cells. A grid item's default `min-width: auto` is its
                 // content's minimum, which pushes a track wider than the template asked for — so a long
                 // header label alone was enough to make the header grid and the row grid disagree.
-                className="dp-eyebrow flex min-w-0 items-center gap-1"
+                className="rc-eyebrow flex min-w-0 items-center gap-1"
               >
                 {c.sortValue ? (
                   <button
@@ -338,8 +347,8 @@ export function DataTable<T>({
                     title="Sort by this column"
                     // `truncate` so a long label clips inside its own track instead of overflowing
                     // into the next one — the button is itself a flex item with an auto minimum.
-                    className="dp-eyebrow truncate hover:text-[var(--dp-ink)]"
-                    style={{ color: isSorted ? "var(--dp-cyan)" : undefined }}
+                    className="rc-eyebrow truncate hover:text-[var(--rc-ink)]"
+                    style={{ color: isSorted ? "var(--rc-cyan)" : undefined }}
                   >
                     {c.header}
                     {isSorted ? (sort.dir === "asc" ? " ↑" : " ↓") : ""}
@@ -354,7 +363,7 @@ export function DataTable<T>({
 
         {sorted.length === 0
           ? empty !== undefined && (
-              <div className="dp-mono px-5 py-6 text-[12px] text-[var(--dp-ink-faint)]">
+              <div className="rc-mono px-5 py-6 text-[12px] text-[var(--rc-ink-faint)]">
                 {empty}
               </div>
             )
@@ -365,11 +374,11 @@ export function DataTable<T>({
                 // bordered unit as the row it belongs to, rather than reading as the next row's header.
                 <div
                   key={rowKey(row)}
-                  className="border-b border-[var(--dp-line-soft)] last:border-0"
+                  className="border-b border-[var(--rc-line-soft)] last:border-0"
                 >
                   <div
                     onClick={onRowClick ? () => onRowClick(row) : undefined}
-                    className="dp-row grid items-center gap-4 px-5 py-4"
+                    className="rc-row grid items-center gap-4 px-5 py-4"
                     style={{
                       gridTemplateColumns: template,
                       cursor: onRowClick ? "pointer" : undefined,
@@ -385,7 +394,7 @@ export function DataTable<T>({
                     // Not inside the clickable row: a click anywhere in the detail would otherwise
                     // re-fire `onRowClick`, which on a toggle handler closes the panel the viewer just
                     // reached for.
-                    <div className="border-t border-[var(--dp-line-soft)] bg-[var(--dp-line-soft)]/20 px-5 py-4">
+                    <div className="border-t border-[var(--rc-line-soft)] bg-[var(--rc-line-soft)]/20 px-5 py-4">
                       {detail}
                     </div>
                   )}

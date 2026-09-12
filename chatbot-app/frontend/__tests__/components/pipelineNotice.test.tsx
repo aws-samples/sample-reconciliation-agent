@@ -7,7 +7,7 @@
  */
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { Notice } from "@/components/pipeline/ui";
+import { Notice } from "@/components/app-ui/ui";
 
 describe("Notice", () => {
   it("announces an error, tags it, and draws it red", () => {
@@ -15,25 +15,25 @@ describe("Notice", () => {
     const el = screen.getByRole("alert");
     expect(el).toHaveAttribute("data-tone", "error");
     expect(el).toHaveTextContent("Error: config write failed");
-    expect(el.style.color).toBe("var(--dp-red)");
+    expect(el.style.color).toBe("var(--rc-red)");
   });
 
   it("reports a success as a status, tagged, in the accent colour", () => {
     render(<Notice tone="success">Saved.</Notice>);
     const el = screen.getByRole("status");
     expect(el).toHaveAttribute("data-tone", "success");
-    expect(el.style.color).toBe("var(--dp-cyan)");
+    expect(el.style.color).toBe("var(--rc-cyan)");
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("lets a caller's classes replace the default size instead of stacking on it", () => {
     render(<Notice tone="success">Saved.</Notice>);
-    expect(screen.getByRole("status").className).toBe("dp-mono text-[12px]");
+    expect(screen.getByRole("status").className).toBe("rc-mono text-[12px]");
     render(
       <Notice tone="error" className="mt-4 text-[11.5px]">
         no
       </Notice>,
     );
-    expect(screen.getByRole("alert").className).toBe("dp-mono mt-4 text-[11.5px]");
+    expect(screen.getByRole("alert").className).toBe("rc-mono mt-4 text-[11.5px]");
   });
 });

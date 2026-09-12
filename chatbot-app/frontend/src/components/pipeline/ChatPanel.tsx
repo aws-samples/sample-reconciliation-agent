@@ -13,7 +13,7 @@ import {
   INPUT_CLASS,
   Panel,
   Placeholder,
-} from "@/components/pipeline/ui";
+} from "@/components/app-ui/ui";
 
 // The conversation with the assistant. The session id lives in sessionStorage so a reload keeps the
 // thread (the BFF rebuilds the transcript from the short-term chat memory) while a new tab starts
@@ -192,12 +192,12 @@ export function ChatPanel({
   };
 
   return (
-    <Panel className="dp-rise flex h-[calc(100vh-220px)] min-h-[520px] flex-col p-5">
+    <Panel className="rc-rise flex h-[calc(100vh-220px)] min-h-[520px] flex-col p-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <Eyebrow>Assistant</Eyebrow>
           {sessionId && (
-            <span className="dp-mono truncate text-[10.5px] text-[var(--dp-ink-faint)]" title="chat session id">
+            <span className="rc-mono truncate text-[10.5px] text-[var(--rc-ink-faint)]" title="chat session id">
               {sessionId}
             </span>
           )}
@@ -208,11 +208,11 @@ export function ChatPanel({
       </div>
 
       {context && (context.deal_id || context.email_id) && (
-        <p className="dp-mono mt-3 rounded border border-[var(--dp-cyan)] bg-[var(--dp-panel-2)] px-3 py-2 text-[11.5px] text-[var(--dp-ink)]">
+        <p className="rc-mono mt-3 rounded border border-[var(--rc-cyan)] bg-[var(--rc-panel-2)] px-3 py-2 text-[11.5px] text-[var(--rc-ink)]">
           Context attached to every message:{" "}
-          {context.deal_id && <span>deal <span className="text-[var(--dp-cyan)]">{context.deal_id}</span></span>}
+          {context.deal_id && <span>deal <span className="text-[var(--rc-cyan)]">{context.deal_id}</span></span>}
           {context.deal_id && context.email_id && " · "}
-          {context.email_id && <span>email <span className="text-[var(--dp-cyan)]">{context.email_id}</span></span>}
+          {context.email_id && <span>email <span className="text-[var(--rc-cyan)]">{context.email_id}</span></span>}
         </p>
       )}
 
@@ -222,7 +222,7 @@ export function ChatPanel({
         ) : messages.length === 0 ? (
           <div className="space-y-3">
             {historyError && (
-              <p className="dp-mono text-[11px] text-[var(--dp-amber)]">
+              <p className="rc-mono text-[11px] text-[var(--rc-amber)]">
                 Could not load earlier turns — {historyError}
               </p>
             )}
@@ -238,7 +238,7 @@ export function ChatPanel({
                   key={s}
                   type="button"
                   onClick={() => void send(s)}
-                  className="dp-mono rounded border border-[var(--dp-line)] px-3 py-1.5 text-left text-[11.5px] text-[var(--dp-ink-dim)] hover:border-[var(--dp-cyan)] hover:text-[var(--dp-ink)]"
+                  className="rc-mono rounded border border-[var(--rc-line)] px-3 py-1.5 text-left text-[11.5px] text-[var(--rc-ink-dim)] hover:border-[var(--rc-cyan)] hover:text-[var(--rc-ink)]"
                 >
                   {s}
                 </button>
@@ -247,9 +247,9 @@ export function ChatPanel({
           </div>
         ) : (
           messages.map((m, i) => (
-            <div key={i} className={`dp-bubble ${m.role}`}>
+            <div key={i} className={`rc-bubble ${m.role}`}>
               {m.role === "user" ? (
-                <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--dp-ink)]">
+                <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--rc-ink)]">
                   {m.content}
                 </p>
               ) : (
@@ -262,14 +262,14 @@ export function ChatPanel({
                         return (
                           <span
                             key={`${t.name}-${j}`}
-                            className="dp-chip"
+                            className="rc-chip"
                             data-tool-state={t.pending ? "pending" : failed ? "failed" : "ok"}
                             style={{
                               color: t.pending
-                                ? "var(--dp-violet)"
+                                ? "var(--rc-violet)"
                                 : failed
-                                  ? "var(--dp-red)"
-                                  : "var(--dp-cyan)",
+                                  ? "var(--rc-red)"
+                                  : "var(--rc-cyan)",
                             }}
                             title={t.summary}
                           >
@@ -288,8 +288,8 @@ export function ChatPanel({
                       <p
                         key={`${t.name}-refused-${j}`}
                         role="alert"
-                        className="dp-mono mb-2 text-[11.5px]"
-                        style={{ color: "var(--dp-red)" }}
+                        className="rc-mono mb-2 text-[11.5px]"
+                        style={{ color: "var(--rc-red)" }}
                       >
                         ⚠ {t.name} — {t.summary}
                       </p>
@@ -297,16 +297,16 @@ export function ChatPanel({
                   {m.content ? (
                     <MarkdownLite text={m.content} />
                   ) : streaming && i === messages.length - 1 && !m.error ? (
-                    <p className="dp-mono text-[12px] text-[var(--dp-ink-faint)]">▍</p>
+                    <p className="rc-mono text-[12px] text-[var(--rc-ink-faint)]">▍</p>
                   ) : null}
                   {m.error && (
-                    <p className="dp-mono mt-2 text-[11.5px]" style={{ color: "var(--dp-red)" }}>
+                    <p className="rc-mono mt-2 text-[11.5px]" style={{ color: "var(--rc-red)" }}>
                       ⚠ {m.error}
                     </p>
                   )}
                 </>
               )}
-              <p className="dp-mono mt-1.5 text-right text-[10px] text-[var(--dp-ink-faint)]">
+              <p className="rc-mono mt-1.5 text-right text-[10px] text-[var(--rc-ink-faint)]">
                 {formatDateTime(m.at)}
               </p>
             </div>
@@ -316,7 +316,7 @@ export function ChatPanel({
       </div>
 
       <form
-        className="mt-4 flex items-end gap-2 border-t border-[var(--dp-line)] pt-4"
+        className="mt-4 flex items-end gap-2 border-t border-[var(--rc-line)] pt-4"
         onSubmit={(e) => {
           e.preventDefault();
           void send(input);

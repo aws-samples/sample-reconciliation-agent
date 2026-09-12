@@ -77,8 +77,8 @@ async function expectFailure(text: string | RegExp) {
   const failure = await screen.findByRole("alert");
   expect(failure).toHaveAttribute("data-tone", "error");
   expect(failure).toHaveTextContent(text);
-  expect(failure.style.color).toContain("--dp-red");
-  expect(failure.style.color).not.toContain("--dp-cyan");
+  expect(failure.style.color).toContain("--rc-red");
+  expect(failure.style.color).not.toContain("--rc-cyan");
   expect(screen.queryByRole("status")).toBeNull();
 }
 
@@ -87,7 +87,7 @@ async function expectSuccess(text: string | RegExp) {
   const success = await screen.findByRole("status");
   expect(success).toHaveAttribute("data-tone", "success");
   expect(success).toHaveTextContent(text);
-  expect(success.style.color).toContain("--dp-cyan");
+  expect(success.style.color).toContain("--rc-cyan");
   expect(screen.queryByRole("alert")).toBeNull();
 }
 

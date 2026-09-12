@@ -12,7 +12,7 @@ import {
   Panel,
   Placeholder,
   type ActionOutcome,
-} from "@/components/pipeline/ui";
+} from "@/components/app-ui/ui";
 
 // The parsing agent's system prompt: how it approaches an email before any skill is applied. Stored
 // in S3 and read on every run, so an edit applies without a redeploy.
@@ -53,15 +53,15 @@ export default function ParserPromptPage() {
       <div className="flex items-center justify-between">
         <Link
           href="/pipeline/skills"
-          className="dp-mono text-[12px] uppercase tracking-[0.14em] text-[var(--dp-ink-faint)] hover:text-[var(--dp-ink)]"
+          className="rc-mono text-[12px] uppercase tracking-[0.14em] text-[var(--rc-ink-faint)] hover:text-[var(--rc-ink)]"
         >
           ← Skills
         </Link>
-        <span className="dp-mono text-[11px] text-[var(--dp-ink-faint)]">prompts/parser-system.md</span>
+        <span className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">prompts/parser-system.md</span>
       </div>
       <header>
         <Eyebrow>{isAdmin ? "Parsing agent · system prompt · applies on the next run" : "Parsing agent · system prompt · read-only"}</Eyebrow>
-        <h1 className="dp-display mt-2 text-[34px] font-black leading-none text-[var(--dp-ink)]">
+        <h1 className="rc-display mt-2 text-[34px] font-black leading-none text-[var(--rc-ink)]">
           Parser prompt
         </h1>
       </header>
@@ -73,7 +73,7 @@ export default function ParserPromptPage() {
       ) : content === null ? (
         <Placeholder kind="loading">◆ loading the parser prompt…</Placeholder>
       ) : (
-        <Panel className="dp-rise p-5">
+        <Panel className="rc-rise p-5">
           <textarea
             aria-label="Parser system prompt"
             value={content}

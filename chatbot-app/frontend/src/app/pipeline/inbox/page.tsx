@@ -6,15 +6,11 @@ import { useRouter } from "next/navigation";
 import { listEmails } from "@/lib/pipelineApi";
 import type { EmailRecord } from "@/lib/pipeline/types";
 import { usePipelineSubject } from "@/hooks/usePipelineSubject";
-import { DataTable, type DataTableColumn } from "@/components/pipeline/DataTable";
+import { DataTable, type DataTableColumn } from "@/components/app-ui/DataTable";
 import { SimulateEmailModal } from "@/components/pipeline/SimulateEmailModal";
 import { formatDateTime, sourceLabel } from "@/components/pipeline/format";
-import {
-  BTN_PRIMARY,
-  Eyebrow,
-  Placeholder,
-  StatusPill,
-} from "@/components/pipeline/ui";
+import { BTN_PRIMARY, Eyebrow, Placeholder } from "@/components/app-ui/ui";
+import { StatusPill } from "@/components/pipeline/ui";
 
 /** How often to re-read the list while any row is still being parsed. */
 const POLL_MS = 3000;
@@ -75,7 +71,7 @@ export default function InboxPage() {
         width: "1fr",
         sortValue: (e) => e.source_kind,
         cell: (e) => (
-          <span className="dp-mono text-[12px] text-[var(--dp-ink-dim)]">
+          <span className="rc-mono text-[12px] text-[var(--rc-ink-dim)]">
             {sourceLabel(e.source_kind)}
           </span>
         ),
@@ -86,7 +82,7 @@ export default function InboxPage() {
         width: "3fr",
         sortValue: (e) => e.subject,
         cell: (e) => (
-          <span className="block truncate text-[13px] text-[var(--dp-ink)]" title={e.subject}>
+          <span className="block truncate text-[13px] text-[var(--rc-ink)]" title={e.subject}>
             {e.subject}
           </span>
         ),
@@ -97,7 +93,7 @@ export default function InboxPage() {
         width: "1.2fr",
         sortValue: (e) => e.sent,
         cell: (e) => (
-          <span className="dp-mono dp-tnum text-[12px] text-[var(--dp-ink-dim)]">
+          <span className="rc-mono rc-tnum text-[12px] text-[var(--rc-ink-dim)]">
             {formatDateTime(e.sent)}
           </span>
         ),
@@ -109,7 +105,7 @@ export default function InboxPage() {
         defaultHidden: true,
         sortValue: (e) => e.received_at,
         cell: (e) => (
-          <span className="dp-mono dp-tnum text-[12px] text-[var(--dp-ink-dim)]">
+          <span className="rc-mono rc-tnum text-[12px] text-[var(--rc-ink-dim)]">
             {formatDateTime(e.received_at)}
           </span>
         ),
@@ -125,12 +121,12 @@ export default function InboxPage() {
               href={`/pipeline/deals/${encodeURIComponent(e.deal_id)}`}
               // The row itself opens the email; the link must not also do that.
               onClick={(ev) => ev.stopPropagation()}
-              className="dp-mono text-[12px] text-[var(--dp-cyan)] hover:underline"
+              className="rc-mono text-[12px] text-[var(--rc-cyan)] hover:underline"
             >
               open deal →
             </Link>
           ) : (
-            <span className="dp-mono text-[12px] text-[var(--dp-ink-faint)]">—</span>
+            <span className="rc-mono text-[12px] text-[var(--rc-ink-faint)]">—</span>
           ),
       },
       {
@@ -140,7 +136,7 @@ export default function InboxPage() {
         // resolves differently in each — see `DataTableColumn.width`.
         width: "1rem",
         header: "",
-        cell: () => <span className="dp-mono text-[16px] text-[var(--dp-ink-faint)]">→</span>,
+        cell: () => <span className="rc-mono text-[16px] text-[var(--rc-ink-faint)]">→</span>,
       },
     ],
     [],
@@ -151,13 +147,13 @@ export default function InboxPage() {
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <Eyebrow>Deal emails · received → parsed → staged</Eyebrow>
-          <h1 className="dp-display mt-2 text-[34px] font-black leading-none text-[var(--dp-ink)]">
+          <h1 className="rc-display mt-2 text-[34px] font-black leading-none text-[var(--rc-ink)]">
             Inbox
           </h1>
         </div>
         <div className="flex items-center gap-4">
           {emails && (
-            <span className="dp-mono dp-tnum text-[13px] text-[var(--dp-ink-dim)]">
+            <span className="rc-mono rc-tnum text-[13px] text-[var(--rc-ink-dim)]">
               {emails.length} email{emails.length === 1 ? "" : "s"}
               {polling ? " · parsing…" : ""}
             </span>
@@ -178,6 +174,7 @@ export default function InboxPage() {
         </Placeholder>
       ) : (
         <DataTable
+          appId="pipeline"
           tableId="inbox"
           sub={subject}
           columns={columns}

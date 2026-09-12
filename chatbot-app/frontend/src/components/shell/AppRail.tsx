@@ -33,7 +33,7 @@ import { cn } from "@/lib/utils";
 // footer and sign-out that used to live in each app's own header (those stay where they are; the rail is
 // additive so neither app's layout had to change).
 //
-// Deliberately neutral. Each app themes itself under `.recon-root` / `.pipeline-root`; the rail uses the
+// Deliberately neutral. Each app renders under `.app-root` (see app-theme.css); the rail uses the
 // `--shell-*` variables from globals.css only, so it reads the same whichever app is open.
 
 /** Icon per application. Registered here, not in apps.ts, so the registry stays free of React. */

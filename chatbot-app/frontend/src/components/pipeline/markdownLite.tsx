@@ -95,7 +95,7 @@ export function renderInline(text: string): ReactNode[] {
 export function MarkdownLite({ text }: { text: string }) {
   const blocks = parseBlocks(text);
   return (
-    <div className="dp-prose text-[13px] leading-relaxed text-[var(--dp-ink)]">
+    <div className="rc-prose text-[13px] leading-relaxed text-[var(--rc-ink)]">
       {blocks.map((b, i) => {
         switch (b.kind) {
           case "pre":

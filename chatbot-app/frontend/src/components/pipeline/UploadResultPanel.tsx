@@ -3,7 +3,7 @@
 import Link from "next/link";
 import type { UploadResult } from "@/lib/pipeline/types";
 import { formatDateTime } from "@/components/pipeline/format";
-import { BTN_PRIMARY, Eyebrow, Panel } from "@/components/pipeline/ui";
+import { BTN_PRIMARY, Eyebrow, Panel } from "@/components/app-ui/ui";
 
 /**
  * What the mock OMS said about the last upload attempt.
@@ -20,36 +20,36 @@ export function UploadResultPanel({
   dealId: string;
 }) {
   return (
-    <Panel className="dp-rise p-5">
+    <Panel className="rc-rise p-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <Eyebrow>OMS upload · last attempt</Eyebrow>
         {upload && (
-          <span className="dp-mono text-[11px] text-[var(--dp-ink-faint)]">
+          <span className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">
             {formatDateTime(upload.attempted_at)} · validator {upload.validator_version}
           </span>
         )}
       </div>
 
       {!upload ? (
-        <p className="dp-mono mt-3 text-[12px] text-[var(--dp-ink-faint)]">
+        <p className="rc-mono mt-3 text-[12px] text-[var(--rc-ink-faint)]">
           ◇ not uploaded yet — approve the deal to send the staging file to the OMS
         </p>
       ) : upload.accepted ? (
         <div className="mt-3">
-          <p className="dp-mono text-[13px]" style={{ color: "var(--dp-green)" }}>
+          <p className="rc-mono text-[13px]" style={{ color: "var(--rc-green)" }}>
             ✓ accepted
           </p>
-          <p className="dp-mono mt-1 text-[12px] text-[var(--dp-ink-dim)]">
-            staged at <span className="text-[var(--dp-ink)]">{upload.staging_key ?? "—"}</span>
+          <p className="rc-mono mt-1 text-[12px] text-[var(--rc-ink-dim)]">
+            staged at <span className="text-[var(--rc-ink)]">{upload.staging_key ?? "—"}</span>
           </p>
         </div>
       ) : (
         <div className="mt-3 space-y-3">
-          <p className="dp-mono text-[13px]" style={{ color: "var(--dp-red)" }}>
+          <p className="rc-mono text-[13px]" style={{ color: "var(--rc-red)" }}>
             ✕ rejected — {upload.errors.length} error{upload.errors.length === 1 ? "" : "s"}
           </p>
-          <div className="overflow-hidden rounded border border-[var(--dp-line)]">
-            <div className="dp-eyebrow grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,2.4fr)] gap-3 border-b border-[var(--dp-line)] bg-[var(--dp-line-soft)]/40 px-3 py-2">
+          <div className="overflow-hidden rounded border border-[var(--rc-line)]">
+            <div className="rc-eyebrow grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,2.4fr)] gap-3 border-b border-[var(--rc-line)] bg-[var(--rc-line-soft)]/40 px-3 py-2">
               <span>Code</span>
               <span>Field</span>
               <span>Message</span>
@@ -57,19 +57,19 @@ export function UploadResultPanel({
             {upload.errors.map((e, i) => (
               <div
                 key={`${e.code}-${i}`}
-                className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,2.4fr)] gap-3 border-b border-[var(--dp-line-soft)] px-3 py-2 last:border-0"
+                className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,2.4fr)] gap-3 border-b border-[var(--rc-line-soft)] px-3 py-2 last:border-0"
               >
-                <span className="dp-mono break-all text-[11.5px]" style={{ color: "var(--dp-red)" }}>
+                <span className="rc-mono break-all text-[11.5px]" style={{ color: "var(--rc-red)" }}>
                   {e.code}
                 </span>
-                <span className="dp-mono break-all text-[11.5px] text-[var(--dp-ink-dim)]">
+                <span className="rc-mono break-all text-[11.5px] text-[var(--rc-ink-dim)]">
                   {e.field ?? "—"}
                 </span>
-                <span className="text-[12px] leading-relaxed text-[var(--dp-ink)]">
+                <span className="text-[12px] leading-relaxed text-[var(--rc-ink)]">
                   {e.message}
                   {e.hint && (
-                    <span className="mt-1 block text-[11.5px] text-[var(--dp-ink-dim)]">
-                      <span className="dp-eyebrow mr-2">hint</span>
+                    <span className="mt-1 block text-[11.5px] text-[var(--rc-ink-dim)]">
+                      <span className="rc-eyebrow mr-2">hint</span>
                       {e.hint}
                     </span>
                   )}

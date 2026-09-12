@@ -3,11 +3,8 @@
 import { useState } from "react";
 import type { FieldEvidence, FieldValues, OmsFieldDef } from "@/lib/pipeline/types";
 import { fieldsBySection, formatHint } from "@/lib/pipeline/omsSchema";
-import {
-  ConfidenceChip,
-  Disclosure,
-  INPUT_CLASS,
-} from "@/components/pipeline/ui";
+import { Disclosure, INPUT_CLASS } from "@/components/app-ui/ui";
+import { ConfidenceChip } from "@/components/pipeline/ui";
 
 // The review surface: every OMS column, grouped the way the OMS groups them, with the parser's value,
 // the evidence behind it, and — in edit mode — a control shaped by the column's type. Validation is
@@ -22,24 +19,24 @@ function EvidenceNote({ evidence }: { evidence: FieldEvidence }) {
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        className="dp-mono text-[10.5px] uppercase tracking-[0.08em] text-[var(--dp-ink-faint)] hover:text-[var(--dp-ink)]"
+        className="rc-mono text-[10.5px] uppercase tracking-[0.08em] text-[var(--rc-ink-faint)] hover:text-[var(--rc-ink)]"
       >
         {open ? "▾ hide evidence" : "▸ evidence"}
       </button>
       {open && (
-        <div className="mt-1 space-y-1.5 rounded bg-[var(--dp-panel-2)] p-3">
+        <div className="mt-1 space-y-1.5 rounded bg-[var(--rc-panel-2)] p-3">
           {evidence.excerpt ? (
-            <blockquote className="dp-mono whitespace-pre-wrap border-l-2 border-[var(--dp-cyan)] pl-3 text-[11.5px] leading-relaxed text-[var(--dp-ink-dim)]">
+            <blockquote className="rc-mono whitespace-pre-wrap border-l-2 border-[var(--rc-cyan)] pl-3 text-[11.5px] leading-relaxed text-[var(--rc-ink-dim)]">
               {evidence.excerpt}
             </blockquote>
           ) : (
-            <p className="dp-mono text-[11px] text-[var(--dp-ink-faint)]">
+            <p className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">
               no excerpt — the value was inferred rather than read
             </p>
           )}
           {evidence.rule && (
-            <p className="text-[12px] leading-relaxed text-[var(--dp-ink)]">
-              <span className="dp-eyebrow mr-2">rule</span>
+            <p className="text-[12px] leading-relaxed text-[var(--rc-ink)]">
+              <span className="rc-eyebrow mr-2">rule</span>
               {evidence.rule}
             </p>
           )}
@@ -66,7 +63,7 @@ function FieldInput({
   invalid: boolean;
   onChange: (value: string) => void;
 }) {
-  const style = invalid ? { borderColor: "var(--dp-red)" } : undefined;
+  const style = invalid ? { borderColor: "var(--rc-red)" } : undefined;
   const label = def.label;
   if (def.type === "enum" || def.type === "boolean") {
     const options = def.type === "boolean" ? ["Yes", "No"] : (def.values ?? []);
@@ -130,20 +127,20 @@ export function DealFieldGrid({
             // desk fields) stay folded because they are blank by design at this stage.
             defaultOpen={filled > 0 || broken > 0}
             summary={
-              <span className="dp-mono flex items-baseline gap-3 text-[12px]">
-                <span className="text-[var(--dp-ink)]">{section}</span>
-                <span className="text-[var(--dp-ink-faint)]">
+              <span className="rc-mono flex items-baseline gap-3 text-[12px]">
+                <span className="text-[var(--rc-ink)]">{section}</span>
+                <span className="text-[var(--rc-ink-faint)]">
                   {filled}/{defs.length} filled
                 </span>
                 {broken > 0 && (
-                  <span style={{ color: "var(--dp-red)" }}>
+                  <span style={{ color: "var(--rc-red)" }}>
                     {broken} problem{broken === 1 ? "" : "s"}
                   </span>
                 )}
               </span>
             }
           >
-            <div className="divide-y divide-[var(--dp-line-soft)]">
+            <div className="divide-y divide-[var(--rc-line-soft)]">
               {defs.map((def) => {
                 const value = fields[def.key] ?? "";
                 const changed = value !== (original[def.key] ?? "");
@@ -156,16 +153,16 @@ export function DealFieldGrid({
                     data-field={def.key}
                   >
                     <div className="pt-1.5">
-                      <div className="dp-mono text-[11px] text-[var(--dp-ink-dim)]" title={def.key}>
+                      <div className="rc-mono text-[11px] text-[var(--rc-ink-dim)]" title={def.key}>
                         {def.label}
                         {def.required && (
-                          <span className="ml-1 text-[var(--dp-amber)]" title="required by the OMS">
+                          <span className="ml-1 text-[var(--rc-amber)]" title="required by the OMS">
                             *
                           </span>
                         )}
                       </div>
                       {def.notes && (
-                        <div className="mt-0.5 text-[10.5px] leading-snug text-[var(--dp-ink-faint)]">
+                        <div className="mt-0.5 text-[10.5px] leading-snug text-[var(--rc-ink-faint)]">
                           {def.notes}
                         </div>
                       )}
@@ -180,14 +177,14 @@ export function DealFieldGrid({
                         />
                       ) : (
                         <div
-                          className="dp-mono break-words py-1.5 text-[12.5px]"
-                          style={{ color: value ? "var(--dp-ink)" : "var(--dp-ink-faint)" }}
+                          className="rc-mono break-words py-1.5 text-[12.5px]"
+                          style={{ color: value ? "var(--rc-ink)" : "var(--rc-ink-faint)" }}
                         >
                           {value || "—"}
                         </div>
                       )}
                       {problem && (
-                        <p role="alert" className="dp-mono mt-1 text-[11px]" style={{ color: "var(--dp-red)" }}>
+                        <p role="alert" className="rc-mono mt-1 text-[11px]" style={{ color: "var(--rc-red)" }}>
                           {problem}
                         </p>
                       )}
@@ -195,8 +192,8 @@ export function DealFieldGrid({
                     <div className="flex items-center gap-1.5 pt-1.5">
                       {changed && (
                         <span
-                          className="dp-chip"
-                          style={{ color: "var(--dp-violet)" }}
+                          className="rc-chip"
+                          style={{ color: "var(--rc-violet)" }}
                           title={`as parsed: ${original[def.key] || "(blank)"}`}
                           data-changed="true"
                         >

@@ -26,16 +26,16 @@ import {
   Modal,
   Panel,
   Placeholder,
-  StatusPill,
-} from "@/components/pipeline/ui";
+} from "@/components/app-ui/ui";
+import { StatusPill } from "@/components/pipeline/ui";
 
 const HISTORY_COLOR: Record<string, string> = {
-  STAGED: "var(--dp-cyan)",
-  EDITED: "var(--dp-violet)",
-  APPROVED: "var(--dp-violet)",
-  UPLOAD_ACCEPTED: "var(--dp-green)",
-  UPLOAD_REJECTED: "var(--dp-red)",
-  REJECTED: "var(--dp-red)",
+  STAGED: "var(--rc-cyan)",
+  EDITED: "var(--rc-violet)",
+  APPROVED: "var(--rc-violet)",
+  UPLOAD_ACCEPTED: "var(--rc-green)",
+  UPLOAD_REJECTED: "var(--rc-red)",
+  REJECTED: "var(--rc-red)",
 };
 
 /** Whether a person can still act on the deal: approve, reject or edit. */
@@ -128,27 +128,27 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
       <div className="flex items-center justify-between">
         <Link
           href="/pipeline/deals"
-          className="dp-mono text-[12px] uppercase tracking-[0.14em] text-[var(--dp-ink-faint)] hover:text-[var(--dp-ink)]"
+          className="rc-mono text-[12px] uppercase tracking-[0.14em] text-[var(--rc-ink-faint)] hover:text-[var(--rc-ink)]"
         >
           ← Deals
         </Link>
-        <span className="dp-mono text-[11px] text-[var(--dp-ink-faint)]">{deal.deal_id}</span>
+        <span className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">{deal.deal_id}</span>
       </div>
 
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <Eyebrow>Deal review</Eyebrow>
           <div className="mt-2 flex flex-wrap items-center gap-4">
-            <h1 className="dp-display text-[30px] font-black leading-none text-[var(--dp-ink)]">
+            <h1 className="rc-display text-[30px] font-black leading-none text-[var(--rc-ink)]">
               {deal.opportunity_name || "Untitled deal"}
             </h1>
             <StatusPill status={deal.status} />
           </div>
-          <p className="dp-mono mt-2 text-[11.5px] text-[var(--dp-ink-faint)]">
+          <p className="rc-mono mt-2 text-[11.5px] text-[var(--rc-ink-faint)]">
             from{" "}
             <Link
               href={`/pipeline/inbox/${encodeURIComponent(deal.email_id)}`}
-              className="text-[var(--dp-cyan)] hover:underline"
+              className="text-[var(--rc-cyan)] hover:underline"
             >
               email {deal.email_id}
             </Link>
@@ -156,7 +156,7 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
             {edited.length > 0 && (
               <>
                 {" · "}
-                <span className="text-[var(--dp-violet)]">
+                <span className="text-[var(--rc-violet)]">
                   {edited.length} field{edited.length === 1 ? "" : "s"} edited since parsing
                 </span>
               </>
@@ -222,13 +222,13 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
       </header>
 
       {open && !isAdmin && (
-        <p className="dp-mono text-[11.5px] text-[var(--dp-ink-faint)]">
+        <p className="rc-mono text-[11.5px] text-[var(--rc-ink-faint)]">
           Approving or rejecting requires membership of the admin group; fields can still be edited.
         </p>
       )}
       {actionError && <Placeholder kind="error">{actionError}</Placeholder>}
       {editing && problemCount > 0 && (
-        <p className="dp-mono text-[12px]" style={{ color: "var(--dp-red)" }}>
+        <p className="rc-mono text-[12px]" style={{ color: "var(--rc-red)" }}>
           {problemCount} field{problemCount === 1 ? "" : "s"} would be rejected by the OMS — fix
           them to save.
         </p>
@@ -250,14 +250,14 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
         <div className="space-y-6">
           <UploadResultPanel upload={deal.upload} dealId={deal.deal_id} />
 
-          <Panel className="dp-rise p-5">
+          <Panel className="rc-rise p-5">
             <Eyebrow>Staging CSV · {editing ? "preview of the draft" : deal.csv_key}</Eyebrow>
-            <pre className="dp-mono mt-3 max-h-[260px] overflow-auto whitespace-pre rounded bg-[var(--dp-panel-2)] p-3 text-[11px] leading-relaxed text-[var(--dp-ink)]">
+            <pre className="rc-mono mt-3 max-h-[260px] overflow-auto whitespace-pre rounded bg-[var(--rc-panel-2)] p-3 text-[11px] leading-relaxed text-[var(--rc-ink)]">
               {csv}
             </pre>
           </Panel>
 
-          <Panel className="dp-rise p-5">
+          <Panel className="rc-rise p-5">
             <Eyebrow>History</Eyebrow>
             <ol className="mt-3 space-y-3">
               {[...deal.history].reverse().map((h, i) => (
@@ -265,20 +265,20 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
                   <span
                     className="mt-1.5 inline-block h-2 w-2 rounded-full"
                     style={{
-                      background: HISTORY_COLOR[h.action] ?? "var(--dp-ink-faint)",
+                      background: HISTORY_COLOR[h.action] ?? "var(--rc-ink-faint)",
                       boxShadow: `0 0 6px ${HISTORY_COLOR[h.action] ?? "transparent"}`,
                     }}
                   />
                   <div>
-                    <div className="dp-mono text-[12px] text-[var(--dp-ink)]">
+                    <div className="rc-mono text-[12px] text-[var(--rc-ink)]">
                       {h.action.replace(/_/g, " ")}
-                      <span className="text-[var(--dp-ink-faint)]"> · {h.actor}</span>
+                      <span className="text-[var(--rc-ink-faint)]"> · {h.actor}</span>
                     </div>
-                    <div className="dp-mono text-[10.5px] text-[var(--dp-ink-faint)]">
+                    <div className="rc-mono text-[10.5px] text-[var(--rc-ink-faint)]">
                       {formatDateTime(h.at)}
                     </div>
                     {h.detail && (
-                      <div className="mt-1 text-[12px] leading-relaxed text-[var(--dp-ink-dim)]">
+                      <div className="mt-1 text-[12px] leading-relaxed text-[var(--rc-ink-dim)]">
                         {h.detail}
                       </div>
                     )}
@@ -290,9 +290,9 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
 
           <Disclosure
             summary={
-              <span className="dp-mono text-[12px] text-[var(--dp-ink)]">
+              <span className="rc-mono text-[12px] text-[var(--rc-ink)]">
                 Parse context
-                <span className="text-[var(--dp-ink-faint)]">
+                <span className="text-[var(--rc-ink-faint)]">
                   {" "}· {deal.assumptions.length} assumption{deal.assumptions.length === 1 ? "" : "s"}
                   {" "}· {deal.memory_hits.length} memor{deal.memory_hits.length === 1 ? "y" : "ies"} recalled
                 </span>
@@ -302,18 +302,18 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
             <div className="space-y-3 p-4">
               <div>
                 <Eyebrow>Skills</Eyebrow>
-                <p className="dp-mono mt-1 text-[12px] text-[var(--dp-ink)]">
+                <p className="rc-mono mt-1 text-[12px] text-[var(--rc-ink)]">
                   {deal.skills_used.join(", ") || "—"}
                 </p>
               </div>
               <div>
                 <Eyebrow>Memories recalled</Eyebrow>
                 {deal.memory_hits.length === 0 ? (
-                  <p className="dp-mono mt-1 text-[12px] text-[var(--dp-ink-faint)]">none</p>
+                  <p className="rc-mono mt-1 text-[12px] text-[var(--rc-ink-faint)]">none</p>
                 ) : (
                   <ul className="mt-1 space-y-1">
                     {deal.memory_hits.map((m, i) => (
-                      <li key={m.record_id ?? i} className="text-[12px] leading-relaxed text-[var(--dp-ink)]">
+                      <li key={m.record_id ?? i} className="text-[12px] leading-relaxed text-[var(--rc-ink)]">
                         {m.text}
                       </li>
                     ))}
@@ -323,11 +323,11 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
               <div>
                 <Eyebrow>Assumptions</Eyebrow>
                 {deal.assumptions.length === 0 ? (
-                  <p className="dp-mono mt-1 text-[12px] text-[var(--dp-ink-faint)]">none</p>
+                  <p className="rc-mono mt-1 text-[12px] text-[var(--rc-ink-faint)]">none</p>
                 ) : (
                   <ul className="mt-1 space-y-1">
                     {deal.assumptions.map((a, i) => (
-                      <li key={i} className="border-l-2 border-[var(--dp-amber)] pl-3 text-[12px] leading-relaxed text-[var(--dp-ink)]">
+                      <li key={i} className="border-l-2 border-[var(--rc-amber)] pl-3 text-[12px] leading-relaxed text-[var(--rc-ink)]">
                         {a}
                       </li>
                     ))}

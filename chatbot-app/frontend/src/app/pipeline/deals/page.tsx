@@ -5,9 +5,10 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { listDeals } from "@/lib/pipelineApi";
 import type { DealRecord, DealStatus } from "@/lib/pipeline/types";
 import { usePipelineSubject } from "@/hooks/usePipelineSubject";
-import { DataTable, type DataTableColumn } from "@/components/pipeline/DataTable";
+import { DataTable, type DataTableColumn } from "@/components/app-ui/DataTable";
 import { formatDateTime } from "@/components/pipeline/format";
-import { Eyebrow, Placeholder, StatusPill } from "@/components/pipeline/ui";
+import { Eyebrow, Placeholder } from "@/components/app-ui/ui";
+import { StatusPill } from "@/components/pipeline/ui";
 
 // "ALL" first, then the lifecycle in order. UPLOAD_FAILED sits next to UPLOADED because that is the
 // pair the desk compares: what the OMS took and what it sent back.
@@ -24,7 +25,7 @@ const FILTERS: ("ALL" | DealStatus)[] = [
 function Cell({ text, title }: { text: string; title?: string }) {
   return (
     <span
-      className="dp-mono block truncate text-[12px] text-[var(--dp-ink-dim)]"
+      className="rc-mono block truncate text-[12px] text-[var(--rc-ink-dim)]"
       title={title ?? (text === "—" ? undefined : text)}
     >
       {text}
@@ -85,7 +86,7 @@ function DealsContent() {
         width: "2.2fr",
         sortValue: (d) => d.opportunity_name,
         cell: (d) => (
-          <span className="block truncate text-[13px] text-[var(--dp-ink)]" title={d.opportunity_name}>
+          <span className="block truncate text-[13px] text-[var(--rc-ink)]" title={d.opportunity_name}>
             {d.opportunity_name || "—"}
           </span>
         ),
@@ -158,13 +159,13 @@ function DealsContent() {
           !d.upload ? (
             <Cell text="—" />
           ) : d.upload.accepted ? (
-            <span className="dp-chip" style={{ color: "var(--dp-green)" }}>
+            <span className="rc-chip" style={{ color: "var(--rc-green)" }}>
               ✓ accepted
             </span>
           ) : (
             <span
-              className="dp-chip"
-              style={{ color: "var(--dp-red)" }}
+              className="rc-chip"
+              style={{ color: "var(--rc-red)" }}
               title={d.upload.errors.map((e) => e.code).join(", ")}
             >
               ✕ {d.upload.errors.length} error{d.upload.errors.length === 1 ? "" : "s"}
@@ -176,7 +177,7 @@ function DealsContent() {
         pinned: true,
         width: "1rem",
         header: "",
-        cell: () => <span className="dp-mono text-[16px] text-[var(--dp-ink-faint)]">→</span>,
+        cell: () => <span className="rc-mono text-[16px] text-[var(--rc-ink-faint)]">→</span>,
       },
     ],
     [],
@@ -187,12 +188,12 @@ function DealsContent() {
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <Eyebrow>Review · approve · upload to the OMS</Eyebrow>
-          <h1 className="dp-display mt-2 text-[34px] font-black leading-none text-[var(--dp-ink)]">
+          <h1 className="rc-display mt-2 text-[34px] font-black leading-none text-[var(--rc-ink)]">
             Deals
           </h1>
         </div>
         {deals && (
-          <span className="dp-mono dp-tnum text-[13px] text-[var(--dp-ink-dim)]">
+          <span className="rc-mono rc-tnum text-[13px] text-[var(--rc-ink-dim)]">
             {shown.length} of {deals.length}
           </span>
         )}
@@ -204,11 +205,11 @@ function DealsContent() {
             key={f}
             type="button"
             onClick={() => changeFilter(f)}
-            className="dp-mono rounded px-3 py-1 text-[11px] tracking-[0.06em]"
+            className="rc-mono rounded px-3 py-1 text-[11px] tracking-[0.06em]"
             style={{
-              color: f === filter ? "var(--dp-ink)" : "var(--dp-ink-faint)",
-              background: f === filter ? "var(--dp-panel-2)" : "transparent",
-              border: f === filter ? "1px solid var(--dp-cyan)" : "1px solid var(--dp-line)",
+              color: f === filter ? "var(--rc-ink)" : "var(--rc-ink-faint)",
+              background: f === filter ? "var(--rc-panel-2)" : "transparent",
+              border: f === filter ? "1px solid var(--rc-cyan)" : "1px solid var(--rc-line)",
             }}
           >
             {f.replace(/_/g, " ")}
@@ -228,6 +229,7 @@ function DealsContent() {
         </Placeholder>
       ) : (
         <DataTable
+          appId="pipeline"
           tableId="deals"
           sub={subject}
           columns={columns}

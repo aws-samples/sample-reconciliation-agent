@@ -15,21 +15,21 @@ export function LineDiff({ before, after }: { before: string; after: string }) {
 
   if (stats.added === 0 && stats.removed === 0)
     return (
-      <p className="dp-mono text-[12px] text-[var(--dp-ink-faint)]">
+      <p className="rc-mono text-[12px] text-[var(--rc-ink-faint)]">
         ◇ the proposed content is identical to the current skill
       </p>
     );
 
   return (
-    <div className="overflow-hidden rounded border border-[var(--dp-line)]">
-      <div className="dp-mono flex gap-4 border-b border-[var(--dp-line)] bg-[var(--dp-line-soft)]/40 px-3 py-1.5 text-[11px]">
-        <span style={{ color: "var(--dp-green)" }}>+{stats.added}</span>
-        <span style={{ color: "var(--dp-red)" }}>−{stats.removed}</span>
-        <span className="text-[var(--dp-ink-faint)]">{diff.length} lines</span>
+    <div className="overflow-hidden rounded border border-[var(--rc-line)]">
+      <div className="rc-mono flex gap-4 border-b border-[var(--rc-line)] bg-[var(--rc-line-soft)]/40 px-3 py-1.5 text-[11px]">
+        <span style={{ color: "var(--rc-green)" }}>+{stats.added}</span>
+        <span style={{ color: "var(--rc-red)" }}>−{stats.removed}</span>
+        <span className="text-[var(--rc-ink-faint)]">{diff.length} lines</span>
       </div>
-      <pre className="dp-mono max-h-[520px] overflow-auto py-2 text-[12px] leading-relaxed">
+      <pre className="rc-mono max-h-[520px] overflow-auto py-2 text-[12px] leading-relaxed">
         {diff.map((line, i) => (
-          <div key={i} className={`dp-diff-line ${line.kind}`} data-kind={line.kind}>
+          <div key={i} className={`rc-diff-line ${line.kind}`} data-kind={line.kind}>
             <span aria-hidden className="select-none text-right">
               {line.kind === "add" ? "+" : line.kind === "del" ? "−" : " "}
             </span>

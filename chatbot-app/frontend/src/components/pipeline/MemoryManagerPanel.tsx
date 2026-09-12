@@ -26,25 +26,25 @@ import {
   Panel,
   Placeholder,
   type ActionOutcome,
-} from "@/components/pipeline/ui";
+} from "@/components/app-ui/ui";
 
 // The situational tier of the learning loop, made visible. Records are what the parser recalls
 // before its first model call; the strategy card shows the extraction prompt that decides what
 // counts as a rule; the proposals count points at the other tier so the two are never confused.
 
 const STRATEGY_STATUS_COLOR: Record<string, string> = {
-  ACTIVE: "var(--dp-green)",
-  CREATING: "var(--dp-cyan)",
-  DELETING: "var(--dp-amber)",
-  FAILED: "var(--dp-red)",
+  ACTIVE: "var(--rc-green)",
+  CREATING: "var(--rc-cyan)",
+  DELETING: "var(--rc-amber)",
+  FAILED: "var(--rc-red)",
 };
 
 /** One row of key/value metadata inside an expanded strategy. */
 function Field({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <div className="dp-eyebrow">{label}</div>
-      <div className="dp-mono mt-1 break-all text-[12px] text-[var(--dp-ink)]">{value}</div>
+      <div className="rc-eyebrow">{label}</div>
+      <div className="rc-mono mt-1 break-all text-[12px] text-[var(--rc-ink)]">{value}</div>
     </div>
   );
 }
@@ -66,16 +66,16 @@ function StrategyCard({ strategy }: { strategy: MemoryStrategyInfo }) {
   return (
     <Disclosure
       summary={
-        <span className="dp-mono flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[12px]">
-          <span className="text-[var(--dp-ink)]">{strategy.name}</span>
-          <span className="text-[var(--dp-ink-faint)]">
+        <span className="rc-mono flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[12px]">
+          <span className="text-[var(--rc-ink)]">{strategy.name}</span>
+          <span className="text-[var(--rc-ink-faint)]">
             {strategy.configurationType
               ? `${strategy.type} · ${strategy.configurationType}`
               : strategy.type}
           </span>
           <span
             className="text-[11px] uppercase tracking-[0.1em]"
-            style={{ color: STRATEGY_STATUS_COLOR[strategy.status] ?? "var(--dp-ink-dim)" }}
+            style={{ color: STRATEGY_STATUS_COLOR[strategy.status] ?? "var(--rc-ink-dim)" }}
           >
             {strategy.status}
           </span>
@@ -100,8 +100,8 @@ function StrategyCard({ strategy }: { strategy: MemoryStrategyInfo }) {
               <Eyebrow>
                 {p.label} · {p.override!.kind}
               </Eyebrow>
-              <pre className="mt-2 max-h-[320px] overflow-auto whitespace-pre-wrap rounded bg-[var(--dp-panel-2)] p-4 text-[12px] leading-relaxed text-[var(--dp-ink)]">
-                <code className="dp-mono">{p.override!.appendToPrompt}</code>
+              <pre className="mt-2 max-h-[320px] overflow-auto whitespace-pre-wrap rounded bg-[var(--rc-panel-2)] p-4 text-[12px] leading-relaxed text-[var(--rc-ink)]">
+                <code className="rc-mono">{p.override!.appendToPrompt}</code>
               </pre>
             </div>
           ))
@@ -210,11 +210,11 @@ export function MemoryManagerPanel({
   };
 
   return (
-    <Panel className="dp-rise space-y-5 p-5">
+    <Panel className="rc-rise space-y-5 p-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <Eyebrow>Memory manager · situational rules</Eyebrow>
-          <p className="mt-1 text-[12px] leading-relaxed text-[var(--dp-ink-dim)]">
+          <p className="mt-1 text-[12px] leading-relaxed text-[var(--rc-ink-dim)]">
             Edge cases the parser recalls before reading an email. Universal rules belong in a skill
             instead — see the proposals.
           </p>
@@ -223,7 +223,7 @@ export function MemoryManagerPanel({
           <Link href="/pipeline/skills/proposals" className={BTN_QUIET}>
             Proposals
             {pendingProposals !== null && pendingProposals > 0 && (
-              <span className="ml-2 text-[var(--dp-amber)]">{pendingProposals} pending</span>
+              <span className="ml-2 text-[var(--rc-amber)]">{pendingProposals} pending</span>
             )}
           </Link>
           <button type="button" onClick={load} className={BTN_LINK} title="Reload records, strategy and proposals">
@@ -234,11 +234,11 @@ export function MemoryManagerPanel({
 
       {/* The strategy that produced the records. Read from the memory itself so it cannot drift. */}
       {strategyError ? (
-        <p className="dp-mono text-[11px] text-[var(--dp-amber)]">
+        <p className="rc-mono text-[11px] text-[var(--rc-amber)]">
           Could not read the memory strategy — {strategyError}
         </p>
       ) : strategy && !strategy.configured ? (
-        <p className="dp-mono text-[11px] text-[var(--dp-ink-faint)]">
+        <p className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">
           KNOWLEDGE_MEMORY_ID not configured — no strategy to show.
         </p>
       ) : strategy && strategy.strategies.length > 0 ? (
@@ -257,21 +257,21 @@ export function MemoryManagerPanel({
       <div className="space-y-2" data-testid="memory-records">
         <div className="flex items-center justify-between">
           <Eyebrow>Consolidated records</Eyebrow>
-          {records && <span className="dp-mono text-[11px] text-[var(--dp-ink-faint)]">{records.length}</span>}
+          {records && <span className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">{records.length}</span>}
         </div>
         {recordsError && (
-          <p className="dp-mono text-[11px] text-[var(--dp-amber)]">Could not load records — {recordsError}</p>
+          <p className="rc-mono text-[11px] text-[var(--rc-amber)]">Could not load records — {recordsError}</p>
         )}
         {!records ? (
           <Placeholder kind="loading">◆ loading memory…</Placeholder>
         ) : records.length === 0 ? (
           <Placeholder kind="empty">◇ no consolidated memory yet</Placeholder>
         ) : (
-          <div className="overflow-hidden rounded border border-[var(--dp-line)]">
+          <div className="overflow-hidden rounded border border-[var(--rc-line)]">
             {records.map((r) => (
               <label
                 key={r.id}
-                className="flex items-start gap-3 border-b border-[var(--dp-line-soft)] px-3 py-2.5 last:border-0 hover:bg-[var(--dp-panel-2)]"
+                className="flex items-start gap-3 border-b border-[var(--rc-line-soft)] px-3 py-2.5 last:border-0 hover:bg-[var(--rc-panel-2)]"
               >
                 {isAdmin && (
                   <input
@@ -279,12 +279,12 @@ export function MemoryManagerPanel({
                     aria-label={`Select memory record ${r.id}`}
                     checked={selected.has(r.id)}
                     onChange={() => toggle(r.id)}
-                    className="mt-1 h-3.5 w-3.5 accent-[var(--dp-cyan)]"
+                    className="mt-1 h-3.5 w-3.5 accent-[var(--rc-cyan)]"
                   />
                 )}
                 <span className="min-w-0 flex-1">
-                  <span className="block text-[12.5px] leading-relaxed text-[var(--dp-ink)]">{r.content}</span>
-                  <span className="dp-mono mt-0.5 block text-[10.5px] text-[var(--dp-ink-faint)]">
+                  <span className="block text-[12.5px] leading-relaxed text-[var(--rc-ink)]">{r.content}</span>
+                  <span className="rc-mono mt-0.5 block text-[10.5px] text-[var(--rc-ink-faint)]">
                     {formatDateTime(r.createdAt)} · {r.namespace}
                   </span>
                 </span>
@@ -294,7 +294,7 @@ export function MemoryManagerPanel({
         )}
         {isAdmin && selected.size > 0 && (
           <div className="flex items-center gap-3">
-            <span className="dp-mono text-[12px] text-[var(--dp-ink)]">{selected.size} selected</span>
+            <span className="rc-mono text-[12px] text-[var(--rc-ink)]">{selected.size} selected</span>
             <button type="button" onClick={() => setConfirmDelete(true)} className={BTN_DANGER}>
               Delete selected
             </button>
@@ -311,7 +311,7 @@ export function MemoryManagerPanel({
       </div>
 
       {/* Manual add */}
-      <div className="space-y-2 border-t border-[var(--dp-line)] pt-4">
+      <div className="space-y-2 border-t border-[var(--rc-line)] pt-4">
         <Eyebrow>Add a rule</Eyebrow>
         <textarea
           aria-label="New memory rule"

@@ -508,9 +508,9 @@ div[style*="position: fixed"][style*="top: 0"][style*="right: 0"][style*="z-inde
 /* ============================================================================
    Console shell — the neutral frame (app rail, landing chooser, access panels)
    that sits around both applications.
-   Its own palette on purpose: the apps theme themselves under .recon-root and
-   .pipeline-root, and the shell must read the same whichever app is open, so it
-   never references --rc-* or --dp-*. Declared on :root rather than .dark because
+   Its own palette on purpose: the apps theme themselves under .app-root
+   (app-theme.css), and the shell must read the same whichever app is open, so it
+   never references --rc-*. Declared on :root rather than .dark because
    the shell is dark in both colour schemes.
    ============================================================================ */
 :root {

@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { getConfig, saveConfig } from "@/lib/pipelineApi";
 import { usePipelineSubject } from "@/hooks/usePipelineSubject";
-import { Eyebrow, Notice, Panel, Placeholder, type ActionOutcome } from "@/components/pipeline/ui";
+import { Eyebrow, Notice, Panel, Placeholder, type ActionOutcome } from "@/components/app-ui/ui";
 
 // A model id is one family plus one endpoint, composed rather than listed: the two are independent
 // choices with different consequences, and a flat list of six ids invites reading `global.` as a
@@ -63,11 +63,11 @@ function Choice<T extends string>({
           onClick={() => onChange(o.value)}
           disabled={disabled}
           title={o.hint ?? o.value}
-          className="dp-mono rounded px-3 py-2 text-[11px] uppercase tracking-[0.08em] disabled:opacity-40"
+          className="rc-mono rounded px-3 py-2 text-[11px] uppercase tracking-[0.08em] disabled:opacity-40"
           style={{
-            color: value === o.value ? "var(--dp-ink)" : "var(--dp-ink-faint)",
-            background: value === o.value ? "var(--dp-panel-2)" : "transparent",
-            border: value === o.value ? "1px solid var(--dp-cyan)" : "1px solid var(--dp-line)",
+            color: value === o.value ? "var(--rc-ink)" : "var(--rc-ink-faint)",
+            background: value === o.value ? "var(--rc-panel-2)" : "transparent",
+            border: value === o.value ? "1px solid var(--rc-cyan)" : "1px solid var(--rc-line)",
           }}
         >
           {o.label}
@@ -156,23 +156,23 @@ export default function ConfigPage() {
     <div className="space-y-8">
       <header>
         <Eyebrow>Pipeline configuration</Eyebrow>
-        <h1 className="dp-display mt-2 text-[34px] font-black leading-none text-[var(--dp-ink)]">
+        <h1 className="rc-display mt-2 text-[34px] font-black leading-none text-[var(--rc-ink)]">
           Configuration
         </h1>
       </header>
 
-      <Panel className="dp-rise p-6">
+      <Panel className="rc-rise p-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="max-w-xl">
-            <div className="dp-mono text-[15px] font-medium text-[var(--dp-ink)]">Parser model</div>
-            <p className="mt-2 text-[13px] leading-relaxed text-[var(--dp-ink-dim)]">
+            <div className="rc-mono text-[15px] font-medium text-[var(--rc-ink)]">Parser model</div>
+            <p className="mt-2 text-[13px] leading-relaxed text-[var(--rc-ink-dim)]">
               Which model the parsing agent invokes. Read from the SSM parameter on every run, so a
               change applies to the next email with no redeploy. The endpoint is a{" "}
               <strong>data-residency</strong> choice, not a speed one:{" "}
-              <span className="dp-mono">global</span> may serve the request from outside the US.
+              <span className="rc-mono">global</span> may serve the request from outside the US.
             </p>
             {!isAdmin && (
-              <p className="dp-mono mt-2 text-[11.5px] text-[var(--dp-ink-faint)]">
+              <p className="rc-mono mt-2 text-[11.5px] text-[var(--rc-ink-faint)]">
                 Changing it requires membership of the admin group; the controls below are read-only.
               </p>
             )}
@@ -188,47 +188,47 @@ export default function ConfigPage() {
               <Choice options={MODEL_ENDPOINTS} value={endpoint} onChange={setEndpoint} disabled={busy || !isAdmin} />
               {/* The resolved id, always visible: the two controls compose into it, so an operator who
                   cannot see the result cannot tell a family change from a residency change. */}
-              <span className="dp-mono text-[11px] text-[var(--dp-ink-faint)]">{pending}</span>
+              <span className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">{pending}</span>
               {isAdmin && dirty && pendingAllowed && (
                 <button
                   type="button"
                   onClick={apply}
                   disabled={busy}
-                  className="dp-mono rounded border border-[var(--dp-cyan)] bg-[var(--dp-panel-2)] px-3 py-2 text-[11px] uppercase tracking-[0.08em] text-[var(--dp-ink)] disabled:opacity-40"
+                  className="rc-mono rounded border border-[var(--rc-cyan)] bg-[var(--rc-panel-2)] px-3 py-2 text-[11px] uppercase tracking-[0.08em] text-[var(--rc-ink)] disabled:opacity-40"
                 >
                   {busy ? "Applying…" : "Apply"}
                 </button>
               )}
               {dirty && !pendingAllowed && (
-                <span className="dp-mono text-[11px] text-[var(--dp-amber)]">not an accepted combination</span>
+                <span className="rc-mono text-[11px] text-[var(--rc-amber)]">not an accepted combination</span>
               )}
             </div>
           )}
         </div>
         {loaded && modelId === null && (
-          <p className="dp-mono mt-3 text-[11px] text-[var(--dp-ink-faint)]">
+          <p className="rc-mono mt-3 text-[11px] text-[var(--rc-ink-faint)]">
             No selection recorded — the parser is using its deployed default, {DEFAULT_MODEL_ID}.
           </p>
         )}
         {loaded && !storedIsPreset && (
-          <p className="dp-mono mt-3 text-[11px] text-[var(--dp-amber)]">
+          <p className="rc-mono mt-3 text-[11px] text-[var(--rc-amber)]">
             The stored id, {modelId}, is not one of the presets above; applying a preset replaces it.
           </p>
         )}
         {loaded && consoleDefault && (
           <div
-            className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-[var(--dp-ink-faint)]"
+            className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-[var(--rc-ink-faint)]"
             data-testid="console-default-model"
           >
-            <span className="dp-mono">
-              Console default: <span className="text-[var(--dp-ink-dim)]">{consoleDefault}</span>
+            <span className="rc-mono">
+              Console default: <span className="text-[var(--rc-ink-dim)]">{consoleDefault}</span>
             </span>
             {isAdmin && (
               <button
                 type="button"
                 onClick={useConsoleDefault}
                 disabled={busy || pending === consoleDefault}
-                className="dp-mono rounded border border-[var(--dp-line)] px-3 py-1.5 text-[11px] uppercase tracking-[0.08em] text-[var(--dp-ink-dim)] hover:text-[var(--dp-ink)] disabled:opacity-40"
+                className="rc-mono rounded border border-[var(--rc-line)] px-3 py-1.5 text-[11px] uppercase tracking-[0.08em] text-[var(--rc-ink-dim)] hover:text-[var(--rc-ink)] disabled:opacity-40"
               >
                 Use console default
               </button>
@@ -242,19 +242,19 @@ export default function ConfigPage() {
         )}
       </Panel>
 
-      <Panel className="dp-rise p-6">
-        <div className="dp-mono text-[15px] font-medium text-[var(--dp-ink)]">Where the rules live</div>
-        <p className="mt-2 max-w-2xl text-[13px] leading-relaxed text-[var(--dp-ink-dim)]">
+      <Panel className="rc-rise p-6">
+        <div className="rc-mono text-[15px] font-medium text-[var(--rc-ink)]">Where the rules live</div>
+        <p className="mt-2 max-w-2xl text-[13px] leading-relaxed text-[var(--rc-ink-dim)]">
           The parser is shaped by three things, none of them configured here. Skills are markdown
-          files under <span className="dp-mono">skills/&lt;name&gt;/SKILL.md</span> in the assets
+          files under <span className="rc-mono">skills/&lt;name&gt;/SKILL.md</span> in the assets
           bucket, loaded on every run; the parser&rsquo;s system prompt is{" "}
-          <span className="dp-mono">prompts/parser-system.md</span> beside them; and situational rules
+          <span className="rc-mono">prompts/parser-system.md</span> beside them; and situational rules
           are records in the knowledge memory. All three are edited from the{" "}
-          <Link href="/pipeline/skills" className="text-[var(--dp-cyan)] hover:underline">
+          <Link href="/pipeline/skills" className="text-[var(--rc-cyan)] hover:underline">
             Skills
           </Link>{" "}
           and{" "}
-          <Link href="/pipeline/assistant" className="text-[var(--dp-cyan)] hover:underline">
+          <Link href="/pipeline/assistant" className="text-[var(--rc-cyan)] hover:underline">
             Assistant
           </Link>{" "}
           tabs, where each change is reviewed before it reaches the parser.

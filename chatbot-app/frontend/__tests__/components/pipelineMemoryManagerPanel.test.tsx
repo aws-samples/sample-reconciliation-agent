@@ -100,7 +100,7 @@ describe("MemoryManagerPanel", () => {
     const reason = await within(records).findByRole("alert");
     expect(reason).toHaveTextContent("Not deleted — mem-1: AccessDeniedException");
     expect(reason).toHaveAttribute("data-tone", "error");
-    expect(reason.style.color).toContain("--dp-red");
+    expect(reason.style.color).toContain("--rc-red");
     // The record the service refused is still listed and still selected, so the list stays truthful.
     expect(within(records).getByText(RECORD.content)).toBeTruthy();
     expect(screen.getByRole("checkbox", { name: "Select memory record mem-1" })).toBeChecked();
@@ -123,15 +123,15 @@ describe("MemoryManagerPanel", () => {
     const failure = await screen.findByRole("alert");
     expect(failure).toHaveAttribute("data-tone", "error");
     expect(failure).toHaveTextContent(/requires membership of the "deal-desk-admins" group/);
-    expect(failure.style.color).toContain("--dp-red");
-    expect(failure.style.color).not.toContain("--dp-cyan");
+    expect(failure.style.color).toContain("--rc-red");
+    expect(failure.style.color).not.toContain("--rc-cyan");
 
     // The text is still in the box after a failure, so the same click retries it.
     fireEvent.click(screen.getByRole("button", { name: "Save to memory" }));
     const success = await screen.findByRole("status");
     expect(success).toHaveAttribute("data-tone", "success");
     expect(success).toHaveTextContent(/^Saved\./);
-    expect(success.style.color).toContain("--dp-cyan");
+    expect(success.style.color).toContain("--rc-cyan");
     expect(screen.queryByRole("alert")).toBeNull();
   });
 });

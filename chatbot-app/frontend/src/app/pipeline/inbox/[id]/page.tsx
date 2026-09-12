@@ -6,7 +6,8 @@ import { getEmail, reparseEmail } from "@/lib/pipelineApi";
 import type { EmailRecord } from "@/lib/pipeline/types";
 import { EmailViewer } from "@/components/pipeline/EmailViewer";
 import { ParsedFieldsPanel } from "@/components/pipeline/ParsedFieldsPanel";
-import { Placeholder, StatusPill } from "@/components/pipeline/ui";
+import { Placeholder } from "@/components/app-ui/ui";
+import { StatusPill } from "@/components/pipeline/ui";
 
 /** How often to re-read the record while the parser is still running on it. */
 const POLL_MS = 3000;
@@ -63,14 +64,14 @@ export default function EmailDetailPage({ params }: { params: Promise<{ id: stri
       <div className="flex items-center justify-between">
         <Link
           href="/pipeline/inbox"
-          className="dp-mono text-[12px] uppercase tracking-[0.14em] text-[var(--dp-ink-faint)] hover:text-[var(--dp-ink)]"
+          className="rc-mono text-[12px] uppercase tracking-[0.14em] text-[var(--rc-ink-faint)] hover:text-[var(--rc-ink)]"
         >
           ← Inbox
         </Link>
-        <span className="dp-mono text-[11px] text-[var(--dp-ink-faint)]">{email.email_id}</span>
+        <span className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">{email.email_id}</span>
       </div>
       <header className="flex flex-wrap items-center gap-4">
-        <h1 className="dp-display text-[26px] font-black leading-tight text-[var(--dp-ink)]">
+        <h1 className="rc-display text-[26px] font-black leading-tight text-[var(--rc-ink)]">
           {email.subject}
         </h1>
         <StatusPill status={email.status} />

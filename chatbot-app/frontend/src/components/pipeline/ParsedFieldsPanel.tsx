@@ -9,13 +9,12 @@ import {
   BTN_LINK,
   BTN_PRIMARY,
   BTN_QUIET,
-  ConfidenceChip,
   Disclosure,
   Eyebrow,
   Panel,
   Placeholder,
-  StatusPill,
-} from "@/components/pipeline/ui";
+} from "@/components/app-ui/ui";
+import { ConfidenceChip, StatusPill } from "@/components/pipeline/ui";
 
 // What the parsing agent made of the email, beside the email itself. Every value is shown with the
 // text it came from and the rule that shaped it, because "the parser said S+275 means 2.750%" is
@@ -26,7 +25,7 @@ import {
 function Chip({ children, title }: { children: string; title?: string }) {
   return (
     <span
-      className="dp-mono rounded border border-[var(--dp-line)] px-2 py-0.5 text-[10.5px] text-[var(--dp-ink-dim)]"
+      className="rc-mono rounded border border-[var(--rc-line)] px-2 py-0.5 text-[10.5px] text-[var(--rc-ink-dim)]"
       title={title}
     >
       {children}
@@ -39,17 +38,17 @@ function EvidenceBody({ evidence }: { evidence: FieldEvidence }) {
   return (
     <div className="space-y-2 p-3">
       {evidence.excerpt ? (
-        <blockquote className="dp-mono whitespace-pre-wrap border-l-2 border-[var(--dp-cyan)] pl-3 text-[11.5px] leading-relaxed text-[var(--dp-ink-dim)]">
+        <blockquote className="rc-mono whitespace-pre-wrap border-l-2 border-[var(--rc-cyan)] pl-3 text-[11.5px] leading-relaxed text-[var(--rc-ink-dim)]">
           {evidence.excerpt}
         </blockquote>
       ) : (
-        <p className="dp-mono text-[11px] text-[var(--dp-ink-faint)]">
+        <p className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">
           no excerpt — the value was inferred rather than read
         </p>
       )}
       {evidence.rule && (
-        <p className="text-[12px] leading-relaxed text-[var(--dp-ink)]">
-          <span className="dp-eyebrow mr-2">rule</span>
+        <p className="text-[12px] leading-relaxed text-[var(--rc-ink)]">
+          <span className="rc-eyebrow mr-2">rule</span>
           {evidence.rule}
         </p>
       )}
@@ -69,12 +68,12 @@ function FieldRow({
 }) {
   const summary = (
     <span className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] items-baseline gap-3">
-      <span className="dp-mono truncate text-[11px] text-[var(--dp-ink-faint)]" title={def.key}>
+      <span className="rc-mono truncate text-[11px] text-[var(--rc-ink-faint)]" title={def.key}>
         {def.label}
       </span>
       <span
-        className="dp-mono break-words text-[12px]"
-        style={{ color: value ? "var(--dp-ink)" : "var(--dp-ink-faint)" }}
+        className="rc-mono break-words text-[12px]"
+        style={{ color: value ? "var(--rc-ink)" : "var(--rc-ink-faint)" }}
         data-field={def.key}
       >
         {value || "—"}
@@ -83,7 +82,7 @@ function FieldRow({
   );
   if (!evidence)
     return (
-      <div className="rounded border border-[var(--dp-line-soft)] px-3 py-2">{summary}</div>
+      <div className="rounded border border-[var(--rc-line-soft)] px-3 py-2">{summary}</div>
     );
   return (
     <Disclosure summary={summary} meta={<ConfidenceChip level={evidence.confidence} />}>
@@ -108,7 +107,7 @@ export function ParsedFieldsPanel({
   const inFlight = email.status === "RECEIVED" || email.status === "PARSING";
 
   return (
-    <Panel className="dp-rise p-5">
+    <Panel className="rc-rise p-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <Eyebrow>Parsed · agent output</Eyebrow>
@@ -151,23 +150,23 @@ export function ParsedFieldsPanel({
       ) : (
         <div className="mt-4 space-y-5">
           {/* Run metadata: which model, how long, which skills and memories shaped the result. */}
-          <dl className="dp-mono grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[12px]">
-            <dt className="dp-eyebrow pt-0.5">Model</dt>
-            <dd className="break-all text-[var(--dp-ink)]">{parse.model_id || "—"}</dd>
-            <dt className="dp-eyebrow pt-0.5">Duration</dt>
-            <dd className="text-[var(--dp-ink)]">{formatDuration(parse.duration_ms)}</dd>
-            <dt className="dp-eyebrow pt-0.5">Skills</dt>
+          <dl className="rc-mono grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[12px]">
+            <dt className="rc-eyebrow pt-0.5">Model</dt>
+            <dd className="break-all text-[var(--rc-ink)]">{parse.model_id || "—"}</dd>
+            <dt className="rc-eyebrow pt-0.5">Duration</dt>
+            <dd className="text-[var(--rc-ink)]">{formatDuration(parse.duration_ms)}</dd>
+            <dt className="rc-eyebrow pt-0.5">Skills</dt>
             <dd className="flex flex-wrap gap-1.5">
               {parse.skills_used.length === 0 ? (
-                <span className="text-[var(--dp-ink-faint)]">none loaded</span>
+                <span className="text-[var(--rc-ink-faint)]">none loaded</span>
               ) : (
                 parse.skills_used.map((s) => <Chip key={s}>{s}</Chip>)
               )}
             </dd>
-            <dt className="dp-eyebrow pt-0.5">Memory</dt>
+            <dt className="rc-eyebrow pt-0.5">Memory</dt>
             <dd className="flex flex-wrap gap-1.5" data-testid="memory-hits">
               {parse.memory_hits.length === 0 ? (
-                <span className="text-[var(--dp-ink-faint)]">no relevant memories recalled</span>
+                <span className="text-[var(--rc-ink-faint)]">no relevant memories recalled</span>
               ) : (
                 parse.memory_hits.map((m, i) => (
                   <Chip key={m.record_id ?? i} title={m.text}>
@@ -176,11 +175,11 @@ export function ParsedFieldsPanel({
                 ))
               )}
             </dd>
-            <dt className="dp-eyebrow pt-0.5">Enrichment</dt>
+            <dt className="rc-eyebrow pt-0.5">Enrichment</dt>
             <dd className="flex flex-wrap items-center gap-1.5">
               {parse.enrichment.issuer_match ? (
                 <>
-                  <span className="text-[var(--dp-ink)]">
+                  <span className="text-[var(--rc-ink)]">
                     security master → {parse.enrichment.issuer_match}
                   </span>
                   {parse.enrichment.fields_from_security_master.map((k) => (
@@ -190,7 +189,7 @@ export function ParsedFieldsPanel({
                   ))}
                 </>
               ) : (
-                <span className="text-[var(--dp-ink-faint)]">no issuer match in the security master</span>
+                <span className="text-[var(--rc-ink-faint)]">no issuer match in the security master</span>
               )}
             </dd>
           </dl>
@@ -208,7 +207,7 @@ export function ParsedFieldsPanel({
                   <div className="flex items-baseline justify-between">
                     <Eyebrow>{section}</Eyebrow>
                     {hidden > 0 && (
-                      <span className="dp-mono text-[10.5px] text-[var(--dp-ink-faint)]">
+                      <span className="rc-mono text-[10.5px] text-[var(--rc-ink-faint)]">
                         {hidden} blank hidden
                       </span>
                     )}
@@ -235,7 +234,7 @@ export function ParsedFieldsPanel({
           <section>
             <Eyebrow>Assumptions</Eyebrow>
             {parse.assumptions.length === 0 ? (
-              <p className="dp-mono mt-2 text-[12px] text-[var(--dp-ink-faint)]">
+              <p className="rc-mono mt-2 text-[12px] text-[var(--rc-ink-faint)]">
                 ◇ none recorded
               </p>
             ) : (
@@ -243,7 +242,7 @@ export function ParsedFieldsPanel({
                 {parse.assumptions.map((a, i) => (
                   <li
                     key={i}
-                    className="border-l-2 border-[var(--dp-amber)] pl-3 text-[12.5px] leading-relaxed text-[var(--dp-ink)]"
+                    className="border-l-2 border-[var(--rc-amber)] pl-3 text-[12.5px] leading-relaxed text-[var(--rc-ink)]"
                   >
                     {a}
                   </li>

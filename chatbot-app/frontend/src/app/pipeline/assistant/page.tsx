@@ -5,7 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { usePipelineSubject } from "@/hooks/usePipelineSubject";
 import { ChatPanel } from "@/components/pipeline/ChatPanel";
 import { MemoryManagerPanel } from "@/components/pipeline/MemoryManagerPanel";
-import { Eyebrow, Placeholder } from "@/components/pipeline/ui";
+import { Eyebrow, Placeholder } from "@/components/app-ui/ui";
 
 // The learning-loop tab: the conversation on the left, what it has taught the parser on the right.
 // `?deal=` / `?email=` arrive from the "Ask the assistant about this" buttons and are sent as context
@@ -31,14 +31,14 @@ function AssistantContent() {
     <div className="space-y-6">
       <header>
         <Eyebrow>Diagnose · propose a skill change · save a memory</Eyebrow>
-        <h1 className="dp-display mt-2 text-[34px] font-black leading-none text-[var(--dp-ink)]">
+        <h1 className="rc-display mt-2 text-[34px] font-black leading-none text-[var(--rc-ink)]">
           Assistant
         </h1>
-        <p className="mt-3 max-w-3xl text-[12.5px] leading-relaxed text-[var(--dp-ink-dim)]">
+        <p className="mt-3 max-w-3xl text-[12.5px] leading-relaxed text-[var(--rc-ink-dim)]">
           Two tiers of learning. A rule that applies to every deal becomes a{" "}
-          <span className="text-[var(--dp-ink)]">skill proposal</span>, reviewed on the Skills tab
+          <span className="text-[var(--rc-ink)]">skill proposal</span>, reviewed on the Skills tab
           before it changes the parser. A rule conditioned on a counterparty, a sector or a source
-          format is saved to <span className="text-[var(--dp-ink)]">memory</span>, which the parser
+          format is saved to <span className="text-[var(--rc-ink)]">memory</span>, which the parser
           recalls when the next similar email arrives.
         </p>
       </header>

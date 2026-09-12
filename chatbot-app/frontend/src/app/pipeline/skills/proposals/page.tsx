@@ -15,9 +15,9 @@ import {
   Notice,
   Panel,
   Placeholder,
-  StatusPill,
   type ActionOutcome,
-} from "@/components/pipeline/ui";
+} from "@/components/app-ui/ui";
+import { StatusPill } from "@/components/pipeline/ui";
 
 // Where the assistant's skill changes wait for a person. Nothing the assistant proposes reaches S3
 // until it is approved here, and the diff is the whole point of the page: a summary says what the
@@ -77,7 +77,7 @@ export default function ProposalsPage() {
       <div className="flex items-center justify-between">
         <Link
           href="/pipeline/skills"
-          className="dp-mono text-[12px] uppercase tracking-[0.14em] text-[var(--dp-ink-faint)] hover:text-[var(--dp-ink)]"
+          className="rc-mono text-[12px] uppercase tracking-[0.14em] text-[var(--rc-ink-faint)] hover:text-[var(--rc-ink)]"
         >
           ← Skills
         </Link>
@@ -85,7 +85,7 @@ export default function ProposalsPage() {
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <Eyebrow>Proposed skill changes · reviewed before they apply</Eyebrow>
-          <h1 className="dp-display mt-2 text-[34px] font-black leading-none text-[var(--dp-ink)]">
+          <h1 className="rc-display mt-2 text-[34px] font-black leading-none text-[var(--rc-ink)]">
             Proposals
           </h1>
         </div>
@@ -95,11 +95,11 @@ export default function ProposalsPage() {
               key={f}
               type="button"
               onClick={() => setFilter(f)}
-              className="dp-mono rounded px-3 py-1 text-[11px] tracking-[0.06em]"
+              className="rc-mono rounded px-3 py-1 text-[11px] tracking-[0.06em]"
               style={{
-                color: f === filter ? "var(--dp-ink)" : "var(--dp-ink-faint)",
-                background: f === filter ? "var(--dp-panel-2)" : "transparent",
-                border: f === filter ? "1px solid var(--dp-cyan)" : "1px solid var(--dp-line)",
+                color: f === filter ? "var(--rc-ink)" : "var(--rc-ink-faint)",
+                background: f === filter ? "var(--rc-panel-2)" : "transparent",
+                border: f === filter ? "1px solid var(--rc-cyan)" : "1px solid var(--rc-line)",
               }}
             >
               {f}
@@ -123,7 +123,7 @@ export default function ProposalsPage() {
                 : "◇ no proposals in this status"}
             </Placeholder>
           ) : (
-            <Panel className="dp-rise overflow-hidden">
+            <Panel className="rc-rise overflow-hidden">
               {shown.map((p) => {
                 const on = p.proposal_id === selectedId;
                 return (
@@ -132,15 +132,15 @@ export default function ProposalsPage() {
                     type="button"
                     onClick={() => setSelectedId(p.proposal_id)}
                     aria-pressed={on}
-                    className="dp-row block w-full border-b border-[var(--dp-line-soft)] px-5 py-4 text-left last:border-0"
-                    style={{ background: on ? "var(--dp-panel-2)" : undefined }}
+                    className="rc-row block w-full border-b border-[var(--rc-line-soft)] px-5 py-4 text-left last:border-0"
+                    style={{ background: on ? "var(--rc-panel-2)" : undefined }}
                   >
                     <div className="flex items-center justify-between gap-3">
-                      <span className="dp-mono text-[12px] text-[var(--dp-cyan)]">{p.skill_name}</span>
+                      <span className="rc-mono text-[12px] text-[var(--rc-cyan)]">{p.skill_name}</span>
                       <StatusPill status={p.status} />
                     </div>
-                    <p className="mt-1.5 text-[13px] leading-snug text-[var(--dp-ink)]">{p.summary}</p>
-                    <p className="dp-mono mt-1 text-[10.5px] text-[var(--dp-ink-faint)]">
+                    <p className="mt-1.5 text-[13px] leading-snug text-[var(--rc-ink)]">{p.summary}</p>
+                    <p className="rc-mono mt-1 text-[10.5px] text-[var(--rc-ink-faint)]">
                       {p.source.kind === "assistant" ? "proposed by the assistant" : "proposed by hand"} ·{" "}
                       {formatDateTime(p.created_at)}
                     </p>
@@ -151,11 +151,11 @@ export default function ProposalsPage() {
           )}
 
           {selected ? (
-            <Panel className="dp-rise space-y-5 p-5">
+            <Panel className="rc-rise space-y-5 p-5">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <Eyebrow>Proposal · {selected.skill_name}</Eyebrow>
-                  <h2 className="mt-1 text-[16px] font-medium leading-snug text-[var(--dp-ink)]">
+                  <h2 className="mt-1 text-[16px] font-medium leading-snug text-[var(--rc-ink)]">
                     {selected.summary}
                   </h2>
                 </div>
@@ -164,21 +164,21 @@ export default function ProposalsPage() {
 
               <div>
                 <Eyebrow>Rationale</Eyebrow>
-                <p className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--dp-ink)]">
+                <p className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--rc-ink)]">
                   {selected.rationale || "—"}
                 </p>
               </div>
 
-              <dl className="dp-mono grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[11.5px]">
-                <dt className="dp-eyebrow pt-0.5">Source</dt>
-                <dd className="text-[var(--dp-ink-dim)]">
+              <dl className="rc-mono grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[11.5px]">
+                <dt className="rc-eyebrow pt-0.5">Source</dt>
+                <dd className="text-[var(--rc-ink-dim)]">
                   {selected.source.kind}
                   {selected.source.deal_id && (
                     <>
                       {" · "}
                       <Link
                         href={`/pipeline/deals/${encodeURIComponent(selected.source.deal_id)}`}
-                        className="text-[var(--dp-cyan)] hover:underline"
+                        className="text-[var(--rc-cyan)] hover:underline"
                       >
                         deal {selected.source.deal_id}
                       </Link>
@@ -186,12 +186,12 @@ export default function ProposalsPage() {
                   )}
                   {selected.source.session_id && ` · session ${selected.source.session_id}`}
                 </dd>
-                <dt className="dp-eyebrow pt-0.5">Created</dt>
-                <dd className="text-[var(--dp-ink-dim)]">{formatDateTime(selected.created_at)}</dd>
+                <dt className="rc-eyebrow pt-0.5">Created</dt>
+                <dd className="text-[var(--rc-ink-dim)]">{formatDateTime(selected.created_at)}</dd>
                 {selected.decided_at && (
                   <>
-                    <dt className="dp-eyebrow pt-0.5">Decided</dt>
-                    <dd className="text-[var(--dp-ink-dim)]">
+                    <dt className="rc-eyebrow pt-0.5">Decided</dt>
+                    <dd className="text-[var(--rc-ink-dim)]">
                       {formatDateTime(selected.decided_at)}
                       {selected.decided_by ? ` by ${selected.decided_by}` : ""}
                     </dd>
@@ -207,17 +207,17 @@ export default function ProposalsPage() {
               </div>
 
               <Disclosure
-                summary={<span className="dp-mono text-[12px] text-[var(--dp-ink)]">Proposed content in full</span>}
+                summary={<span className="rc-mono text-[12px] text-[var(--rc-ink)]">Proposed content in full</span>}
                 meta={`${selected.proposed_content.split("\n").length} lines`}
               >
-                <pre className="dp-mono max-h-[420px] overflow-auto whitespace-pre-wrap p-4 text-[12px] leading-relaxed text-[var(--dp-ink)]">
+                <pre className="rc-mono max-h-[420px] overflow-auto whitespace-pre-wrap p-4 text-[12px] leading-relaxed text-[var(--rc-ink)]">
                   {selected.proposed_content}
                 </pre>
               </Disclosure>
 
               {selected.status === "PENDING" &&
                 (isAdmin ? (
-                  <div className="flex items-center gap-3 border-t border-[var(--dp-line)] pt-4">
+                  <div className="flex items-center gap-3 border-t border-[var(--rc-line)] pt-4">
                     <button
                       type="button"
                       onClick={() => decide(selected.proposal_id, "approve")}
@@ -237,7 +237,7 @@ export default function ProposalsPage() {
                     </button>
                   </div>
                 ) : (
-                  <p className="dp-mono border-t border-[var(--dp-line)] pt-4 text-[11.5px] text-[var(--dp-ink-faint)]">
+                  <p className="rc-mono border-t border-[var(--rc-line)] pt-4 text-[11.5px] text-[var(--rc-ink-faint)]">
                     Approving or rejecting requires membership of the admin group.
                   </p>
                 ))}

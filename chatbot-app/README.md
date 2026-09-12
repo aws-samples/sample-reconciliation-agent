@@ -15,6 +15,13 @@ frontend/src/lib/console/        the console-wide settings layer: types.ts (the 
 frontend/src/app/console/settings the Settings screen; frontend/src/components/console/ its tabs
 frontend/src/app/api/console/     settings, access-check, preferences routes
 frontend/src/proxy.ts             the gate in front of both BFFs
+frontend/src/app/app-theme.css    the shared "instrument" theme every app renders under (.app-root,
+                                  rc-* classes, --rc-* tokens)
+frontend/src/components/app-ui/   chrome and primitives shared by the apps: AppChrome (header, AppNav,
+                                  UserMenu), DataTable, ui.tsx (Panel, Pill, Modal, Notice, buttons)
+frontend/src/hooks/useAppSubject.ts
+                                  the viewer for one app, from /api/me, via lib/auth/authed-fetch.ts
+                                  (the one 401-aware fetch every BFF client is built on)
 
 frontend/src/app/recon/           screens: dashboard, queue, case/[id], skills, lessons, evals,
                                   idp-documents, config
@@ -45,8 +52,11 @@ one.
 ## Two apps, one shell
 
 The apps do not import each other. What they share is the auth module (`src/lib/auth/`,
-`src/lib/api-auth.ts`, `src/lib/reauth.ts`), the `src/components/ui/` primitives and a couple of
-app-agnostic helpers; each keeps its own theme CSS, nav, hooks and BFF. Who may open which app comes
+`src/lib/api-auth.ts`, `src/lib/reauth.ts`), the console's instrument theme (`src/app/app-theme.css`)
+and the chrome and primitives built on it (`src/components/app-ui/`: the header with its nav and user
+menu, the column-preferences table, the panel/pill/modal primitives), the `src/components/ui/`
+primitives and a couple of app-agnostic helpers; each keeps its own nav links, status vocabulary,
+hooks and BFF. Who may open which app comes
 from identity-provider groups — `RECON_ACCESS_GROUP` / `RECON_ADMIN_GROUP` and `PIPELINE_ACCESS_GROUP`
 / `PIPELINE_ADMIN_GROUP`, resolved by `src/lib/auth/apps.ts`. An unset access group leaves that app
 open to every authenticated user, unless `REQUIRE_ACCESS_GROUPS=true`, which the composed deployment

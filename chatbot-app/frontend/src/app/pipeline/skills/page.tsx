@@ -14,7 +14,7 @@ import {
   INPUT_CLASS,
   Panel,
   Placeholder,
-} from "@/components/pipeline/ui";
+} from "@/components/app-ui/ui";
 
 // The universal tier of the learning loop. A skill is the rule set the parser loads on every run,
 // so a change here changes how every future email is read — which is why the assistant proposes
@@ -75,10 +75,10 @@ export default function SkillsPage() {
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <Eyebrow>Parsing rules · loaded on every run</Eyebrow>
-          <h1 className="dp-display mt-2 text-[34px] font-black leading-none text-[var(--dp-ink)]">
+          <h1 className="rc-display mt-2 text-[34px] font-black leading-none text-[var(--rc-ink)]">
             Skills
           </h1>
-          <p className="mt-3 max-w-2xl text-[12.5px] leading-relaxed text-[var(--dp-ink-dim)]">
+          <p className="mt-3 max-w-2xl text-[12.5px] leading-relaxed text-[var(--rc-ink-dim)]">
             Each skill is a markdown procedure the parsing agent follows. Editing one changes how the
             next email is read; the assistant&rsquo;s proposed edits wait here for approval.
           </p>
@@ -87,7 +87,7 @@ export default function SkillsPage() {
           <Link href="/pipeline/skills/proposals" className={BTN_QUIET}>
             Proposals
             {pending !== null && pending > 0 && (
-              <span className="ml-2 text-[var(--dp-amber)]">{pending} pending</span>
+              <span className="ml-2 text-[var(--rc-amber)]">{pending} pending</span>
             )}
           </Link>
           <Link href="/pipeline/skills/system-prompt" className={BTN_QUIET}>
@@ -101,10 +101,10 @@ export default function SkillsPage() {
         </div>
       </header>
 
-      {msg && <p className="dp-mono text-[12px] text-[var(--dp-amber)]">{msg}</p>}
+      {msg && <p className="rc-mono text-[12px] text-[var(--rc-amber)]">{msg}</p>}
 
       {creating && (
-        <Panel className="dp-rise p-5">
+        <Panel className="rc-rise p-5">
           <Eyebrow>New skill (SKILL.md)</Eyebrow>
           <textarea
             aria-label="New skill content"
@@ -134,16 +134,16 @@ export default function SkillsPage() {
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           {skills.map((s, i) => (
             <Link key={s.name} href={`/pipeline/skills/${encodeURIComponent(s.name)}`} className="block">
-              <Panel className="dp-rise flex h-full flex-col p-5 hover:border-[var(--dp-cyan)]" title={`Open ${s.name}`}>
+              <Panel className="rc-rise flex h-full flex-col p-5 hover:border-[var(--rc-cyan)]" title={`Open ${s.name}`}>
                 <div style={{ animationDelay: `${i * 50}ms` }} className="flex h-full flex-col">
                   <div className="flex items-start gap-2">
-                    <span className="mt-[6px] text-[var(--dp-cyan)]">▸</span>
-                    <span className="dp-mono text-[14px] font-medium text-[var(--dp-cyan)]">{s.name}</span>
+                    <span className="mt-[6px] text-[var(--rc-cyan)]">▸</span>
+                    <span className="rc-mono text-[14px] font-medium text-[var(--rc-cyan)]">{s.name}</span>
                   </div>
-                  <p className="mt-3 flex-1 text-[13px] leading-relaxed text-[var(--dp-ink-dim)]">
+                  <p className="mt-3 flex-1 text-[13px] leading-relaxed text-[var(--rc-ink-dim)]">
                     {s.description || "no description in the frontmatter"}
                   </p>
-                  <div className="dp-mono mt-5 border-t border-[var(--dp-line-soft)] pt-3 text-[10.5px] uppercase tracking-[0.1em] text-[var(--dp-ink-faint)]">
+                  <div className="rc-mono mt-5 border-t border-[var(--rc-line-soft)] pt-3 text-[10.5px] uppercase tracking-[0.1em] text-[var(--rc-ink-faint)]">
                     skills/{s.name}/SKILL.md
                   </div>
                 </div>
