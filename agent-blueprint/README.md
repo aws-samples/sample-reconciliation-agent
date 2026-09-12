@@ -63,4 +63,6 @@ not the truth. `assistant-system.md` has no UI editor and **tracks the repo** â€
 `security-master/` CSVs and `samples/`, a change to the committed file re-uploads on the next apply,
 and an edit made only in S3 is reverted by it. Frontmatter rules and the `metadata.applies_to`
 filter the parser uses are in [`deal-pipeline-agent/README.md`](deal-pipeline-agent/README.md). It
-shares nothing with the two recon backends above; the two agents are decoupled end to end.
+runs its own Lambdas rather than either recon backend above, but reads its skills through the same
+parser (`backend/recon_core/skill_meta.py`) and the same core helpers, so a SKILL.md means the same
+thing to both agents.

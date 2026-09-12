@@ -86,10 +86,19 @@ Rules that follow:
   wrappers; `src/hooks/useAppSubject.ts` over the shell's `/api/me` store), the instrument theme
   (`src/app/app-theme.css`) with the chrome and primitives built on it (`src/components/app-ui/`), the
   `src/components/ui/` primitives, and app-agnostic helpers with no app state (`src/lib/server/` —
-  HTTP envelope, memory request parsing, the model allowlist; `src/lib/api/client.ts`;
-  `src/lib/models/presets.ts`; `src/lib/memoryStrategy.ts`; `columnPrefs`, whose storage keys carry the
-  app id; `skillFrontmatter`). A feature both apps need goes into one of those, never into one app for
-  the other to reach into.
+  HTTP envelope, memory request parsing, the model allowlist, `ssm.ts`, `memoryClient.ts` and
+  `skillsStore.ts`, each a factory the app parameterises with its own ids, bucket and options whose
+  defaults are recon's behaviour; `src/lib/api/client.ts`; `src/lib/models/presets.ts`;
+  `src/lib/memoryStrategy.ts`; `columnPrefs`, whose storage keys carry the app id; `skillFrontmatter`,
+  whose `validateSkill` refuses what the Lambdas' YAML parser would misread). The shared panels those
+  factories feed (`ModelSelectPanel`, `MemoryPanel`, `SkillsCatalog`, `SkillEditor`,
+  `PromptEditorPage`) live in `src/components/app-ui/` and take recon's presentation as their defaults.
+  A feature both apps need goes into one of those, never into one app for the other to reach into.
+  Never an `if (app === ...)` branch: a difference between the apps is an explicit option.
+
+  On the Python side the same rule holds for `backend/recon_core/`: `deal_pipeline` imports it
+  (memory retrieval, model selection, DynamoDB update helpers, S3 text reads, the SKILL.md parser
+  with its `name_fallback` and `ttl_seconds` options) and adds nothing recon-specific to it.
 - **Access groups: unset access = open, unset admin = closed — until `REQUIRE_ACCESS_GROUPS`.**
   `RECON_ACCESS_GROUP` / `PIPELINE_ACCESS_GROUP` unset keeps that app open to every authenticated
   user (what a recon-only deployment had before the shell). `REQUIRE_ACCESS_GROUPS=true` (exact
