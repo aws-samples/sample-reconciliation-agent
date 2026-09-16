@@ -258,9 +258,11 @@ The architecture has three planes:
 | Notifications      | Microsoft Graph is the only channel (app-only, from the shared mailbox), reached through the egress gateway's OpenAPI target. It carries resolution emails on approve/auto-resolve (`cases/notify.py` plus the frontend BFF calling `sendSharedMailboxMail` through the gateway with SigV4), counterparty email sent by the BFF from an analyst-approved draft, and mailbox reads (`listSharedMailboxMessages`, reached only through the `search_correspondence` wrapper). No agent holds a send tool on either backend: the model writes the counterparty message into its proposal and a human approves a specific revision of it. Nothing stores an address: a draft and a resolution notice both name a contact id, and the address is read from the contacts table at the moment of sending, so deactivating a contact stops mail to them even if a draft was already approved. Sends are gated at the gateway REQUEST interceptor.            |
 | IaC                | Terraform (`infra/`) with S3-backed state. The AgentCore Harness lifecycle is an `aws_cloudformation_stack` (`infra/modules/recon-agent-harness`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
-**Intelligent Document Processing (IDP) decoupling:** Two channels reach the independently-deployed
-IDP solution and no others: the completion event recon's own EventBridge rule reads, and the IDP MCP
-tool. IDP storage is touched in three sanctioned places, none of them the agent: the hook reads the
+**Intelligent Document Processing (IDP) decoupling:** One channel reaches the independently-deployed
+IDP solution and no other: the completion event recon's own EventBridge rule reads. The IDP MCP
+gateway target and its `get_results` tool are retired — notice search is the single path to document
+evidence, which is why the agent has no coupling surface to the pipeline at all. IDP storage is
+touched in three sanctioned places, none of them the agent: the hook reads the
 output bucket at ingest, to copy extracted field values and page images into the notice; the console
 streams a document's raw bytes out of the input bucket for the Documents tab, rather than duplicating
 customer financial documents into recon storage; and an extraction upload is put into that same input
@@ -347,7 +349,7 @@ chatbot-app/
                         /recon/* pages + /api/recon/*
                         BFF, and /pipeline/* pages + /api/pipeline/* BFF (server libs under
                         src/lib/pipeline/server). Other api/ route groups are scaffolding
-                        inherited with the fork; 10 of them are non-functional in this
+                        inherited with the fork; 9 of them are non-functional in this
                         deployment and fail loudly naming the missing env var
                         (src/lib/deployment-env.ts)
 
@@ -531,7 +533,7 @@ done
 ```
 
 `npm run lint` is not part of this: ESLint is broken repo-wide. `npm run verify` points at a
-`verify-build.sh` that does not exist. `ruff format --check` reports 34 files that predate the
+`verify-build.sh` that does not exist. `ruff format --check` reports 33 files that predate the
 convention, so formatting is not gated either. CI runs exactly the commands above.
 
 These counts are a snapshot, not a gate — nothing asserts them, so treat a disagreement as this

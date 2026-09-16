@@ -4,15 +4,16 @@ Every Lambda and every shared library the platform runs. There is no framework h
 dependency-injection container: a package is either a **Lambda entry point** (it has `handler.py`)
 or a **library** other packages import.
 
-One deliberate exception: `tier2_dispatch/` ships THREE entry points (`handler.py`, `collect.py`,
-`case_step.py`). They are three steps of one state machine and share its table bindings, so splitting
-them into three packages would buy nothing but a third copy of the same wiring.
+Two directories are deliberate exceptions. `tier2_dispatch/` ships THREE entry points
+(`handler.py`, `collect.py`, `case_step.py`): they are three steps of one state machine and share its
+table bindings, so splitting them into three packages would buy nothing but a third copy of the same
+wiring. `deal_pipeline/` is the other, described below.
 
 Which one a directory is decides how you change it. A Lambda's contract is its event shape and it
 is deployed by the module of the same name under `infra/modules/`; a library's contract is its
 function signatures and it ships inside whichever Lambda zips it.
 
-`deal_pipeline/` is the one exception to the `handler.py` rule: it is a library **and** two entry
+`deal_pipeline/` is the second exception to the `handler.py` rule: it is a library **and** two entry
 points (`parser_handler.py`, `oms_upload_handler.py`), both deployed by `infra/modules/deal-pipeline`
 from the one zip the recon root builds for every Lambda it deploys (`module.lambda_package` in
 `infra/environments/recon/main.tf`). Any file in `backend/` redeploys both.
