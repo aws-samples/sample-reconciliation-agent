@@ -1,8 +1,0 @@
-name: bluesky
-description: "Search Bluesky posts and read threads via AT Protocol"
-skill_md_path: bluesky/SKILL.md
-source: gateway
-sourceRecord: gateway-lambda
-tools:
-  - search_posts
-  - get_post

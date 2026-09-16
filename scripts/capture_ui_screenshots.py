@@ -81,10 +81,10 @@ def on_app(page: Page) -> bool:
 def await_app(page: Page, attempts: int = 30) -> bool:
     """Wait out a silent Okta round trip.
 
-    ⚠️ Called before EVERY screenshot, not once at startup. The provider session here is short
-    lived, and it expires mid-run: an earlier version authenticated once, captured seven screens,
-    and wrote seven pictures of the login wall -- which is worse than failing, because a login wall
-    is a plausible-looking screenshot that a reader would not question in a README.
+    ⚠️ Called before EVERY screenshot, not once at startup. The provider session here is short lived
+    and expires mid-run, so authenticating once and then capturing a whole run writes pictures of the
+    login wall -- which is worse than failing, because a login wall is a plausible-looking screenshot
+    that a reader would not question in a README.
 
     :param page: the page to wait on.
     :param attempts: 3-second polls to allow.

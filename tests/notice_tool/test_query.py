@@ -1,4 +1,8 @@
-"""Tests for the search_notices access-path planner (no AWS calls)."""
+"""Tests for the search_notices query planner (no AWS calls).
+
+It no longer plans an ACCESS PATH -- candidates come from the notice search index, resolved by no
+particular field name. What is planned here is bounds, filters, the exact-match set and the row cap.
+"""
 
 from decimal import Decimal
 
@@ -7,41 +11,53 @@ import pytest
 from backend.notice_tool.handler import plan_query
 
 
-def test_reference_hint_uses_the_reference_index() -> None:
-    """The most selective hint wins the key condition."""
-    plan = plan_query(reference="WIRE-20260302-EVG")
-    assert plan.index_name == "reference-index"
-    assert plan.is_scan is False
+def test_every_named_hint_becomes_an_ordinary_filter() -> None:
+    """No access path is chosen here any more, and no field name is privileged.
+
+    `reference` and `counterparty` used to win a GSI key condition; they are plain equality filters now,
+    resolved through the search index like anything else the caller sends.
+    """
+    plan = plan_query(
+        reference="WIRE-20260302-EVG",
+        counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.",
+        fund="Direct Lending Fund I",
+        activity_type="Interest",
+        notice_class="wire_confirmation",
+    )
+    assert plan.filtered_fields == {
+        "reference": "WIRE-20260302-EVG",
+        "counterparty": "CINDERMOOR LOGISTICS HOLDINGS INC.",
+        "fund": "Direct Lending Fund I",
+        "activity_type": "Interest",
+        "notice_class": "wire_confirmation",
+    }
 
 
-def test_counterparty_hint_uses_the_counterparty_index() -> None:
-    """Counterparty is exact, so it is a key condition rather than a filter."""
-    plan = plan_query(counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.")
-    assert plan.index_name == "counterparty-index"
-
-
-def test_reference_wins_over_counterparty_as_the_more_selective_hint() -> None:
-    """When both are given the loser must still constrain the result set."""
-    plan = plan_query(reference="WIRE-1", counterparty="CINDERMOOR LOGISTICS HOLDINGS INC.")
-    assert plan.index_name == "reference-index"
-    # The unused hint must not be dropped — it becomes a filter, or it silently stops mattering.
-    assert "counterparty" in plan.filtered_fields
-
-
-def test_dates_become_a_range_condition_only_on_the_counterparty_index() -> None:
-    """notice_date is that index's range key; elsewhere it can only be a filter."""
-    plan = plan_query(counterparty="X", date_from="2026-03-01", date_to="2026-03-31")
-    assert plan.has_date_range is True
-    scan_plan = plan_query(reference="WIRE-1", date_from="2026-03-01", date_to="2026-03-31")
-    assert scan_plan.has_date_range is False
-    assert "notice_date" in scan_plan.filtered_fields
-
-
-def test_no_hints_falls_back_to_a_marked_scan() -> None:
-    """A Scan is allowed but must be visible, so handle() can cap it and report truncation."""
+def test_no_hints_is_an_unconstrained_plan() -> None:
+    """Every notice is a candidate, and `handle` caps the fetch. There is no scan flag to set."""
     plan = plan_query()
-    assert plan.is_scan is True
-    assert plan.index_name is None
+    assert plan.filtered_fields == {}
+    assert plan.required_fields == frozenset()
+    assert plan.amount_low is None
+
+
+def test_dates_stay_bounds_rather_than_becoming_a_key_condition() -> None:
+    """The window constrains the result wherever it came from; no index is involved in deciding that."""
+    plan = plan_query(counterparty="X", date_from="2026-03-01", date_to="2026-03-31")
+    assert (plan.date_from, plan.date_to) == ("2026-03-01", "2026-03-31")
+    assert plan_query(reference="W1", date_from="2026-03-01").date_from == "2026-03-01"
+
+
+def test_require_is_parsed_into_the_fields_to_match_exactly() -> None:
+    """The caller names them, which is what keeps the exact-match set out of this module.
+
+    Whitespace tolerated and blanks dropped, because the model composes this string.
+    """
+    assert plan_query(require="reference").required_fields == frozenset({"reference"})
+    assert plan_query(require=" reference , cusip ,, ").required_fields == frozenset(
+        {"reference", "cusip"}
+    )
+    assert plan_query().required_fields == frozenset()
 
 
 def test_amount_becomes_an_inclusive_band() -> None:
@@ -69,15 +85,8 @@ def test_limit_is_capped_not_silently_honoured() -> None:
     assert plan_query(limit=0).limit == 1
 
 
-def test_activity_type_is_a_filter_never_a_key_condition() -> None:
-    """There is no GSI on activity_type, so it can only ever narrow a set the keys already chose."""
+def test_activity_type_is_an_ordinary_filter() -> None:
+    """Class-dependent, so it is a filter and its absence is annotated rather than excluding a row."""
     plan = plan_query(counterparty="MISTFELL FOODS CORP.", activity_type="Commitment Fee")
-    assert plan.key_field == "counterparty"
     assert plan.filtered_fields["activity_type"] == "Commitment Fee"
-
-
-def test_activity_type_alone_still_scans() -> None:
-    """A filter is not selective enough to choose an access path; the scan must be marked as one."""
-    plan = plan_query(activity_type="Rollover")
-    assert plan.is_scan is True
-    assert plan.filtered_fields == {"activity_type": "Rollover"}
+    assert "activity_type" not in plan.required_fields

@@ -14,7 +14,9 @@ export function NewItemModal({
   onSubmitted,
 }: {
   onClose: () => void;
-  onSubmitted: () => void;
+  // Receives the item_ids that were actually written, so the caller can wait for THOSE cases to
+  // appear rather than guessing when the pipeline has caught up.
+  onSubmitted: (itemIds: string[]) => void;
 }) {
   const [text, setText] = useState(
     JSON.stringify(RECON_SAMPLES[1].payload, null, 2),
@@ -64,7 +66,11 @@ export function NewItemModal({
         );
         return;
       }
-      onSubmitted();
+      onSubmitted(
+        parsed.items
+          .map((i) => String(i.item_id ?? ""))
+          .filter((id) => id.length > 0),
+      );
       onClose();
     } catch (e) {
       setError(

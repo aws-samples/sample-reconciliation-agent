@@ -282,9 +282,10 @@ resource "aws_iam_role_policy" "set_draw_status" {
         Action   = ["dynamodb:PutItem"]
         Resource = aws_dynamodb_table.gl_status.arn
       },
-      # NOTE: the former cases-table (provenance) and SSM-threshold grants were removed —
-      # both gates live at the GATEWAY now (Cedar Policy + REQUEST interceptor, verified in
-      # ENFORCE mode 2026-07-26). This Lambda only writes the overlay row.
+      # ⚠️ Deliberately NO cases-table read and NO SSM threshold read. This Lambda writes the overlay
+      # row and nothing else: the provenance and confidence gates in front of the write live at the
+      # GATEWAY (Cedar Policy + the REQUEST interceptor), so re-checking them here would duplicate an
+      # enforcement point and invite the two copies to drift.
       {
         Effect   = "Allow"
         Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]

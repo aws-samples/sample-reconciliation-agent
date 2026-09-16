@@ -82,32 +82,33 @@ class SkillResultSpec(BaseModel):
 class ReasoningStep(BaseModel):
     """One typed entry in the agent trace.
 
-    Generalized from a plain investigation step into a discriminated entry so the trace can
-    show the agent's real work: lesson recall, classification, skill loading, each tool
-    invocation, the executed write, and the final proposal.
+    A discriminated entry rather than a plain investigation step, so the trace can show the agent's
+    real work: lesson recall, classification, skill loading, each tool invocation, the executed
+    write, and the final proposal.
 
-    Every field beyond ``{skill, confidence, reasoning, evidence}`` is optional so that any trace
+    Every field beyond ``{skill, confidence, reasoning, evidence}`` is optional so that a trace
     already persisted in DynamoDB still validates on read: ``kind`` defaults to ``"propose"`` and
     ``step_id``/``satisfied`` default to ``None``, which scores as fully unattempted. Cases are
-    long-lived records, so a required field added here would make old cases unreadable rather than
-    merely unscored.
+    long-lived records, so making a field required here would render stored cases unreadable rather
+    than merely unscored.
 
-    ``confidence`` is accepted for those persisted traces and is read by NO scoring path, nor rendered
-    per-entry by the UI. Do not add a dependency on it: it is a model self-report, and the gate scores
-    evidence completeness instead precisely because a self-report is unfalsifiable. Floats are
-    converted to ``Decimal`` before any DynamoDB write.
+    ``confidence`` is accepted on read and is used by NO scoring path, nor rendered per-entry by the
+    UI. Do not add a dependency on it: it is a model self-report, and the gate scores evidence
+    completeness instead precisely because a self-report is unfalsifiable. Floats are converted to
+    ``Decimal`` before any DynamoDB write.
     """
 
     skill: str  # which SKILL.md / phase drove this entry (also the trace label)
-    # OPTIONAL and written by nobody. Accepted so traces persisted before 2026-09-04 still validate
-    # on read. Read by no scoring path and not rendered per-entry (the case screen's trace eyebrow
-    # says so outright). Do NOT give this a 0.0 default: a required float that every writer fills
-    # with a meaningless value is how it came to look load-bearing, and a 0.0 on the trace reads to a
-    # human as "the agent was not confident" rather than "nobody measured this".
+    # OPTIONAL and written by nobody; accepted only so a stored trace carrying it still validates.
+    # Read by no scoring path and not rendered per-entry (the case screen's trace eyebrow says so
+    # outright). Do NOT give this a 0.0 default: a required float that every writer fills with a
+    # meaningless value is what makes it look load-bearing, and a 0.0 on the trace reads to a human
+    # as "the agent was not confident" rather than "nobody measured this".
     confidence: float | None = None
     reasoning: str  # human-readable why, surfaced in the UI
     evidence: list[str] = Field(default_factory=list)
-    # Discriminator + kind-specific optional fields (all default None for back-compat):
+    # Discriminator + kind-specific optional fields. All default None so that a stored trace, which
+    # carries only the keys its own kind needed, still validates on read.
     kind: Literal[
         "lesson_recall",
         "classify",
@@ -144,9 +145,9 @@ class ReasoningStep(BaseModel):
 class InvestigationResult(BaseModel):
     """What one investigation run hands back to ``proposal.build_proposal``.
 
-    Replaces a 3-, 4- or 5-tuple dispatched on by length. The tuple form made a fake that returned
-    the wrong number of values a silently different contract instead of an error — and it could not
-    survive removing a member, because dropping one collided every arity with its neighbour.
+    A named model rather than a tuple dispatched on by length: with a tuple, a fake that returns the
+    wrong number of values is a silently different contract instead of an error, and no member can be
+    added or dropped without colliding one arity with its neighbour.
 
     Carries NO confidence. The only confidence a proposal has is the evidence-completeness score, and
     that is computed from ``steps`` afterwards by ``recon_core.confidence.score_proposal``.
@@ -215,13 +216,32 @@ class Proposal(BaseModel):
     #
     # A separate attribute rather than something read back out of ``steps`` because the trace's
     # ``tool_output`` is a 600-character display summary (``harness_agent.stream._summarize``) and one
-    # notice row is larger than that, so the trace only ever holds a JSON *fragment*. The UI used to
-    # re-parse that fragment, fail, and report "matched no notices" on cases that had matched five.
+    # notice row is larger than that, so the trace only ever holds a JSON *fragment*. Re-parsing that
+    # fragment fails, and reports "matched no notices" on a case that matched five.
     #
     # Shape: ``{searched: bool, rows: list[dict], matched_on: list[str], error: str | None,
     # omitted: int}`` — see ``recon_core.proposal_service.notice_search_summary``, the single
     # derivation both backends use. ``None`` on a proposal built without a recorded notice search.
     notice_search: dict | None = None
+    # What the run COST, in tokens, plus enough provenance to price it:
+    # ``{input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, model_id, backend}``.
+    # Built ONLY by ``recon_core.token_usage.summarize_token_usage`` — the one mapper both backends
+    # import — so a count means the same thing whichever deployment unit measured it.
+    #
+    # OPTIONAL and defaulted to ``None``, following the same rule as ``ReasoningStep``'s optional
+    # fields above: cases are long-lived records, and every case already stored predates this field,
+    # so making it required would render those cases unreadable on read rather than merely
+    # unmeasured. ``None`` means "nobody measured this run", which is NOT the same as a set of zeros.
+    #
+    # The counts are ``Decimal``, never ``float`` (boto3's DynamoDB resource raises ``TypeError`` on
+    # a float), and the two cache keys are ABSENT when the provider reported no cache figures at all
+    # — see the mapper, which is where both rules are enforced and explained.
+    #
+    # It rides on the Proposal rather than travelling as a persist-call argument because BOTH
+    # backends already build a Proposal and both persist it through ``CaseStore.attach_proposal``:
+    # one carrier means one write path, and means a re-persist of the same proposal (the harness does
+    # two, the runtime does two) cannot drop the value by forgetting to pass it again.
+    token_usage: dict | None = None
 
     @property
     def evidence(self) -> list[str]:

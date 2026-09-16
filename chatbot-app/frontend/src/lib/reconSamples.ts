@@ -30,9 +30,9 @@
 // item-level `attributes` bag is free-form `dict`, so numbers and nesting are fine there. That applies
 // to a zeroed side too: "0.00", not 0.
 //
-// Keys are lowercase throughout. `Currency` used to be capitalised next to a lowercase `amount` in the
-// same object; only `amount` is the match attribute so nothing behaved differently, but an operator
-// copying a sample has no way to know that, and both the ledger and the notice use lowercase.
+// Keys are lowercase throughout, `currency` included. Only `amount` is the match attribute, so a
+// capitalised `Currency` beside a lowercase `amount` behaves no differently — but an operator copying
+// a sample has no way to know that, and both the ledger and the notice use lowercase.
 
 export interface ReconSamplePayload {
   label: string;
@@ -190,8 +190,8 @@ export const RECON_SAMPLES: ReconSamplePayload[] = [
     label: "Scenario 5 — notice states the facility total only",
     expectation:
       "Bank cash arrived and the ledger has nothing against it, so the agent looks for the notice " +
-      "that explains it — and the only candidate carries amount_type=GLOBAL_ONLY: a facility-wide " +
-      "418,255.00 with no lender-level share, because the agent bank issues allocations separately. " +
+      "that explains it — and the only candidate states a facility-wide 418,255.00 with no " +
+      "lender-level share at all, because the agent bank issues allocations separately. " +
       "`record-match-review` forbids computing the share, so fund_level_amount_available is NOT " +
       "satisfied and confidence caps at MEDIUM. The missing figure exists nowhere internal, which " +
       "makes an `email_draft` asking the agent bank for the lender-level allocation the resolution — " +

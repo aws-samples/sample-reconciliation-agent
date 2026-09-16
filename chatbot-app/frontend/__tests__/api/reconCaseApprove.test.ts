@@ -4,14 +4,14 @@
  * transitions an approval makes (PROPOSED → APPROVED → RESOLVED) and the internal resolution
  * notification that follows them.
  *
- * These exist because of a stranding defect. The notification used to run UNWRAPPED between the two
- * transitions, so a Graph outage threw out of the middle of the approval: the outer catch answered
- * 502 and the case was left at APPROVED. `recon_update_status` will not transition APPROVED again,
- * so every retry answered "case is no longer awaiting approval" — and APPROVED is a valid queue
- * filter, so the case stayed visible while being unreachable. What is pinned here is that the case
- * reaches its terminal state first, that a failed courtesy mail is reported rather than swallowed or
- * allowed to undo the decision, and that a transition the state machine refuses is reported with the
- * status the case is ACTUALLY in.
+ * The failure mode being pinned is stranding. Run the notification UNWRAPPED between the two
+ * transitions and a Graph outage throws out of the middle of the approval: the outer catch answers 502
+ * and the case is left at APPROVED. `recon_update_status` will not transition APPROVED again, so every
+ * retry answers "case is no longer awaiting approval" — and APPROVED is a valid queue filter, so the
+ * case stays visible while being unreachable. What is pinned here is that the case reaches its
+ * terminal state first, that a failed courtesy mail is reported rather than swallowed or allowed to
+ * undo the decision, and that a transition the state machine refuses is reported with the status the
+ * case is ACTUALLY in.
  *
  * The node environment is deliberate, for the same reason as `reconEmailDraft.test.ts`: the route
  * imports `authorizeRequest`, which pulls in `jose`, and jsdom's cross-realm `Uint8Array` makes it
@@ -190,7 +190,7 @@ describe("POST /api/recon/cases/[id] — approve, resolve, notify", () => {
     const res = await postCase({ action: "approve" });
 
     expect(res.status).toBe(200);
-    // Ordering is the fix, not an incidental detail: anything between APPROVED and RESOLVED that
+    // Ordering is load-bearing, not an incidental detail: anything between APPROVED and RESOLVED that
     // can throw can strand the case, because APPROVED has no retry path through this route.
     const order = (
       callGatewayTool.mock.calls as Array<[string, Record<string, unknown>]>

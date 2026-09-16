@@ -1,9 +1,8 @@
 ####################################################################################
-# Frontend hosting on ECS Fargate behind an ALB, fronted by CloudFront — replicating the
-# reference repo's `chat` module pattern. The standalone Next.js server image is built AND
-# pushed by CodeBuild during a single `terraform apply` (build driver blocks until success),
-# then run as a Fargate service. CloudFront (locked to the CloudFront origin-facing prefix
-# list on the ALB SG) is the public HTTPS entry point.
+# Frontend hosting on ECS Fargate behind an ALB, fronted by CloudFront. The standalone Next.js
+# server image is built AND pushed by CodeBuild during a single `terraform apply` (the build
+# driver blocks until success), then run as a Fargate service. CloudFront (locked to the
+# CloudFront origin-facing prefix list on the ALB SG) is the public HTTPS entry point.
 ####################################################################################
 
 locals {
@@ -23,7 +22,7 @@ locals {
   # change that doesn't move the hash (e.g. switching auth_provider to okta) would otherwise
   # keep serving the old image forever.
   build_config = join("|", [
-    var.region, var.recon_api_base, var.cognito_hosted_ui, var.cognito_client_id,
+    var.region, var.recon_api_base,
     var.auth_provider, var.okta_issuer, var.okta_client_id, var.okta_redirect_uri,
   ])
   source_hash = sha1(join("", concat(
@@ -225,14 +224,6 @@ resource "aws_codebuild_project" "frontend" {
       value = var.recon_api_base
     }
     environment_variable {
-      name  = "COGNITO_HOSTED_UI"
-      value = var.cognito_hosted_ui
-    }
-    environment_variable {
-      name  = "COGNITO_CLIENT_ID"
-      value = var.cognito_client_id
-    }
-    environment_variable {
       name  = "SOURCE_HASH"
       value = local.source_hash
     }
@@ -269,8 +260,6 @@ resource "aws_codebuild_project" "frontend" {
               docker build \
                 --build-arg NEXT_PUBLIC_AWS_REGION=$AWS_DEFAULT_REGION \
                 --build-arg NEXT_PUBLIC_RECON_API_BASE=$RECON_API_BASE \
-                --build-arg NEXT_PUBLIC_COGNITO_HOSTED_UI=$COGNITO_HOSTED_UI \
-                --build-arg NEXT_PUBLIC_COGNITO_CLIENT_ID=$COGNITO_CLIENT_ID \
                 --build-arg NEXT_PUBLIC_AUTH_PROVIDER=$AUTH_PROVIDER \
                 --build-arg NEXT_PUBLIC_OKTA_ISSUER=$OKTA_ISSUER \
                 --build-arg NEXT_PUBLIC_OKTA_CLIENT_ID=$OKTA_CLIENT_ID \
@@ -472,39 +461,36 @@ resource "aws_iam_role_policy" "ecs_task" {
         # BatchGetItem as well as GetItem: the table's field columns read a whole page of documents at
         # once, and a hundred separate GetItems to render one table is not a shape worth granting.
         #
-        # No index ARN, because there is no index read -- the notice id is derived from the object key
-        # (`idp-<ObjectKey>`), so every lookup here is by primary key.
-        Effect   = "Allow"
-        Action   = ["dynamodb:GetItem", "dynamodb:BatchGetItem"]
-        Resource = var.notices_table_arn != "" ? [var.notices_table_arn] : ["arn:aws:dynamodb:*:*:table/__none__"]
-      },
-      {
-        # Documents tab: read the document pipeline's GraphQL API as this task role.
+        # Query, and the INDEX ARN alongside the table ARN, because the tab's list view is a GSI query.
+        # Listing documents is "the newest documents recon ingested in a date window", which is not a
+        # primary-key access pattern: the notice id is derived from the object key (`idp-<ObjectKey>`),
+        # so the table's own key can answer "this one document" but never "the last 30 days in order".
+        # The `idp-document-index` GSI exists for exactly that -- one partition, ingest time as the
+        # range key -- and `/api/recon/idp-documents` queries it with a BETWEEN on the window.
         #
-        # The tracking record ONLY -- statuses, times, page counts. What the extractor read is no longer
-        # fetched from here: it comes off the notice row above. That is why `getFileContents` is absent
-        # below and must stay absent; adding it would put a second implementation of
-        # `backend/idp_hook/explainability.py` back in the console, and the UI must never compute an
-        # extraction confidence differently from the hook the interceptor trusts.
+        # ⚠️ A GSI is a DISTINCT IAM resource from its table. `dynamodb:Query` on the table ARN alone
+        # does NOT authorise a query that names `IndexName`, so the index needs its own
+        # `<table-arn>/index/<name>` entry here. Getting this wrong is invisible in a plan and shows up
+        # only as the deployed Documents tab returning AccessDenied on every page load.
         #
-        # Two named query fields, not the API wildcard. `appsync:GraphQL` is field-scoped, and the
-        # wildcard would silently include uploadDocument, deleteDocument and every mutation that
-        # pipeline adds later -- a console tab that lists documents would carry the authority to
-        # delete them. It also matters for the architecture argument: reading this API directly was
-        # chosen over a recon-owned event mirror specifically because the grant is a couple of named
-        # reads. A wildcard would make the rejected alternative the better one after the fact.
+        # The console reads what the extractor produced off the notice ROW, never from the extraction
+        # pipeline's own API -- there is no `appsync:GraphQL` grant on this role any more, and there must
+        # not be one again. Re-adding a `getFileContents`-style read would put a second implementation of
+        # `backend/idp_hook/explainability.py` in the console, and the UI must never compute an
+        # extraction confidence differently from the hook whose number the interceptor trusts.
         #
-        # The count and presign fields are absent on purpose. The count query returns null to a
-        # machine caller with no error, so the tab counts the rows it received; no query on that API
-        # returns a URL for a source file, so the tab links out to the pipeline's own review UI.
+        # The index ARN arrives as its own variable from `modules/notice-store` rather than being
+        # spelled `"${var.notices_table_arn}/index/*"` the way the cases- and lessons-table statements
+        # above do it. Both idioms are in this file; this follows the uploads-table statement below,
+        # which is the closer precedent -- one specific named index, whose name the module that creates
+        # it owns. A `/index/*` wildcard would also silently cover any index added to the notices table
+        # later, and on THIS table (the actual side of every reconciliation) the point of the statement
+        # is that it grants no more than the one read the tab makes.
         Effect = "Allow"
-        Action = ["appsync:GraphQL"]
-        Resource = var.idp_appsync_api_arn != "" ? [
-          "${var.idp_appsync_api_arn}/types/Query/fields/listDocuments",
-          "${var.idp_appsync_api_arn}/types/Query/fields/getDocument",
-          # An empty Resource list is a malformed policy, so an unwired module falls back to an ARN
-          # that cannot match. The tab then fails closed rather than the statement widening.
-        ] : ["arn:aws:appsync:*:*:apis/__none__/types/Query/fields/__none__"]
+        Action = ["dynamodb:GetItem", "dynamodb:BatchGetItem", "dynamodb:Query"]
+        # An empty Resource list is a malformed policy, so an unwired module falls back to a table name
+        # that cannot exist and the tab fails closed rather than the statement widening.
+        Resource = length(compact([var.notices_table_arn, var.notices_table_index_arn])) > 0 ? compact([var.notices_table_arn, var.notices_table_index_arn]) : ["arn:aws:dynamodb:*:*:table/__none__"]
       },
       {
         # The audit table. Query is for the by_recency index, and the index needs its own ARN.
@@ -522,9 +508,11 @@ resource "aws_iam_role_policy" "ecs_task" {
         #
         # GetObject is granted for two named readers, not as a general read. On the staging prefixes,
         # because CopyObject reads the source as the caller. On the document pipeline's input bucket,
-        # because the Documents tab streams the source file behind a processed document -- and that route
-        # resolves the caller's key through the pipeline's own `getDocument` before reading, so the grant
-        # is only reachable for objects the pipeline already has a record of.
+        # because the Documents tab streams the source file behind a processed document -- raw documents
+        # are deliberately not copied into recon's own storage, so the bytes still come from the pipeline's
+        # bucket. That route never uses the caller's key: it looks the key up in recon's OWN notice row
+        # and reads the `source_document` recorded there, so the grant is only reachable for objects recon
+        # itself ingested.
         #
         # The knowledge-base prefix is `knowledge-base/uploads/` and not `knowledge-base/`: the seed
         # corpus lives directly under `knowledge-base/`, and a grant that covered it would let a
@@ -546,16 +534,16 @@ resource "aws_iam_role_policy" "ecs_task" {
         # It is required anyway, because of how S3 answers a GetObject for a key that is not there.
         # With `s3:GetObject` alone the caller is told `AccessDenied` naming `s3:ListBucket`; only a
         # caller that also holds ListBucket gets `NoSuchKey`. S3 does this deliberately, so that a
-        # bucket's key namespace cannot be probed by reading the error. The cost is that the source
+        # bucket's key namespace cannot be probed by reading the error. Without ListBucket the source
         # route's `NoSuchKey` branch -- the one that explains "the pipeline has a record for this key
-        # but the object is no longer in the input bucket" -- was UNREACHABLE, and every processed
-        # document whose source had since been removed rendered in the Documents tab as
+        # but the object is gone from the input bucket" -- is therefore UNREACHABLE, and a processed
+        # document whose source has since been deleted renders in the Documents tab as
         # "Source document unavailable -- ... is not authorized to perform: s3:ListBucket", which
         # reads as a broken deployment rather than as an expired object.
         #
         # Scoped to the bucket ARN with no `/*`: ListBucket is a bucket-level action, and the pair of
         # statements grants strictly less than a wildcard read -- the task can still only GetObject
-        # from this one bucket, on keys the pipeline's own `getDocument` has already vouched for.
+        # from this one bucket, on keys recon's own notice rows have already vouched for.
         Effect   = "Allow"
         Action   = ["s3:ListBucket"]
         Resource = var.idp_input_bucket_arn != "" ? [var.idp_input_bucket_arn] : ["arn:aws:s3:::__none__"]
@@ -729,6 +717,31 @@ resource "aws_iam_role_policy" "ecs_task" {
         Resource = "arn:aws:logs:${var.region}:${var.account_id}:log-group:*"
       },
       {
+        # The SAME FAS invokes the custom analyst-agreement evaluator's Lambda, and that grant has
+        # to be identity-based on this role. The evaluator Lambda's resource policy allows the
+        # `bedrock-agentcore.amazonaws.com` SERVICE principal (module.agent_evals), which is what
+        # the ONLINE path uses via its own execution role — a FAS presents the task role instead,
+        # so the resource policy never applies to it. Without this, every batch evaluation records
+        #
+        #   error.type    ValidationException
+        #   error.message Access denied when invoking Lambda function: ... User:
+        #                 .../recon-dev-frontend-ecs-task ... is not authorized to perform:
+        #                 lambda:InvokeFunction ... because no identity-based policy allows ...
+        #
+        # against the analyst-agreement evaluator, which the case drilldown renders as the bare
+        # "Evaluator failed: ValidationException". It reads as intermittent because the online
+        # records for the same sessions succeed and the Evals tab merges both log groups.
+        #
+        # GetFunction is granted alongside Invoke because the devguide's code-based-evaluator
+        # prerequisites list the pair, and a FAS can only be exercised by the running ECS task —
+        # discovering the second half of the pair costs another deploy round-trip.
+        Effect = "Allow"
+        Action = ["lambda:InvokeFunction", "lambda:GetFunction"]
+        Resource = compact([
+          var.analyst_agreement_lambda_arn != "" ? var.analyst_agreement_lambda_arn : "arn:aws:lambda:*:*:function:${var.name_prefix}-eval-agreement",
+        ])
+      },
+      {
         # Evals tab: versioned harness-config store (list/read/create v<NNNN>.json).
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject"]
@@ -834,16 +847,14 @@ resource "aws_ecs_task_definition" "frontend" {
       # Recon's own bucket, twice over: raw emails are staged here and derived parts written back.
       { name = "UPLOAD_STAGING_BUCKET", value = var.assets_bucket },
       { name = "EMAIL_PREPROCESS_FUNCTION", value = var.email_preprocess_function_name },
-      # Documents tab. Server-side only -- the endpoint and the signing credentials never reach the
-      # browser, which is why the tab calls a same-origin route instead of this API directly.
-      { name = "IDP_APPSYNC_ENDPOINT", value = var.idp_appsync_endpoint },
-      # The same tab's extracted fields, which come off recon's own notice rows rather than back out of
-      # the pipeline's API. Read with no fallback: a defaulted table name would read a table that does
-      # not exist and report an empty extraction as the truth.
+      # Documents tab. The whole tab -- the list, the detail and the extracted fields -- comes off recon's
+      # own notice rows rather than out of the pipeline's API, so this table name is the only endpoint the
+      # tab needs. Server-side only: the read is issued by the task role from a same-origin route, so no
+      # table name and no credential reaches the browser. Read with no fallback: a defaulted table name
+      # would read a table that does not exist and report an empty extraction as the truth.
       { name = "NOTICES_TABLE", value = var.notices_table },
-      # Counterparty-email draft: which domains an analyst may address. Comma-separated because
-      # the Python authority (recon_core.email_policy.parse_domain_allowlist) and its TS mirror
-      # both parse that shape — one wire format for both readers.
+      # Every BFF platform-tool call (resolution email, status transition, human-approved write)
+      # goes through the egress gateway at this URL, so Policy and the interceptor see it.
       { name = "RECON_GATEWAY_URL", value = var.egress_gateway_url },
       { name = "REPROCESS_CAP", value = tostring(var.reprocess_cap) },
       { name = "AGENT_RUNTIME_ARN", value = var.agent_runtime_arn },
@@ -892,7 +903,7 @@ resource "aws_ecs_task_definition" "frontend" {
       { name = "OKTA_ISSUER", value = var.okta_issuer },
       { name = "OKTA_CLIENT_ID", value = var.okta_client_id },
       # --- Configuration-change role (src/lib/reconAdmin.ts) ---
-      # There is no Cognito user pool here, so membership is an OIDC group claim and the group itself is
+      # Membership is an OIDC group claim from Okta/Entra, so the group itself is
       # created in the identity provider, not by Terraform. Leaving `recon_admin_group` empty is a
       # supported state and it fails CLOSED: nobody can change platform configuration until an operator
       # names a group here AND the provider is configured to release the claim.
@@ -1105,7 +1116,8 @@ resource "aws_cloudfront_origin_request_policy" "this" {
 
 # Security response headers, applied at CloudFront rather than in next.config.js `headers()` so
 # they also cover static assets and CloudFront-generated error responses — neither of which reaches
-# the Next.js server. Live QA 2026-08-09 found none of these headers present (P2-1).
+# the Next.js server, so headers set there would be absent on exactly the responses an attacker
+# reaches first.
 resource "aws_cloudfront_response_headers_policy" "security" {
   count   = var.private_vpc ? 0 : 1
   name    = "${local.prefix}-security-headers"
@@ -1143,10 +1155,10 @@ resource "aws_cloudfront_response_headers_policy" "security" {
       #
       # No font host is allowlisted. Every font (Manrope, Chivo, IBM Plex Mono) is loaded through
       # `next/font/google`, which fetches at BUILD time and emits @font-face rules pointing at
-      # /_next/static/media — same origin. The earlier `fonts.googleapis.com` / `fonts.gstatic.com`
-      # entries were added on the assumption those fetches happen in the browser; they do not, and
-      # a fetch of the live page confirms zero references to either host. An allowlist entry nothing
-      # uses is not free: it reads as evidence that loading from that CDN is supported.
+      # /_next/static/media — same origin. Do NOT add `fonts.googleapis.com` / `fonts.gstatic.com` on
+      # the assumption those fetches happen in the browser: they do not, and a fetch of the served
+      # page contains zero references to either host. An allowlist entry nothing uses is not free —
+      # it reads as evidence that loading from that CDN is supported.
       #
       # There is no `frame-src` either, and its absence is load-bearing. `default-src 'self'` blocks
       # framing, which blocks okta-auth-js's hidden-iframe silent renew — the browser logs
@@ -1252,9 +1264,9 @@ resource "aws_s3_bucket_lifecycle_configuration" "cloudfront_logs" {
   }
 }
 
-# Edge WAF for the distribution (security audit F7 / trivy AVD-AWS-0011). CloudFront is the only
-# internet entry point for the whole app — it fronts the ALB, whose sole port-80 ingress is the
-# CloudFront managed prefix list — so this is the one place a request filter can sit.
+# Edge WAF for the distribution (trivy AVD-AWS-0011). CloudFront is the only internet entry point
+# for the whole app — it fronts the ALB, whose sole port-80 ingress is the CloudFront managed prefix
+# list — so this is the one place a request filter can sit.
 #
 # IMPORTANT: a CLOUDFRONT-scoped web ACL MUST be created in us-east-1, no matter where the rest of
 # the stack lives. This module has no provider block of its own and inherits the root provider, so
@@ -1267,7 +1279,7 @@ resource "aws_wafv2_web_acl" "frontend" {
   name  = "${local.prefix}-waf"
   scope = "CLOUDFRONT"
 
-  # Allow by default: this is a filter in front of an authenticated app (Entra/Cognito OIDC on every
+  # Allow by default: this is a filter in front of an authenticated app (Okta/Entra OIDC on every
   # route), not an allowlist perimeter. Blocking by default would require enumerating every
   # legitimate BFF route here and would break on the next one added.
   default_action {

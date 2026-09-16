@@ -1,5 +1,10 @@
 # Recon Agent container — arm64, Python 3.12-slim, BedrockAgentCoreApp on port 8080.
-FROM --platform=linux/arm64 python:3.12-slim
+# Base pulled from ECR Public, NOT Docker Hub. CodeBuild has no Docker Hub credentials, so an
+# anonymous `docker.io` pull is rate-limited per source IP and fails the build with HTTP 429 —
+# which is what took down every retry attempt of recon-dev-agent-build on 2026-09-10. ECR Public
+# mirrors the same official image and is unmetered from inside AWS. The frontend Dockerfile
+# already does this; keep the two consistent.
+FROM --platform=linux/arm64 public.ecr.aws/docker/library/python:3.12-slim
 
 WORKDIR /app
 
@@ -8,11 +13,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the agent modules (top-level, as imported at runtime) and the shared backend package.
-# NOTE: this list must include EVERY top-level module agent.py (transitively) imports. A missing
-# module crashes the container at startup before it can serve a request — gateway_mcp.py was once
-# dropped here and did exactly that. Keep it in sync with the imports. (idp_client.py was removed:
-# IDP get_results is a gateway tool called via gateway_mcp — there is no direct IDP MCP path.)
-# confidence/auto_resolve/lessons_recall now live under backend/recon_core (COPY backend below).
+# ⚠️ This list must include EVERY top-level module agent.py (transitively) imports. A module missing
+# here crashes the container at startup, before it can serve a single request, so keep it in sync with
+# the imports. There is deliberately no IDP client module, and now no IDP tool either: the extracted
+# fields live on recon's own notice row, reached through the ordinary notices gateway read.
+# confidence/auto_resolve/lessons_recall live under
+# backend/recon_core and arrive with the COPY below.
 COPY agent.py classifier.py proposal.py skills_loader.py llm.py gateway_mcp.py strands_investigator.py ./
 COPY skills ./skills
 COPY backend ./backend

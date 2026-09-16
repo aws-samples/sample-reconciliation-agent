@@ -183,8 +183,8 @@ Delete them when you are done with them.
 
 ## What the repo cannot tell you
 
-Five controls are set outside the tracked tree (protected `RECON_TFVARS`, or SSM at runtime), so a
-local file is not evidence of what is live. Read them off the resource:
+Seven controls are set outside the tracked tree (protected `RECON_TFVARS`, SSM at runtime, or on the
+resource itself), so a local file is not evidence of what is live. Read them off the resource:
 
 ```bash
 aws lambda get-function-configuration --function-name recon-dev-gw-interceptor \
@@ -192,6 +192,15 @@ aws lambda get-function-configuration --function-name recon-dev-gw-interceptor \
 aws ssm get-parameter --name /recon-dev/agent-backend        # which backend you are debugging
 aws ssm get-parameter --name /recon-dev/auto-resolve-threshold  # unreadable = human review
 aws ssm get-parameter --name /recon-dev/tier1-enabled
+
+# Whether Tier-2 runs AT ALL. The stream consumer dispatches nothing, so a disabled rule means
+# escalated cases accumulate in PENDING forever and nothing looks broken.
+aws events describe-rule --name recon-dev-tier2-schedule --query '[State,ScheduleExpression]'
+# The Bedrock token budget, as the Map's MaxConcurrency. Grep the definition, not the variable file.
+aws stepfunctions describe-state-machine \
+  --state-machine-arn arn:aws:states:us-east-1:<account>:stateMachine:recon-dev-tier2 \
+  --query 'definition' | grep -o '"MaxConcurrency":[0-9]*'
+
 aws ssm get-parameters-by-path --path /recon-dev/console --recursive  # stored console settings that
                                                              # OVERLAY the task's group names
 ```
@@ -202,7 +211,7 @@ Settings screen shows which is in force (`stored` / `env` / `default` chips); so
 
 The interceptor one matters most: it is the only place the provenance, evidence-quality and
 case-transition guards are enforced, and in `log` mode all three degrade to observation while every
-call still succeeds. Verified `enforce` on `recon-dev` on 2026-09-07.
+call still succeeds. Confirm it reads `enforce` before you trust any of the three.
 
 ## Where the real invariants live
 
@@ -222,11 +231,11 @@ Don't restate a rule in a second place — these are the single owners:
 | The mock OMS validation rules            | `backend/deal_pipeline/oms_validator.py`, one stable `code` per rule                      |
 | The pipeline's environment names         | `chatbot-app/frontend/src/lib/pipeline/server/env.ts`                                    |
 
-The email-domain allowlist is the cautionary tale: it was once read in four places, and the three
-non-authoritative copies each read a container env var fixed at task start. A narrowed allowlist was
-enforced by the interceptor while the UI still displayed the old one, and an out-of-domain contact
-saved successfully but showed an amber warning that read as a failed save. **A control mirrored in
-four places is a control that lies.**
+The email-domain allowlist is the cautionary tale. Read it in four places — three of them a
+container env var fixed at task start — and narrowing it puts the interceptor on the new list while
+the UI still displays the wider one: an out-of-domain contact then saves successfully and shows an
+amber warning that reads as a failed save. **A control mirrored in four places is a control that
+lies.**
 
 ## Names and language
 

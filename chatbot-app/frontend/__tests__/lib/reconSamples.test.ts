@@ -236,10 +236,6 @@ describe("Scenario 5 — the counterparty-email path", () => {
     "data/input/idp-evaluation/ground-truth/baseline/02-INTEREST-RATESET",
     "Interest Notice - Global Amount Only.pdf/sections/1/result.json",
   );
-  const DERIVE = readFileSync(
-    join(REPO, "backend/recon_core/notice_derive.py"),
-    "utf8",
-  );
   const SKILL = readFileSync(
     join(REPO, "agent-blueprint/recon-agent/skills/record-match-review.md"),
     "utf8",
@@ -285,21 +281,27 @@ describe("Scenario 5 — the counterparty-email path", () => {
     expect(truth.global_amount).toBe("418255.00");
   });
 
-  it("is the GLOBAL_ONLY branch the mapper actually derives", () => {
-    // Pinned against the derivation, not against the string: `amount_type` is what the skill switches
-    // on, and a rename would leave this sample's expectation describing a branch that no longer exists.
-    expect(DERIVE).toContain('AMOUNT_TYPE_GLOBAL_ONLY = "GLOBAL_ONLY"');
-    expect(sample("Scenario 5").expectation).toContain("GLOBAL_ONLY");
+  it("turns on an evidence step the skill still names, not a derived label", () => {
+    // Anchored on the EVIDENCE STEP, not on a derived label. What Scenario 5 depends on is that the
+    // notice carries no fund-level `amount`, so `fund_level_amount_available` is reported unsatisfied
+    // and the case cannot settle internally. ⚠️ Do not re-anchor this on a precomputed classification of
+    // the amounts: that would need `global_amount`/`fee_amount` read by literal key, and this file
+    // would then fail whenever the extraction renamed one, for a reason unrelated to the scenario.
+    expect(SKILL).toContain("fund_level_amount_available");
+    expect(sample("Scenario 5").expectation).toContain(
+      "fund_level_amount_available",
+    );
   });
 
   it("the break-type skill still forbids computing the share itself", () => {
     // If this guidance is ever relaxed the agent would compute an allocation and settle the case, and
     // Scenario 5 would stop being an email scenario — the expectation text would then be wrong.
-    expect(SKILL).toContain("GLOBAL_ONLY");
     // Whitespace-normalised: the skill is hard-wrapped prose, so the sentence spans a line break and
     // a literal substring match would fail on a reflow that changed nothing.
-    expect(SKILL.replace(/\s+/g, " ")).toContain(
-      "Do not compute a share yourself — the allocation is the agent bank's to state",
+    const prose = SKILL.replace(/\s+/g, " ");
+    expect(prose).toContain("Do not compute a share yourself");
+    expect(prose).toContain(
+      "the allocation is the agent bank's to state, not yours to infer",
     );
   });
 

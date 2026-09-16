@@ -8,10 +8,17 @@ SDK** (`strands.Agent` over a `BedrockModel`), with strict JSON replies parsed b
 Every Bedrock call this container makes goes through Strands — there is no direct
 `bedrock-runtime` client left — and every `BedrockModel` is built with ``streaming=False``, so the
 wire API is `Converse`, never `ConverseStream`.
+
+Because every call goes through here, this is also where the container MEASURES what it spent: each
+Strands run's token usage is read off its ``AgentResult`` (:func:`accumulated_usage`) and handed back
+to the caller, which sums the k classification samples together with the investigation loop's total
+(``agent.persist_and_execute``). Nothing in this module sums or stores anything itself — the folding
+belongs to ``recon_core.token_usage``, the one mapper both Tier-2 backends share.
 """
 
 import json
 import logging
+from dataclasses import dataclass, field
 
 from backend.recon_core.schema import ReconItem
 
@@ -125,6 +132,37 @@ def _result_text(result) -> str:
     return str(result)
 
 
+def accumulated_usage(result) -> dict:
+    """Read one Strands run's token usage off its ``AgentResult``.
+
+    ``AgentResult.metrics`` is an ``EventLoopMetrics`` whose ``accumulated_usage`` is a ``Usage``
+    TypedDict: ``inputTokens``/``outputTokens``/``totalTokens`` always, plus ``cacheReadInputTokens``
+    and ``cacheWriteInputTokens`` ONLY when the provider actually reported them. The dict is copied
+    through unchanged for exactly that reason — the two cache keys must stay ABSENT rather than
+    become zeros, which is the distinction ``recon_core.token_usage.summarize_token_usage`` preserves
+    and the case screen's cost figure depends on. Never read them with a ``0`` default here.
+
+    ⚠️ SCOPE: "accumulated" means across the turns of ONE run, not across runs. A fresh ``Agent``
+    starts a fresh ``EventLoopMetrics``, so the k self-consistency samples (a new ``Agent`` each, see
+    ``_default_json_caller``) and the investigation loop each report their own total, and the k+1
+    totals have to be summed by the caller. Reading only the investigation's — the single largest —
+    reports roughly a quarter of real spend at k=3 while looking entirely plausible.
+
+    Shared by the classifier here and by ``strands_investigator``, like ``_result_text`` above: both
+    read the same two attributes off the same object type, and one implementation means the k samples
+    and the investigation cannot come to disagree about what a usage report is.
+
+    :param result: a Strands ``AgentResult``, or any object without metrics (test fakes return plain
+        strings).
+    :returns: the raw camelCase usage dict, or ``{}`` when the object carries no metrics at all. An
+        empty dict contributes nothing to the sum, which is the honest reading of "this call happened
+        and reported no counts" — as opposed to inventing zeros for it.
+    """
+    metrics = getattr(result, "metrics", None)
+    usage = getattr(metrics, "accumulated_usage", None)
+    return dict(usage) if isinstance(usage, dict) else {}
+
+
 def _default_json_caller(
     *,
     model_id: str,
@@ -132,8 +170,8 @@ def _default_json_caller(
     prompt: str,
     max_tokens: int,
     temperature: float | None,
-) -> tuple[str, str]:  # pragma: no cover - thin Strands wiring, exercised via the `caller` seam
-    """One Strands single-turn call, returning the raw reply text and its stop reason.
+) -> tuple[str, str, dict]:  # pragma: no cover - thin Strands wiring, exercised via `caller`
+    """One Strands single-turn call, returning the raw reply text, its stop reason and its usage.
 
     A FRESH ``Agent`` per call, deliberately: a Strands ``Agent`` accumulates conversation state,
     so reusing one across self-consistency samples would make sample 2 a follow-up turn that has
@@ -149,24 +187,89 @@ def _default_json_caller(
     :param prompt: user prompt text.
     :param max_tokens: response cap.
     :param temperature: sampling temperature, or None to omit it (models that deprecated it).
-    :returns: (reply text, stop reason).
+    :returns: (reply text, stop reason, raw usage dict). The usage is this ONE sample's — the Agent
+        is fresh, so its accumulated total covers nothing but this call.
     """
+    from botocore.config import Config as BotocoreConfig
     from strands import Agent
     from strands.models import BedrockModel
 
-    config: dict = {"model_id": model_id, "streaming": False, "max_tokens": max_tokens}
+    config: dict = {
+        "model_id": model_id,
+        "streaming": False,
+        "max_tokens": max_tokens,
+        # ⚠️ Not tuning. Without `boto_client_config` Strands builds its own bedrock-runtime client
+        # with `retries` unset, which resolves to botocore's LEGACY mode: 5 attempts, no client-side
+        # rate limiting. Adaptive mode is the only mode with a token-bucket rate limiter that LEARNS
+        # the throttle rate from the errors it sees and paces requests below it, instead of retrying
+        # into the same wall.
+        #
+        # It also breaks a lockstep problem. Strands' own retry sleeps un-jittered
+        # (strands/event_loop/_retry.py), so under a burst every container backs off on an identical
+        # 4→8→16→32→64s schedule, re-converges, and re-throttles together. Adaptive's per-client
+        # pacing desynchronises them.
+        #
+        # 8 attempts, not 5, and the number comes from an observed failure rather than a guess: on
+        # 2026-09-11 a classification call exhausted the budget with
+        # `ServiceUnavailableException ... (reached max retries: 4)` — five attempts — and the case
+        # failed. Extra attempts are cheap here because a rejected Converse bills no tokens, so the
+        # only cost of a higher ceiling is wall-clock, which adaptive mode is already pacing.
+        "boto_client_config": BotocoreConfig(retries={"mode": "adaptive", "max_attempts": 8}),
+    }
     if temperature is not None:
         config["temperature"] = temperature
     agent = Agent(
         model=BedrockModel(**config), system_prompt=system, tools=[], callback_handler=None
     )
     result = agent(prompt)
-    return _result_text(result), str(getattr(result, "stop_reason", "") or "")
+    return (
+        _result_text(result),
+        str(getattr(result, "stop_reason", "") or ""),
+        accumulated_usage(result),
+    )
 
 
-# Model ids that reject `temperature` (e.g. Claude Sonnet 5 deprecated it and returns a
-# ValidationException). Remembered after the first rejection so we only pay the retry once.
+# Substrings identifying model generations that REJECT `temperature`. The Claude 5 generation (and
+# Opus 4.7/4.8) removed the parameter and answer a ValidationException; earlier models still accept it.
+#
+# ⚠️ SEEDED, and that is the entire point of this table. `_NO_TEMPERATURE` below used to start EMPTY on
+# every cold container, so the first classification call of every container was a ValidationException
+# whose only purpose was to discover a fact this repo already documents — every id in
+# `recon_core.model_select.ALLOWED_MODEL_IDS` is in this generation, so the wasted call was guaranteed,
+# not occasional.
+#
+# It was not free. The wasted call forces the retry below, and on 2026-09-11 a case failed because that
+# RETRY (not the original call) hit a transient Bedrock `ServiceUnavailableException` — four sibling
+# investigations dispatched in the same 36 seconds succeeded. Halving the calls halves the exposure.
+_NO_TEMPERATURE_MARKERS: tuple[str, ...] = (
+    "claude-opus-5",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-sonnet-5",
+    "claude-fable-5",
+    "claude-mythos-5",
+)
+
+# Model ids observed to reject `temperature` at runtime. Retained as a SAFETY NET for a model not
+# covered by the markers above — a future id, or one selected through the Config tab — so the learning
+# behaviour still exists where it is actually needed rather than on every cold start.
 _NO_TEMPERATURE: set[str] = set()
+
+
+def _accepts_temperature(model_id: str) -> bool:
+    """Should ``temperature`` be sent to this model at all?
+
+    Omission is the DEFAULT: a model is assumed to reject the parameter when its id matches a known
+    generation that removed it, without a probe call. Only an id that matches nothing and has not
+    already been observed rejecting it gets `temperature`.
+
+    :param model_id: the model or inference-profile id about to be invoked.
+    :returns: True when ``temperature`` may be included in the request.
+    """
+    if model_id in _NO_TEMPERATURE:
+        return False
+    lowered = model_id.lower()
+    return not any(marker in lowered for marker in _NO_TEMPERATURE_MARKERS)
 
 
 def strands_json(
@@ -177,13 +280,24 @@ def strands_json(
     max_tokens: int = 1500,
     temperature: float = 0.2,
     caller=None,
+    usages: list[dict] | None = None,
 ) -> dict:
     """One Strands model call returning the parsed JSON object from the reply.
 
-    Newer models (e.g. Claude Sonnet 5) DEPRECATED the ``temperature`` inference parameter and
-    reject it with a ValidationException. We include ``temperature`` when the model accepts it
-    (so self-consistency sampling stays diverse on models like Nova) and transparently drop it —
-    caching that per model id — for models that reject it, rather than crashing the invocation.
+    Newer models (the Claude 5 generation, plus Opus 4.7/4.8) REMOVED the ``temperature`` inference
+    parameter and reject it with a ValidationException. **Omitting it is the default**: a model whose
+    id matches a known such generation never receives it, with no probe call — see
+    ``_accepts_temperature``. ``temperature`` is included only for a model that plausibly accepts it,
+    so self-consistency sampling stays diverse on models like Nova, and a model that rejects it despite
+    matching nothing is learned at runtime and dropped from then on.
+
+    That default is not a micro-optimisation. Every id this platform can be configured with is in the
+    rejecting generation, so learning the fact per container meant one guaranteed ValidationException
+    per cold start, and the retry it forced is what a real case died on (see ``_NO_TEMPERATURE_MARKERS``).
+
+    Note the consequence for the self-consistency signal, which is unchanged from current behaviour but
+    worth stating: on these models the k samples' diversity comes from the model's own default sampling
+    rather than an explicit 0.7, because the parameter cannot be set at all.
 
     A reply the model cut off at its token cap (``stop_reason == "max_tokens"``) is retried ONCE
     with double the cap and an explicit brevity instruction, because the truncated JSON is
@@ -196,20 +310,26 @@ def strands_json(
     :param max_tokens: response cap.
     :param temperature: sampling temperature (self-consistency sampling passes a higher one).
     :param caller: test seam — ``callable(*, model_id, system, prompt, max_tokens, temperature)
-        -> (text, stop_reason)`` replacing the live Strands call. Production leaves it None.
+        -> (text, stop_reason, usage)`` replacing the live Strands call. Production leaves it None.
+    :param usages: an OPTIONAL caller-owned sink that every completed attempt's raw usage dict is
+        appended to, in call order, for ``recon_core.token_usage.summarize_token_usage`` to sum. It
+        has to be a sink rather than a return value because the token-cap retry below makes a SECOND
+        billed model call, so a single returned usage would silently drop whichever attempt lost —
+        and a run that had to retry is precisely the expensive one. ``None`` records nothing, for the
+        callers that only want the parsed JSON.
     :returns: parsed JSON dict from the model reply.
     :raises ValueError: when the reply (after at most one retry) holds no parseable JSON object.
     """
     call = caller or _default_json_caller
 
-    def _attempt(*, cap: int, user_text: str) -> tuple[str, str]:
+    def _attempt(*, cap: int, user_text: str) -> tuple[str, str, dict]:
         """One model call, transparently dropping `temperature` for models that reject it.
 
         :param cap: max_tokens for this attempt.
         :param user_text: the user message text.
-        :returns: (reply text, stop reason).
+        :returns: (reply text, stop reason, raw usage dict).
         """
-        want_temperature = model_id not in _NO_TEMPERATURE
+        want_temperature = _accepts_temperature(model_id)
         try:
             return call(
                 model_id=model_id,
@@ -230,7 +350,21 @@ def strands_json(
                 )
             raise
 
-    text, stop_reason = _attempt(cap=max_tokens, user_text=prompt)
+    def _record(usage: dict) -> None:
+        """Append one attempt's usage to the caller's sink (a no-op when there is none).
+
+        Appended UNCONDITIONALLY, including an empty dict: the sink's length is then the number of
+        model calls that came back, so a caller can assert "k+1 calls were measured" rather than only
+        "some tokens were counted". An empty dict contributes nothing to the sum.
+
+        :param usage: the raw camelCase usage dict for the attempt that just completed.
+        :returns: None.
+        """
+        if usages is not None:
+            usages.append(usage)
+
+    text, stop_reason, usage = _attempt(cap=max_tokens, user_text=prompt)
+    _record(usage)
     if stop_reason == "max_tokens":
         # The JSON is necessarily incomplete; parsing it can only raise. Ask again with room to
         # finish and an explicit brevity nudge so the second reply fits.
@@ -240,13 +374,16 @@ def strands_json(
             len(text),
             max_tokens * 2,
         )
-        text, stop_reason = _attempt(
+        text, stop_reason, usage = _attempt(
             cap=max_tokens * 2,
             user_text=(
                 f"{prompt}\n\nIMPORTANT: reply with ONLY the JSON object and keep every string"
                 " value under 500 characters, so the whole object fits in your reply."
             ),
         )
+        # The truncated first attempt was billed too; it is already in the sink above, and this adds
+        # the retry on top rather than replacing it.
+        _record(usage)
     return extract_json(text)
 
 
@@ -288,6 +425,32 @@ def _lessons_block(lessons: list[str] | None) -> str:
     )
 
 
+@dataclass(frozen=True)
+class ClassificationVote:
+    """The outcome of one self-consistency classification run: the vote AND what it cost.
+
+    A named record rather than a widened tuple, for the reason ``recon_core.schema``'s
+    ``InvestigationResult`` gives: a third tuple element is a silently different contract, and the
+    existing ``name, reasoning = ...`` destructuring would have bound WRONGLY had the new element been
+    inserted anywhere but last. Here the old destructuring raises ``TypeError`` on sight, so every
+    call site has to be looked at rather than accidentally still compiling.
+
+    A ``dataclass`` and NOT a pydantic ``BaseModel``, unlike the rest of this container's result
+    types, for exactly that guarantee: a ``BaseModel`` is ITERABLE (it yields ``(field, value)``
+    pairs), so ``name, reasoning = vote`` would raise only because this happens to have three fields
+    — and would silently bind two ``(field, value)`` tuples the day it had two. Nothing validates or
+    serializes this object, so there is nothing to trade away.
+    """
+
+    name: str
+    reasoning: str
+    # Every sample's raw camelCase usage dict, in call order — one per sample, plus one extra for any
+    # sample that had to be retried past the token cap. A LIST that the caller SUMS, never a single
+    # dict: classification is ``samples`` independent model calls, so one report describes one sample
+    # and keeping it alone would under-report the classification's cost by a factor of k.
+    usages: list[dict] = field(default_factory=list)
+
+
 def classify_with_consistency(
     *,
     model_id: str,
@@ -297,7 +460,7 @@ def classify_with_consistency(
     lessons: list[str] | None = None,
     samples: int = 3,
     caller=None,
-) -> tuple[str, str]:
+) -> ClassificationVote:
     """Self-consistency classification: sample the classifier ``samples`` times and majority-vote.
 
     Agreement across independent samples is a far better-calibrated signal than the model's
@@ -305,11 +468,10 @@ def classify_with_consistency(
     black-box settings). Sampling runs at temperature 0.7 for diversity, and each sample is an
     independent single-turn Strands call (see ``_default_json_caller``).
 
-    That is why the vote survives while both numbers it used to produce are gone: it is what makes
-    the PICK stable, and the pick selects the scoring denominator. Neither number is returned —
-    the agreement fraction is NOT a gate (design D5: a 3-sample fraction has four possible values
-    and no calibration study behind it, which is exactly how the deleted 0.6 floor started), and the
-    model is no longer asked how sure it is at all.
+    The vote's whole purpose is to make the PICK stable, since the pick selects the scoring
+    denominator. It deliberately yields no NUMBER: the agreement fraction is not returned and is not
+    a gate — over three samples it has four possible values and no calibration study behind it — and
+    the model is never asked how sure it is.
 
     :param model_id: model or inference-profile id.
     :param system: system prompt text (the shared policy core).
@@ -318,8 +480,9 @@ def classify_with_consistency(
     :param lessons: prior analyst lessons to weight, or None.
     :param samples: how many independent samples to draw.
     :param caller: test seam forwarded to ``strands_json``; production leaves it None.
-    :returns: (majority_class, majority_reasoning) — the reasoning is taken from a sample that voted
-        with the majority, so it explains the class actually returned.
+    :returns: a :class:`ClassificationVote` carrying the majority class, a reasoning taken from a
+        sample that voted WITH the majority (so it explains the class actually returned), and every
+        sample's raw token usage for the caller to fold into the run's total.
     """
     types = "\n".join(f"- {c['name']}: {c['description']}" for c in catalog)
     prompt = (
@@ -334,9 +497,17 @@ def classify_with_consistency(
         '"reasoning": "<2-3 sentences explaining why, under 500 characters>"}'
     )
     votes: list[tuple[str, str]] = []
+    # One sink shared by all `samples` calls, so the returned list is the whole classification's cost
+    # and not the last sample's. `strands_json` appends to it per completed attempt.
+    usages: list[dict] = []
     for _ in range(samples):
         d = strands_json(
-            model_id=model_id, system=system, prompt=prompt, temperature=0.7, caller=caller
+            model_id=model_id,
+            system=system,
+            prompt=prompt,
+            temperature=0.7,
+            caller=caller,
+            usages=usages,
         )
         votes.append((str(d["name"]), str(d["reasoning"])))
     tally: dict[str, int] = {}
@@ -345,7 +516,7 @@ def classify_with_consistency(
     majority = max(tally, key=lambda k: tally[k])
     majority_votes = [v for v in votes if v[0] == majority]
     reasoning = majority_votes[0][1]
-    return majority, reasoning
+    return ClassificationVote(name=majority, reasoning=reasoning, usages=usages)
 
 
 def _summarize_tool_output(result) -> str:

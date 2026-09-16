@@ -9,13 +9,19 @@ and is surfaced to the agent as ``fields_unavailable``, while ``""`` means "extr
 Collapsing the two is fail-quiet behaviour: a field the class never carries would become
 indistinguishable from one the document left blank.
 
-**The two amount fields are two different quantities and must never be merged.** ``amount`` is the
-**fund-attributable** amount — the recipient's share — and is ABSENT when the document supplies
-only a facility-wide total. ``global_amount`` carries that total. Agent-bank notices print them side by side
-(``Global Amount`` / ``Your Share``), and a notice-wide figure is never valid for fund-level validation.
-Absence is what makes that visible: an absent ``amount`` reaches the agent as ``fields_unavailable``, so
-the case reads "fund-level amount validation unavailable" rather than silently comparing the wrong two
-numbers.
+**Extracted content does not live in this model.** The attributes below are recon's own bookkeeping and
+nothing else -- :data:`PROMOTED_EXTRACTED_FIELDS` is empty. Everything the extractor read is carried verbatim
+in ``idp_sections[].fields``, under the extractor's own key names, which is why a field the pipeline
+adds or renames needs no change here. ``search_notices`` resolves a filter against that map, so an
+extracted field is queryable without being an attribute.
+
+**Amounts are a case where that matters.** Agent-bank notices print a facility-wide total beside the
+recipient's share (``Global Amount`` / ``Your Share``), and the facility-wide figure is never valid for
+fund-level validation. Neither is promoted, so neither can be silently substituted for the other by a
+reader that grabs whichever attribute exists — a consumer that wants the share has to name the field it
+means. Absence stays visible: a filter on a share the document did not print comes back in
+``fields_unavailable``, so the case reads "fund-level amount validation unavailable" rather than
+comparing the wrong two numbers.
 
 **No validation status lives here.** There is deliberately no ``internal_validation_status``, no
 reviewer field and no path by which a human marks a notice reviewed. That is an owner decision, and it
@@ -36,74 +42,31 @@ from pydantic import BaseModel, Field
 # ledger write it cannot evaluate rather than passing it.
 ALWAYS_STORED = ("extraction_confidence", "confidence_alert_count")
 
+# ⚠️ EMPTY, AND IT MUST STAY EMPTY. Recon hardcodes NO extracted field name.
+#
+# This tuple used to hold `counterparty`, `notice_date` and `reference` -- the three DynamoDB GSI key
+# attributes, which had to be declared on the table and so could not live in a nested map. Those GSIs are
+# gone: `search_notices` resolves every filter through the notice search index, whose key attributes are
+# names recon owns. With nothing pinning them, the names went too.
+#
+# `tests/input_corpus/test_extraction_requirements.py` asserts the mapper reads exactly these, so adding a
+# name here is the one edit that makes the mapper allowed to couple to the extraction schema again. The
+# bar for doing so is that something must be UNABLE to read `idp_sections[].fields`, and nothing is.
+PROMOTED_EXTRACTED_FIELDS: tuple[str, ...] = ()
+
 
 class Notice(BaseModel):
     """One counterparty notice as extracted by the document pipeline."""
 
     notice_id: str = Field(min_length=1)
     notice_class: str = Field(min_length=1)
-    counterparty: str = Field(min_length=1)
-    # ISO-8601 date; Excel serials are converted at seed time.
-    notice_date: str = Field(min_length=1)
-
-    # Class-dependent extracted fields. None => not extracted for this class.
-    fund: str | None = None
-    facility: str | None = None
-    reference: str | None = None
-    # The FUND-ATTRIBUTABLE amount only ("Your Share"). Absent when the document carries a
-    # facility-wide total and no share — see the module docstring; that absence is load-bearing.
-    amount: Decimal | None = None
-    currency: str | None = None
-
-    # The business activity the notice reports, in the source's own vocabulary: Interest, Rateset,
-    # Rollover, Commitment Fee, Paydown. Distinct from `notice_class`, which is the document pipeline's
-    # classification of the DOCUMENT. A rollover notice proves no cash should move, and that conclusion
-    # keys off this field rather than off a classifier label the operator does not control.
-    activity_type: str | None = None
-
-    # The facility-wide total across every portfolio the notice covers ("Global Amount"). NEVER valid
-    # for fund-level validation, and never a substitute for `amount`.
-    global_amount: Decimal | None = None
-    # Fee-notice economics. `fee_amount` is what a fee break validates against.
-    fee_amount: Decimal | None = None
-    fee_percentage: Decimal | None = None
-
-    # Which of the amount fields this notice actually supports, derived at write time by
-    # backend/recon_core/notice_derive.derive_amount_type. Stored rather than recomputed on read so the
-    # agent and the analyst see the same answer without either of them re-deriving it.
-    amount_type: str | None = None
-
-    # The source's own facility identifier, VERBATIM and in whatever namespace it uses (an `SL-`
-    # prefix is common). Deliberately NOT normalised against `loanx_id` and never assumed equal to it:
-    # absent a governed crosswalk, treating the two as one namespace invents a match.
-    facility_id_source_raw: str | None = None
-    # Market-standard asset identifiers, each under its own field. Mirrors the ledger's columns of the
-    # same names, which is what makes the asset-identity dimension checkable on both sides.
-    loanx_id: str | None = None
-    cusip: str | None = None
-    isin: str | None = None
-
-    # Who sent the notice, and who to chase when expected cash has not arrived. The contact travels on
-    # the notice because that is where it is authoritative — the agent bank for THIS facility, not a
-    # directory lookup that may be stale.
-    agent_bank: str | None = None
-    agent_contact_name: str | None = None
-    agent_email: str | None = None
-    agent_telephone: str | None = None
-
-    # Rate-set and rollover linkage. Surfaced as supporting evidence for the linked interest event,
-    # which is the only way a reader can tell an accrual reset from a payment.
-    contract_id: str | None = None
-    new_contract_id: str | None = None
-
-    # Free-text remarks from the source, e.g. "only interest notice" or a maturity-date warning.
-    # Carried verbatim into the evidence trail rather than parsed.
-    notice_comment: str | None = None
-
-    # The date EXACTLY as the source printed it, kept beside the ISO `notice_date` it was converted
-    # from. Manual extracts have been observed carrying Excel serials (46230), and a conversion with no
-    # record of its input cannot be audited or corrected.
-    notice_date_source_raw: str | None = None
+    # ⚠️ NO EXTRACTED FIELD IS AN ATTRIBUTE HERE, and none may become one. Everything the extractor read
+    # is carried verbatim in `idp_sections` below, under the extractor's own key names, and
+    # `search_notices` resolves filters against that map -- so a field the pipeline adds or renames needs
+    # no change to this model, this file's tests, or the table definition.
+    #
+    # `counterparty`, `notice_date` and `reference` were the last three, kept only because they were GSI
+    # key attributes. See PROMOTED_EXTRACTED_FIELDS above for why that reason no longer exists.
 
     # Provenance derived by whichever component wrote the row, never extracted from the document and
     # never supplied by a caller. On the document path these are constant: OTHER + IDP.
@@ -144,8 +107,8 @@ class Notice(BaseModel):
     # pipeline. Each entry is
     #   {section_id, classification, page_ids, fields, confidences, mean_confidence, alert_count}
     # where `fields` is IDP's `inference_result` verbatim and `confidences` is the flattened
-    # `explainability_info` (see backend/idp_hook/explainability.py, which is now the ONLY
-    # implementation of that flattening -- the console used to carry a TypeScript port of it).
+    # `explainability_info` (see backend/idp_hook/explainability.py, which is the ONLY
+    # implementation of that flattening -- the console must not grow a second one).
     #
     # Empty list, not None: "this section carried no explainability data" is a real answer, and the
     # tab distinguishes it from "no notice row at all".
@@ -153,6 +116,25 @@ class Notice(BaseModel):
     # Set ONLY when `idp_sections` had to be dropped to keep the row under DynamoDB's item limit --
     # see NoticeStore.put, which explains why this one place does not fail loudly.
     idp_sections_omitted: str | None = None
+
+    # Discriminates the two row kinds that now share `notice_id = "idp-<ObjectKey>"`: "notice" (this
+    # model, an extracted document) or "document" (a tracking-only row written by
+    # NoticeStore.put_document_record for a document the pipeline reached a terminal status on
+    # without recon being able to map a notice -- see that method). EVERY READER must treat an
+    # ABSENT `record_kind` as "notice", because every row written before this field existed has
+    # none; the default here only covers rows that round-trip through THIS model, not the plain-dict
+    # writes `put_document_record` makes.
+    record_kind: str = "notice"
+
+    # The IDP pipeline's OWN tracking/progress metadata for this document (see
+    # backend/idp_hook/tracking.build_tracking_snapshot) -- status, timings, config version, and
+    # per-section alert flags -- embedded so the Documents tab renders it WITHOUT a live call into
+    # IDP's AppSync API, which is the whole point of this migration. `None` on any notice written
+    # before this field existed, or whose hook run captured no snapshot. `_idp_gsi_attrs` derives
+    # `idp_record`/`idp_started_at`, the new GSI's key attributes, from this dict's
+    # `initial_event_time` -- see that helper for why those live as separate top-level attributes
+    # rather than being read out of this map at query time.
+    idp_tracking: dict | None = None
 
 
 # DynamoDB's hard per-item ceiling is 400 KB. The margin covers the difference between our
@@ -169,7 +151,10 @@ def _fit_item(item: dict) -> dict:
     Here the trade runs the other way: the row feeds the deterministic matcher AND the gateway
     interceptor's write refusal, so failing the put would take out reconciliation for that notice to
     protect a display convenience. `idp_sections` is the only unbounded attribute -- its size is a
-    function of somebody else's document schema -- so it is the one that yields.
+    function of somebody else's document schema -- so it is the one that yields. `idp_tracking` is
+    bounded (a fixed key set plus a `sections_meta` entry per section, not per extracted field), so
+    it never competes for this trim: `idp_sections` remains the only attribute that can push a row
+    over the limit.
 
     The drop is RECORDED rather than silent: ``idp_sections_omitted`` carries the reason, the tab
     shows a named gap, and no aggregate is affected because ``extraction_confidence`` and
@@ -189,6 +174,32 @@ def _fit_item(item: dict) -> dict:
         "so the per-field detail was not stored"
     )
     return trimmed
+
+
+def _idp_gsi_attrs(idp_tracking: dict | None) -> dict:
+    """Derive the ``idp-document-index`` GSI's key attributes from an IDP tracking snapshot.
+
+    The ONE place this derivation happens, used by both ``NoticeStore.put`` and
+    ``NoticeStore.put_document_record``, so the two call sites can never disagree on where
+    ``idp_started_at`` comes from. A GSI key cannot live inside a nested map, so
+    ``idp_record``/``idp_started_at`` must be promoted to top-level item attributes rather than
+    read out of ``idp_tracking`` at query time -- that promotion is what this function does.
+
+    No snapshot at all, or a snapshot that has not yet been stamped with ``initial_event_time``
+    (see ``backend/idp_hook/tracking.py``'s absence-is-a-fact rule -- that field is genuinely
+    absent until the pipeline reports a start), yields NEITHER attribute. That is CORRECT, not a
+    gap: a row missing either half of a GSI's key simply does not enter that index, so a document
+    with no known start time is properly invisible to a listing keyed on "when did ingestion
+    start" rather than showing up under a fabricated timestamp. Do not "fix" this by defaulting one
+    half only.
+
+    :param idp_tracking: the embedded IDP tracking snapshot, or ``None``.
+    :returns: ``{"idp_record": "document", "idp_started_at": <value>}`` when the snapshot carries a
+        resolvable ``initial_event_time``, otherwise an empty dict.
+    """
+    if idp_tracking and idp_tracking.get("initial_event_time"):
+        return {"idp_record": "document", "idp_started_at": idp_tracking["initial_event_time"]}
+    return {}
 
 
 class NoticeStore:
@@ -220,8 +231,98 @@ class NoticeStore:
         item = notice.model_dump(exclude_none=True)
         for key in ALWAYS_STORED:
             item.setdefault(key, None)
+
+        # See _idp_gsi_attrs's docstring for the "neither attribute" semantics when there is no
+        # usable snapshot -- deliberate, not a gap.
+        item.update(_idp_gsi_attrs(item.get("idp_tracking")))
+
         item = _fit_item(item)
         self._table.put_item(Item=item)
+
+    def put_document_record(self, *, record: dict) -> None:
+        """Write a tracking-only row for a document the pipeline never mapped to a notice.
+
+        Covers a FAILED execution, or a SUCCEEDED one whose document extracted no ``notice_date``.
+
+        Deliberately does NOT construct a :class:`Notice`: a tracking row has no ``notice_date``
+        and no ``counterparty``, both of which ``Notice`` requires, and forcing a fabricated value
+        onto either is exactly the fail-quiet behaviour this module exists to avoid. ``record`` is
+        written as a plain dict.
+
+        Shares ``notice_id = "idp-<ObjectKey>"`` with the notice row for the same document rather
+        than using a separate id namespace, so a document that FAILS and is later reprocessed
+        successfully overwrites its own tracking row instead of leaving two rows behind (one of
+        which would otherwise linger in the Documents tab forever). The write is conditioned so it
+        can only ever overwrite an absent row or another tracking row -- see the
+        ``ConditionExpression`` below -- never a real notice.
+
+        The two GSI key attributes (``idp_record``/``idp_started_at``) are DERIVED from
+        ``record["idp_tracking"]`` via ``_idp_gsi_attrs`` -- the same helper ``put`` uses -- rather
+        than accepted as independently-supplied values. A caller-supplied copy could silently
+        disagree with the snapshot (e.g. a bug that stamps ``idp_started_at`` with failure-detection
+        time instead of ingestion-start time); deriving both from one source makes that
+        disagreement impossible instead of merely unlikely. Any ``idp_record``/``idp_started_at``
+        already present on ``record`` are overwritten by the derived values.
+
+        :param record: the plain item to store. Must carry a non-blank ``notice_id``, a
+            ``record_kind`` of exactly ``"document"``, and an ``idp_tracking`` snapshot with a
+            resolvable ``initial_event_time`` (see ``_idp_gsi_attrs``).
+        :returns: None.
+        :raises ValueError: if ``notice_id`` is missing or blank, if ``record_kind`` is not exactly
+            ``"document"``, or if ``idp_tracking`` yields no usable GSI attributes. Nothing here is
+            defaulted: a caller that cannot supply these has a bug that must surface, not a row
+            that silently fails to index.
+        """
+        notice_id = record.get("notice_id")
+        if not isinstance(notice_id, str) or not notice_id.strip():
+            raise ValueError("put_document_record requires a non-blank 'notice_id'")
+
+        # Must be the EXACT literal "document", not merely present/non-blank -- this is the same
+        # literal the ConditionExpression below compares an EXISTING row's stored record_kind
+        # against (":doc"). That coupling is invisible from here, which is exactly why it needs a
+        # comment: if a caller bug or typo wrote a tracking row with record_kind="notice" (or any
+        # other non-"document" value), a mere non-blank check would have let it through -- it would
+        # then fail the ConditionExpression on the NEXT legitimate call for the same notice_id
+        # (stored record_kind != "document"), landing in the swallow below and silently dropping
+        # new tracking data while protecting a corrupted row as if it were a real notice. That is
+        # exactly the failure the swallow's own comment says must never happen. An equality check
+        # also has no blind spot for non-string falsy values like `0`/`False`, unlike a blank
+        # check.
+        if record.get("record_kind") != "document":
+            raise ValueError("put_document_record requires record_kind == 'document'")
+
+        gsi_attrs = _idp_gsi_attrs(record.get("idp_tracking"))
+        if not gsi_attrs:
+            raise ValueError(
+                "put_document_record requires an idp_tracking snapshot with a resolvable "
+                "initial_event_time"
+            )
+        record = {**record, **gsi_attrs}
+
+        try:
+            self._table.put_item(
+                Item=record,
+                # Permits the write when EITHER no row exists yet for this notice_id, OR the
+                # existing row is itself a tracking row (record_kind == "document"). Blocks it when
+                # the existing row is a real notice -- including a LEGACY notice with no record_kind
+                # attribute at all, because a missing attribute makes `record_kind = :doc` evaluate
+                # false rather than true, which is exactly the absent-means-"notice" convention this
+                # module follows everywhere else.
+                ConditionExpression="attribute_not_exists(notice_id) OR record_kind = :doc",
+                ExpressionAttributeValues={":doc": "document"},
+            )
+        except self._table.meta.client.exceptions.ConditionalCheckFailedException:
+            # DELIBERATE no-op, scoped to this ONE exception for this ONE reason -- this is NOT a
+            # general fallback, and this module's convention is fail loudly everywhere else. A
+            # reprocess that FAILS must not be allowed to clobber a good notice already written for
+            # this notice_id: the matcher may already have cited that notice's extracted data, and
+            # overwriting it with a failure reason would destroy live evidence to record a
+            # transient error. The existing notice stands unchanged; the failure is visible in the
+            # hook's own log instead of in this table.
+            pass
+        # No _fit_item call here, unlike put(): a tracking row carries no idp_sections (there is no
+        # extraction to embed), and idp_tracking itself is bounded -- see _fit_item's docstring --
+        # so nothing in this row can ever hit the item-size trim that function exists for.
 
     def get(self, *, notice_id: str) -> Notice:
         """Fetch a notice by id.

@@ -4,7 +4,7 @@
 #
 # The trigger is the EventBridge rule at the bottom of this file, owned HERE. IDP's own
 # `PostProcessingLambdaHookFunctionArn` parameter is an alternative registration path and is left
-# unset — see that rule's comment for why relying on it left the hook unreachable.
+# unset — see that rule's comment for why this side owns the trigger.
 #
 # It CANNOT open a reconciliation case, by grant as well as by code: the role has PutItem on the
 # notices table and nothing else, and the notices table has no stream.
@@ -60,6 +60,15 @@ resource "aws_iam_role_policy" "hook" {
         Effect   = "Allow"
         Action   = ["dynamodb:PutItem"]
         Resource = var.notices_table_arn
+      },
+      {
+        # The search index. Query and DeleteItem alongside the writes because re-extracting a document
+        # must REPLACE its postings, not add a second set: the index is keyed on (field, value), so a
+        # notice whose counterparty was corrected would otherwise stay findable under the old one
+        # forever. The hook queries this table only to find its own document's stale postings.
+        Effect   = "Allow"
+        Action   = ["dynamodb:BatchWriteItem", "dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Query"]
+        Resource = var.notice_search_table_arn
       },
       {
         # READ-ONLY read of IDP's own buckets at ingest, to embed extracted field values +
@@ -130,15 +139,16 @@ resource "aws_lambda_function" "hook" {
 
   environment {
     variables = {
-      NOTICES_TABLE = var.notices_table
-      ASSETS_BUCKET = var.assets_bucket
+      NOTICES_TABLE       = var.notices_table
+      NOTICE_SEARCH_TABLE = var.notice_search_table
+      ASSETS_BUCKET       = var.assets_bucket
     }
   }
 }
 
 # Allow an EventBridge rule to invoke this hook. Scoped to any rule in this account/region rather
-# than to the one below, because a rule created out-of-band (by an IDP deployment that does register
-# a post-processing hook) must keep working — source_account still closes the confused-deputy hole.
+# than to the one below, so that a rule created out-of-band — by an IDP deployment that DOES register
+# a post-processing hook — also works. source_account still closes the confused-deputy hole.
 resource "aws_lambda_permission" "eventbridge" {
   statement_id   = "AllowIDPEventBridgeInvoke"
   action         = "lambda:InvokeFunction"
@@ -151,32 +161,46 @@ resource "aws_lambda_permission" "eventbridge" {
 ####################################################################################
 # The trigger. RECON owns this rule.
 #
-# The permission above used to be the whole story, on the assumption that "the rule's exact name is
-# created out-of-band by the IDP stack". No such rule ever existed: IDP's
-# `PostProcessingLambdaHookFunctionArn` was empty, its newer deployment registers no post-workflow
-# hook at all, and the hook therefore never fired for a real document. A grant with nothing on the
-# other end of it fails silently and forever — there is no error to notice, only an empty table.
+# ⚠️ Do NOT rely on the Lambda permission above as the trigger. A grant is not an invocation: if
+# nothing on the IDP side registers this ARN as its post-processing hook, the hook simply never fires
+# and there is no error anywhere to notice — only a permanently empty notices table.
 #
-# Reading the workflow's SUCCEEDED event is the SAME channel the hook was always meant to consume
-# (see `data/input/IDP-EXTRACTION-REQUIREMENTS.md` §7: the completion-event hook and the IDP MCP tool
-# are the only two channels). Owning the rule here adds no coupling; it removes a dependency on a
-# parameter in a stack this repo does not deploy.
+# Reading the workflow's SUCCEEDED event is the same channel a registered post-processing hook would
+# consume (`data/input/IDP-EXTRACTION-REQUIREMENTS.md` §7: the completion-event hook and the IDP MCP
+# tool are the only two channels), so owning the rule here adds no coupling. It removes one: recon no
+# longer depends on a parameter set inside a stack this repo does not deploy.
+#
+# Because both paths deliver the same event, exactly ONE of them may be wired at a time — a rule here
+# AND an IDP-side registration would ingest every document twice.
 ####################################################################################
 resource "aws_cloudwatch_event_rule" "idp_complete" {
   count       = var.idp_state_machine_arn == "" ? 0 : 1
   name        = "${var.name_prefix}-idp-document-complete"
   description = "Invoke the recon IDP hook when an IDP document-processing execution succeeds."
 
-  # Matches only SUCCEEDED, and only this state machine. The hook returns early on any other status
-  # (handler.py), so the filter is belt-and-braces — but an unfiltered rule would also invoke it for
-  # every other Step Functions execution in the account, which is a cost and noise problem rather
-  # than a correctness one.
+  # Matches SUCCEEDED plus every TERMINAL non-SUCCEEDED status, and only this state machine.
+  #
+  # This filter USED to be described as belt-and-braces, on the theory that the handler returned
+  # early on anything but SUCCEEDED so the status half of this pattern did no real work. That
+  # reasoning inverts as of Task 4: handler.py now ACTS on FAILED/TIMED_OUT/ABORTED too (it writes a
+  # tracking-only row so a document that never became a notice is still visible in the Documents
+  # tab), so this status list is now load-bearing, not decorative -- a status added to the handler
+  # without a matching addition here would simply never be delivered. A stale version of this exact
+  # comment cost a live debug once; keep the two in sync (see handler.py's own
+  # TERMINAL_NON_SUCCEEDED tuple) rather than trusting memory next time either side changes.
+  #
+  # `stateMachineArn` still scopes this to ONE state machine, not to a configuration: any document
+  # THAT state machine processes matches, including one belonging to a different config version or
+  # even a different deployment of the IDP pipeline that happens to share this state machine. That
+  # is accepted, not a gap -- recon now persists a tracking row for every document the pipeline
+  # reaches a terminal status on, and the Documents tab is what filters by pinned config version,
+  # not this rule.
   event_pattern = jsonencode({
     source        = ["aws.states"]
     "detail-type" = ["Step Functions Execution Status Change"]
     detail = {
       stateMachineArn = [var.idp_state_machine_arn]
-      status          = ["SUCCEEDED"]
+      status          = ["SUCCEEDED", "FAILED", "TIMED_OUT", "ABORTED"]
     }
   })
 }

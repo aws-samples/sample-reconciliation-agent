@@ -2,7 +2,7 @@
 
 The agent trace generalizes ReasoningStep into a typed entry (kind discriminator) that can
 represent lesson recall, classification, skill loading, tool invocations, the executed write,
-and the final proposal — while staying backward-compatible with old-style steps.
+and the final proposal — while still validating a bare step that carries only a skill and reasoning.
 """
 
 from backend.recon_core.schema import ClassificationResult, Proposal, ReasoningStep
@@ -15,9 +15,9 @@ def test_reasoning_step_needs_no_confidence() -> None:
 
 
 def test_reasoning_step_still_reads_a_persisted_confidence() -> None:
-    """Traces written before 2026-09-04 carry the key; cases are long-lived records."""
+    """Cases are long-lived records, and stored traces carry the key — reading one must not raise."""
     step = ReasoningStep.model_validate(
-        {"skill": "propose", "confidence": 0.9, "reasoning": "old trace"}
+        {"skill": "propose", "confidence": 0.9, "reasoning": "stored trace"}
     )
     assert step.confidence == 0.9
 

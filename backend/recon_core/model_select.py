@@ -1,10 +1,9 @@
 """Which Bedrock model the Tier-2 agent invokes, read live from SSM.
 
-The model id used to be deploy-time only: an environment variable on each backend, set from a
-Terraform variable. Changing it therefore meant a merge and an apply, while switching the entire
-agent *backend* was already one click in the Config tab. Comparing two models on the same queue is
-the most common thing anyone wants to do with this platform, and it was the one thing that required
-an infrastructure change.
+Read from SSM rather than a per-backend environment variable, so changing it is a Config-tab click
+and not a merge plus an apply. Comparing two models on the same queue is the most common thing
+anyone wants to do with this platform; it should not be the one thing that needs an infrastructure
+change, particularly when switching the agent *backend* is already a click.
 
 Both Tier-2 backends read through this module — ``backend/harness_agent/worker.py`` and
 ``agent-blueprint/recon-agent/agent.py``. Wiring only one of them is the failure mode to avoid here:
@@ -40,6 +39,57 @@ ALLOWED_MODEL_IDS: tuple[str, ...] = (
     "us.anthropic.claude-fable-5-1",
     "global.anthropic.claude-fable-5-1",
 )
+
+
+#: The only two Tier-2 backends. Anything else in the parameter is a fault, not a third option.
+ALLOWED_BACKENDS: tuple[str, ...] = ("runtime", "harness")
+
+
+def get_agent_backend(param_name: str, *, default: str = "runtime", ssm=None) -> str:
+    """Resolve the active Tier-2 backend, preferring the SSM switch over the deployed default.
+
+    The Config UI writes this parameter, which is how an operator moves traffic between the runtime
+    container and the managed harness with no redeploy. Fails SOFT for the same reason as
+    :func:`get_agent_model_id`: an unreadable toggle has no safe-by-omission answer, because there is
+    no such thing as investigating with no backend, so degrading to the deploy-time value keeps the
+    queue moving and says so at WARNING.
+
+    Lives here rather than in a caller because there are now two: the blocking worker
+    (``backend/tier1/agent_worker``) and the map run's collect step
+    (``backend/tier2_dispatch/collect``). Two copies of a resolver that silently degrades is how the
+    two of them would come to disagree about which backend a run used.
+
+    :param param_name: the SSM parameter holding the selected backend. Empty means never wired, so
+        ``default`` stands.
+    :param default: the backend to use when the parameter is unset, unreadable, or not recognised.
+    :returns: either ``"runtime"`` or ``"harness"``.
+    """
+    fallback = default if default in ALLOWED_BACKENDS else "runtime"
+    if not param_name:
+        return fallback
+    try:
+        if ssm is None:
+            import boto3
+
+            ssm = boto3.client("ssm")
+        raw = ssm.get_parameter(Name=param_name)["Parameter"]["Value"].strip().lower()
+    except Exception as exc:  # noqa: BLE001 - see the docstring: a config read must not stall the queue
+        logger.warning(
+            "agent backend read failed (%s): %s — falling back to the deployed default %s",
+            param_name,
+            exc,
+            fallback,
+        )
+        return fallback
+    if raw in ALLOWED_BACKENDS:
+        return raw
+    # Empty is the normal pre-seed state and gets no warning; anything else is a fault and is named,
+    # because an operator who set it is otherwise left watching a saved selection have no effect.
+    if raw:
+        logger.warning(
+            "agent backend %r is not one of %s — using %s", raw, ALLOWED_BACKENDS, fallback
+        )
+    return fallback
 
 
 def get_agent_model_id(param_name: str, *, default: str, ssm=None) -> str:

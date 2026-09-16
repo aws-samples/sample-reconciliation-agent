@@ -5,8 +5,11 @@ Only invoked for items Tier-1 could not resolve. Classifies against the SKILL.md
 reasoning), builds a propose-only Proposal, and persists it as a PROPOSED case.
 """
 
+import asyncio
+import json
 import logging
 import os
+import threading
 from decimal import Decimal
 
 import boto3
@@ -21,9 +24,10 @@ from backend.recon_core.schema import Proposal, ReasoningStep, ReconItem
 from backend.recon_core.status import CaseStatus
 from backend.recon_core.tier1_hint import read_hint
 
-# NOTE: IDP document lookup (get_results) is a gateway tool — the agent calls it over MCP through
-# the egress gateway (gateway_mcp: document-extraction___IDPTools___get_results), like every other
-# tool. There is no second IDP path: every document read is subject to the same interceptor.
+# NOTE: the agent has NO document-pipeline tool at all. What it needs about an extracted document —
+# the per-section classification and the extracted field values — is already on recon's own notice
+# row as `idp_sections`, which `notices___search_notices` returns. So a document lookup is an
+# ordinary gateway read of recon's own storage, subject to the same interceptor as every other tool.
 
 _LOG = logging.getLogger(__name__)
 
@@ -40,16 +44,21 @@ def flush_traces() -> None:
 
     ⚠️ Without this, most runtime-backend sessions emit exactly ONE span, and the failure is almost
     invisible. `opentelemetry-instrument` installs a `BatchSpanProcessor`, which queues spans and
-    exports on a ~5s timer or once 512 are queued. AgentCore reclaims the container as soon as the
-    entrypoint returns, so a short investigation returns with nearly everything still queued and
-    those spans die with the container.
+    exports on a ~5s timer or once 512 are queued. On the SYNCHRONOUS path AgentCore reclaims the
+    container as soon as the entrypoint returns, so a short investigation returns with nearly
+    everything still queued and those spans die with the container.
 
-    The symptom is not "no traces at all", which is why this survived. A long investigation looks
-    perfectly healthy because the batch timer fires several times mid-run -- observed live on
-    2026-09-04: sessions with 2516, 115 and 88 spans alongside sessions with exactly 1. Online
-    evaluation groups spans by session and cannot score a single span, so the short cases show
-    "No evaluation recorded for this case" indefinitely while the long ones score normally. The
-    evaluation config, its role, its data source and its evaluators were all correct the whole time.
+    On the async path the container is not reclaimed on return — a registered async task makes
+    ``/ping`` report ``HealthyBusy`` and the session is held open — so the flush must happen inside
+    :func:`_investigate_in_thread` instead, after the callback. Same problem, different moment:
+    whoever finishes last has to flush, and on that path the entrypoint is not it.
+
+    The symptom is not "no traces at all", which is what makes it easy to miss. A long investigation
+    looks perfectly healthy because the batch timer fires several times mid-run, so sessions with
+    thousands of spans sit alongside sessions with exactly one. Online evaluation groups spans by
+    session and cannot score a single span, so the short cases show "No evaluation recorded for this
+    case" indefinitely while the long ones score normally — with the evaluation config, its role, its
+    data source and its evaluators all correct.
 
     Never raises. A tracing failure must not fail an invocation that already produced a proposal --
     that would trade a missing trace for a lost case.
@@ -71,22 +80,22 @@ def persist_proposal(*, cases: CaseStore, proposal: Proposal, advance: bool = Tr
     """Attach the proposal (classification + per-step reasoning) to the case, then (when
     ``advance``) transition IN_PROGRESS -> PROPOSED (guarded). All float confidences → Decimal.
 
-    ``advance=False`` re-attaches the proposal WITHOUT transitioning — used to re-persist after
-    the autonomous write so the appended ``execute`` trace step is stored (the case is already
-    PROPOSED by then; a second PROPOSED transition would be a guarded no-op)."""
+    ``advance=False`` re-attaches the proposal WITHOUT transitioning, which is how the appended
+    ``execute`` trace step gets stored after the autonomous write (the case is already PROPOSED by
+    then; a second PROPOSED transition would be a guarded no-op)."""
     steps = [
         {
             "skill": s.skill,
             "reasoning": s.reasoning,
             "evidence": s.evidence,
             "ts": s.ts,
-            # Typed-trace fields (None-valued keys are dropped so old cases stay lean).
+            # Typed-trace fields; None-valued keys are dropped so a stored trace stays lean.
             **{
                 k: v
                 for k, v in {
                     "kind": s.kind,
-                    # Written by nobody; present only on traces persisted before 2026-09-04. It sits
-                    # in this block precisely because it is None now — `Decimal(str(None))` raises.
+                    # Written by nobody, so always None. It sits inside this dropping block for
+                    # exactly that reason — `Decimal(str(None))` raises.
                     "confidence": None if s.confidence is None else Decimal(str(s.confidence)),
                     "tool": s.tool,
                     "tool_input": s.tool_input,
@@ -123,9 +132,105 @@ def persist_proposal(*, cases: CaseStore, proposal: Proposal, advance: bool = Tr
         # Decimal-safe like `steps`: notice rows carry float `amount` and `extraction_confidence`, and
         # boto3 rejects raw Python floats.
         notice_search=to_decimal_safe(proposal.notice_search),
+        # Read off the PROPOSAL rather than taken as an argument to this function, which is what makes
+        # it survive the repeated writes: `handler` persists the same proposal twice (once to reach
+        # PROPOSED before the gated write, once more to store the appended `execute` step), and an
+        # argument would have to be re-supplied at each of them — one omission and the row silently
+        # reverts to NULL, the failure `attach_proposal`'s note about this parameter describes.
+        # `persist_and_execute` sets it once, before the first of those writes.
+        # NOT run through `to_decimal_safe` — see the harness's persist for why the mapper's Decimals
+        # must not be re-coerced here.
+        token_usage=proposal.token_usage,
     )
     if advance:
         cases.transition("item_id", proposal.item_id, CaseStatus.PROPOSED)
+
+
+def resolve_model_id(*, ssm=None) -> str:
+    """Resolve the model id this invocation will ACTUALLY run on, live.
+
+    Read PER INVOCATION, not once at import. This container is long-lived and warm-reused, so an
+    import-time read would pin whichever model was selected when it started — exactly the staleness
+    the live setting exists to remove. ``MODEL_ID`` is the fallback, so a fresh deploy and an
+    unreachable parameter both behave as they did before.
+
+    A module-level function rather than two lines inside :func:`handler` because the answer is stored:
+    it labels the run's ``token_usage``, which is priced against it later. The entrypoint is untestable
+    wiring, so a resolution living there could only be checked by inspection — and a hard-coded
+    default is invisible in the stored row, which would simply carry a plausible id for a model that
+    never ran.
+
+    :param ssm: an SSM client, injected by tests; ``get_agent_model_id`` creates a real one when None.
+    :returns: the model id to invoke, from the operator's SSM selection or the deployed default.
+    """
+    from backend.recon_core.model_select import get_agent_model_id
+
+    return get_agent_model_id(
+        os.environ.get("AGENT_MODEL_PARAM", ""),
+        default=os.environ.get("MODEL_ID", "us.anthropic.claude-sonnet-5"),
+        ssm=ssm,
+    )
+
+
+def persist_and_execute(
+    *,
+    cases: CaseStore,
+    proposal: Proposal,
+    usages: list[dict],
+    model_id: str,
+    threshold: float | None,
+    invoker,
+) -> tuple[str, bool]:
+    """Attach the run's token usage, persist, run the gated write, re-persist, maybe auto-resolve.
+
+    Extracted from :func:`handler` so the WHOLE tail of the runtime path is testable: it holds two
+    writes and an unattended resolution, and every one of them has to carry the cost figure.
+
+    Order matters. ``token_usage`` is set on the proposal FIRST, before any write — the proposal is
+    persisted up to twice below, and ``maybe_auto_resolve`` closes the case without re-persisting it
+    at all, so a value attached later would miss the very cases nobody ever reviews.
+
+    :param cases: the case store holding the IN_PROGRESS case.
+    :param proposal: the scored proposal; MUTATED (``token_usage``, and ``steps`` by the write).
+    :param usages: every raw usage dict this invocation's model calls reported — the k classification
+        samples' plus the investigation loop's. Summed here, once, by the shared mapper.
+    :param model_id: the model this invocation actually ran on (:func:`resolve_model_id`). Required
+        keyword with NO default, matching ``harness_agent.worker.run_investigation``: an operator can
+        switch models from the Config tab, so a default here would mislabel — and therefore
+        misprice — every run made after such a switch, with nothing downstream able to detect it.
+    :param threshold: the admin auto-resolve threshold, or None when auto-resolution is off.
+    :param invoker: ``callable(action: dict) -> result`` performing the gated ledger write.
+    :returns: ``(execution outcome, whether the case was auto-resolved)``.
+    """
+    from backend.recon_core.auto_resolve import autonomous_execute, maybe_auto_resolve
+    from backend.recon_core.token_usage import summarize_token_usage
+
+    # k+1 model calls, ONE stored figure. `summarize_token_usage` — not a local sum — because the
+    # harness backend writes the same field and the case screen shows one number without saying which
+    # backend produced it, so a second summing implementation would be a second answer to "what does
+    # `input_tokens` count".
+    proposal.token_usage = summarize_token_usage(
+        usages=usages, model_id=model_id, backend="runtime"
+    )
+
+    # Persist the proposal (-> PROPOSED) BEFORE the autonomous write: the set_draw_status tool's
+    # server-side provenance gate reads the persisted proposed_action.reference off CASES_TABLE,
+    # so it must exist before the gated write is attempted.
+    persist_proposal(cases=cases, proposal=proposal)
+    outcome = autonomous_execute(proposal=proposal, threshold=threshold, invoker=invoker)
+    # Re-persist WITHOUT advancing so the `execute` trace step appended by autonomous_execute is
+    # stored (the case is already PROPOSED). Carries `token_usage` unchanged — it rides on the
+    # proposal, so this write cannot drop it.
+    if any(getattr(s, "kind", None) == "execute" for s in proposal.steps):
+        persist_proposal(cases=cases, proposal=proposal, advance=False)
+
+    resolved = False
+    if outcome == "executed":
+        # APPROVED -> notification -> RESOLVED. It transitions status and never re-attaches the
+        # proposal, so the usage an auto-resolved case carries is whatever the writes above stored —
+        # which is why it is attached at the top of this function and not after the gate.
+        resolved = maybe_auto_resolve(cases=cases, proposal=proposal, threshold=threshold)
+    return outcome, resolved
 
 
 def observed_tools_from(*, steps: list[ReasoningStep]) -> set[str]:
@@ -270,7 +375,7 @@ def _make_write_invoker():  # pragma: no cover - thin transport wrapper
 def _make_tool_caller():  # pragma: no cover - thin transport wrapper
     """Build the investigation tool transport — the shared Gateway-MCP caller.
 
-    The reads (search_ledger, search_guidance, get_results, search_correspondence) all go through
+    The reads (search_ledger, search_notices, search_guidance, search_correspondence) all go through
     the gateway like everything else; a tool failure degrades to an error dict so investigation
     continues (missing evidence lowers grounding → likelier escalation).
 
@@ -293,32 +398,222 @@ def _make_tool_caller():  # pragma: no cover - thin transport wrapper
     return _call
 
 
+def _send_task_success(*, task_token: str, result: dict) -> None:
+    """Tell Step Functions the investigation finished, so the paused execution resumes.
+
+    Called by the PLATFORM, deliberately not exposed as a gateway tool the model can invoke. The
+    Cedar policy denies the agent role the status-transition tool for the same reason: a run must not
+    be able to declare its own outcome. This function is reached only after ``persist_and_execute``
+    has actually written the case.
+
+    Never raises. A failed callback must not turn a successful investigation into a failure — the
+    proposal is already persisted, and the state's ``TimeoutSeconds`` is the backstop that stops the
+    execution waiting forever. ``TaskTimedOut`` is expected rather than exceptional: it means the
+    state already gave up, so there is nothing left to resume.
+
+    :param task_token: the Step Functions task token passed in on the invocation payload.
+    :param result: the entrypoint's return value, forwarded as the Task's output.
+    :returns: None
+    """
+    try:
+        boto3.client("stepfunctions").send_task_success(
+            taskToken=task_token, output=json.dumps(result, default=str)
+        )
+    except Exception as exc:  # noqa: BLE001 - see docstring; must not fail a persisted proposal
+        if type(exc).__name__ in ("TaskTimedOut", "TaskDoesNotExist"):
+            _LOG.warning("task token no longer waiting (%s); the state already gave up", exc)
+        else:
+            _LOG.error("send_task_success failed; the execution will wait out its timeout: %s", exc)
+
+
+def _send_task_failure(*, task_token: str, exc: BaseException) -> None:
+    """Tell Step Functions the investigation died, so the execution fails now instead of at timeout.
+
+    Paired with ``CaseStore.mark_failed`` rather than replacing it: the state machine needs the token
+    signal to stop waiting, and the analyst queue reads the case row. Dropping either leaves one of
+    the two blind.
+
+    Never raises, for the same reason as :func:`_send_task_success`.
+
+    :param task_token: the Step Functions task token passed in on the invocation payload.
+    :param exc: the exception that ended the investigation.
+    :returns: None
+    """
+    try:
+        boto3.client("stepfunctions").send_task_failure(
+            taskToken=task_token,
+            error=type(exc).__name__[:256],
+            # The API caps `cause` at 32768 characters and rejects anything longer outright.
+            cause=str(exc)[:32000],
+        )
+    except Exception as inner:  # noqa: BLE001 - see docstring
+        _LOG.error("send_task_failure failed; the execution will wait out its timeout: %s", inner)
+
+
+def _investigate_in_thread(payload: dict, task_token: str) -> None:
+    """Run one investigation in the background and signal its outcome by task token.
+
+    ⚠️ Runs on a real THREAD, and that is the whole point — ``asyncio.create_task`` does not work here.
+    Measured 2026-09-11: the SDK runs an async entrypoint on a dedicated worker loop via
+    ``run_coroutine_threadsafe`` and the HTTP response does not complete until the scheduled task
+    does, so a create_task version logged "Async task completed (152.340s)" and then "Invocation
+    completed successfully (152.342s)" — two milliseconds apart. The caller blocked for the entire
+    investigation on BOTH transports, which is the behaviour the async design exists to remove.
+
+    A thread escapes that because the coroutine the SDK awaits genuinely finishes. The ping status is
+    then maintained by hand with ``add_async_task``/``complete_async_task`` — the SDK exposes them for
+    exactly this, work it is not itself awaiting — instead of by the ``@app.async_task`` decorator,
+    which only wraps a coroutine.
+
+    ``asyncio.run`` inside the thread gives the investigation its own event loop, deliberately not the
+    SDK's worker loop: sharing it would put this work back under the thing that awaits.
+
+    The outer bound is the 8-hour session lifetime, which the calling state's ``TimeoutSeconds``
+    (1800s) is well inside, so the state always gives up first. One authority on when to stop waiting.
+
+    :param payload: the invocation payload, ``{"item": {...}, "taskToken": "..."}``.
+    :param task_token: the Step Functions task token to signal on completion.
+    :returns: None
+    """
+    # Registered BEFORE the work starts and completed in `finally`, because this pairing is the only
+    # thing keeping the session alive: /ping reports HealthyBusy while any task is registered, and a
+    # session reporting Healthy is terminated after 15 minutes idle. An early return leaves the
+    # session busy forever; an early completion lets the platform reclaim the container mid-run.
+    task_id = app.add_async_task("investigate")
+    try:
+        result = asyncio.run(_investigate(payload))
+    except Exception as exc:  # noqa: BLE001 - the case row is already written by `_investigate`
+        _send_task_failure(task_token=task_token, exc=exc)
+    else:
+        _send_task_success(task_token=task_token, result=result)
+    finally:
+        app.complete_async_task(task_id)
+        # Flush HERE, not in the entrypoint: by the time this runs the entrypoint returned minutes
+        # ago, so its own flush could not have covered these spans.
+        flush_traces()
+
+
 @app.entrypoint
 async def handler(payload, context):  # pragma: no cover - wiring, pure parts tested separately
-    """Production entrypoint.
+    """Production entrypoint: a router over two invocation modes.
+
+    With a ``taskToken`` on the payload the investigation is BACKGROUNDED onto a thread and this
+    returns in about a second, so the caller's compute is released for the minutes the agent then
+    spends thinking. That is the whole point: AgentCore bills memory but not CPU while the agent waits
+    on the model, so a caller blocked on an open connection is the only party paying for the wait.
+    Completion is signalled by task token instead of by the response body.
+
+    ⚠️ A THREAD, not ``asyncio.create_task`` — see :func:`_investigate_in_thread`. The SDK awaits
+    whatever this coroutine schedules on its worker loop, so a task version held the HTTP response
+    open for the full investigation and the dispatcher timed out anyway. This function returning is
+    only half of releasing the caller; the work has to be somewhere the SDK is not waiting.
+
+    With no ``taskToken`` the old synchronous behaviour is used unchanged, and it is still reachable:
+    the frontend's single-case Retry path invokes the worker directly, with nothing to resume.
+
+    :param payload: ``{"item": {...}}``, optionally plus ``"taskToken"``.
+    :param context: the AgentCore request context (unused).
+    :returns: ``{"status": "accepted"}`` in the async mode, or the full investigation result.
+    """
+    task_token = str(payload.get("taskToken", "") or "")
+    if task_token:
+        # Fire and return. The thread owns persistence, the callback and the span flush.
+        #
+        # daemon=True is safe and deliberate: the container process outlives the request (that is what
+        # the busy ping buys), so the thread is not racing interpreter shutdown. It would only be
+        # killed if the platform reclaimed the container, which the ping is there to prevent.
+        threading.Thread(
+            target=_investigate_in_thread,
+            args=(payload, task_token),
+            name=f"investigate-{payload.get('item', {}).get('item_id', '?')}",
+            daemon=True,
+        ).start()
+        return {"status": "accepted"}
+    return await _investigate(payload)
+
+
+async def _investigate(payload):  # pragma: no cover - wiring, pure parts tested separately
+    """Investigate one item end to end, marking the case FAILED if the run dies.
 
     Reads the live SKILL.md catalog + system prompt from S3 (editable via the Config/Skills UI,
     ~60s TTL; falls back to the baked-in SKILLS_DIR), runs **Strands**-backed self-consistency
     classification (llm.classify_with_consistency) then a **Strands Agent agentic loop**
     (strands_investigator) over the gateway tools guided by the loaded SKILL.md, proposes, and
     persists the PROPOSED case. The analyst reviews it.
+
+    Only this container writes the PROPOSED row, so a run that dies leaves nothing behind. The
+    ``except`` below is what stops that being invisible: without it the case sits in IN_PROGRESS
+    forever and an analyst cannot tell "still thinking" from "died forty minutes ago". A Bedrock
+    throttle is the case that made this necessary — it is neither a timeout (nothing is still running
+    server-side) nor a handled error, so nothing else in the platform would have recorded it.
+
+    :param payload: ``{"item": {...}}``.
+    :returns: the invocation result dict.
+    :raises Exception: re-raises whatever ended the run, after recording it on the case.
     """
+    # Read off the RAW payload, before validation: a ValidationError must still name the item, and
+    # `item.item_id` does not exist yet at that point.
+    item_id = str((payload.get("item") or {}).get("item_id", ""))
+    try:
+        return await _investigate_body(payload)
+    except Exception as exc:
+        _record_failure(item_id=item_id, exc=exc)
+        raise
+
+
+def _record_failure(*, item_id: str, exc: BaseException) -> None:
+    """Escalate the case to FAILED so a dead investigation is visible and retryable.
+
+    Mirrors ``backend.tier1.agent_worker._record_failure``, including its central rule: nothing here
+    raises. The caller is about to re-raise the real error, and replacing that with a DynamoDB error
+    would throw away the diagnosis.
+
+    ``mark_failed`` is conditional on the case still being IN_PROGRESS, so a run that persisted its
+    proposal and then died on the way out is never overwritten — the proposal wins. It raises
+    ``KeyError`` when no case row exists at all, which is why that is caught rather than allowed to
+    mask the original exception.
+
+    :param item_id: the case key, or empty when the payload did not carry one.
+    :param exc: the exception that ended the investigation, stored as the failure reason.
+    :returns: None
+    """
+    if not item_id:
+        _LOG.error("cannot mark a case FAILED: the payload carried no item_id")
+        return
+    try:
+        cases = CaseStore(
+            table=os.environ.get("CASES_TABLE", "recon-cases"),
+            audit=os.environ.get("AUDIT_TABLE", "recon-audit"),
+        )
+        reason = f"{type(exc).__name__}: {exc}"
+        if cases.mark_failed(item_id, reason=reason):
+            _LOG.error("case %s marked FAILED: %s", item_id, reason)
+        else:
+            # No longer IN_PROGRESS, so the run persisted a proposal, or an analyst moved the case,
+            # before it errored on the way out. That result outranks the error.
+            _LOG.warning(
+                "case %s not marked FAILED (status no longer IN_PROGRESS); original error: %s",
+                item_id,
+                reason,
+            )
+    except Exception as inner:  # noqa: BLE001 - see docstring: must not mask the original error
+        _LOG.error("failed to mark case %s FAILED (%s); original error: %s", item_id, inner, exc)
+
+
+async def _investigate_body(payload):  # pragma: no cover - wiring, pure parts tested separately
+    """The investigation itself. See :func:`_investigate` for the failure contract around it."""
     from pathlib import Path
 
     from skills_loader import catalog, catalog_s3, load_skills, load_skills_s3
     from strands_investigator import make_strands_investigator
 
-    from backend.recon_core.model_select import get_agent_model_id
-
     item = ReconItem.model_validate(payload["item"])
-    # Read PER INVOCATION, not once at import. This container is long-lived and warm-reused, so an
-    # import-time read would pin whichever model was selected when it started — exactly the staleness
-    # the live setting exists to remove. The environment variable is the fallback, so a fresh deploy
-    # and an unreachable parameter both behave as they did before.
-    model_id = get_agent_model_id(
-        os.environ.get("AGENT_MODEL_PARAM", ""),
-        default=os.environ.get("MODEL_ID", "us.anthropic.claude-sonnet-5"),
-    )
+    model_id = resolve_model_id()
+    # Every model call this invocation makes appends its raw usage report here, in call order: k from
+    # the self-consistency classifier below, one more from the investigation loop. k+1 entries, summed
+    # once at the end by `persist_and_execute`. Reading only the investigation's — the single largest —
+    # would report roughly a quarter of real spend at k=3 and look entirely plausible on screen.
+    usages: list[dict] = []
     bucket = os.environ.get("ASSETS_BUCKET", "")
     prefix = os.environ.get("SKILLS_PREFIX", "skills/")
 
@@ -349,21 +644,23 @@ async def handler(payload, context):  # pragma: no cover - wiring, pure parts te
 
     # Self-consistency classification: k independent samples, majority vote. The vote returns the
     # class and its reasoning and no number — the auto-resolve gate scores evidence completeness
-    # alone, and gating on the agreement fraction was rejected outright (design D5: three samples
-    # give it four possible values and no calibration behind them). Sampling k times still buys a
-    # more stable label than one sample would, and the label picks the scoring denominator. Each
+    # alone, and the agreement fraction is deliberately not a gate (over three samples it has four
+    # possible values and no calibration behind them). Sampling k times still buys a more stable
+    # label than one sample would, and the label picks the scoring denominator. Each
     # sample is a single-turn Strands call — this container holds no bedrock-runtime client of its own.
     #
     # Tier-1's `tier1_break_type` is deliberately NOT fed into this prompt: all k samples share one
     # prompt, so pointing them at an answer would collapse the vote to unanimous regardless of how
     # ambiguous the item really is. The hint belongs on the INVESTIGATION prompt, where the skill is
     # actually chosen (strands_investigator._class_hint_block), and on the disagreement log below.
-    name, reasoning = classify_with_consistency(
+    vote = classify_with_consistency(
         model_id=model_id, system=system, item=item, catalog=cat, lessons=lessons
     )
+    # Every sample's usage, not just the last: these are k independent calls and each is billed.
+    usages.extend(vote.usages)
     classification = pick_class(
         catalog=cat,
-        fake_llm=lambda _cat: (name, reasoning),
+        fake_llm=lambda _cat: (vote.name, vote.reasoning),
         tier1_hint=read_hint(attributes=item.attributes or {}),
     )
     # Skills remain a composable library — the agent may run one OR several to reconcile the item
@@ -377,11 +674,13 @@ async def handler(payload, context):  # pragma: no cover - wiring, pure parts te
             system=system,
             lessons=lessons,
             tool_caller=_make_tool_caller(),
+            # The (k+1)-th report lands in the same list the classification samples went into.
+            usages=usages,
         ),
         skills=skills,
     )
 
-    from backend.recon_core.auto_resolve import get_threshold, maybe_auto_resolve
+    from backend.recon_core.auto_resolve import get_threshold
 
     score_by_evidence(
         prop=prop, skills=skills, observed_tools=observed_tools_from(steps=prop.steps)
@@ -392,28 +691,21 @@ async def handler(payload, context):  # pragma: no cover - wiring, pure parts te
         audit=os.environ.get("AUDIT_TABLE", "recon-audit"),
     )
 
-    # Confidence-gated AUTONOMOUS execution: when the computed evidence completeness clears the admin
-    # threshold AND there is a clean action, perform the write NOW (appending an `execute`
-    # trace entry) and then take the full auto-resolve path. Below threshold, no clean action,
-    # or a failed write => halt unactioned and escalate (PROPOSED) for human review.
-    from backend.recon_core.auto_resolve import autonomous_execute
-
+    # Confidence-gated AUTONOMOUS execution plus persistence, including the run's token usage — see
+    # `persist_and_execute`, which owns the ordering of the two writes and the unattended resolution.
     threshold = get_threshold(os.environ.get("AUTO_RESOLVE_PARAM", ""))
-    # Persist the proposal (-> PROPOSED) BEFORE the autonomous write: the set_draw_status tool's
-    # server-side provenance gate reads the persisted proposed_action.reference off CASES_TABLE,
-    # so it must exist before the gated write is attempted.
-    persist_proposal(cases=cases, proposal=prop)
-    outcome = autonomous_execute(proposal=prop, threshold=threshold, invoker=_make_write_invoker())
-    # Re-persist WITHOUT advancing so the `execute` trace step appended by autonomous_execute is
-    # stored (the case is already PROPOSED).
-    if any(getattr(s, "kind", None) == "execute" for s in prop.steps):
-        persist_proposal(cases=cases, proposal=prop, advance=False)
-
-    resolved = False
-    if outcome == "executed":
-        resolved = maybe_auto_resolve(cases=cases, proposal=prop, threshold=threshold)
-    # Last thing before returning: AgentCore freezes the container on return, taking any queued
-    # spans with it. See flush_traces().
+    outcome, resolved = persist_and_execute(
+        cases=cases,
+        proposal=prop,
+        usages=usages,
+        model_id=model_id,
+        threshold=threshold,
+        invoker=_make_write_invoker(),
+    )
+    # Last thing before returning on the SYNCHRONOUS path, where AgentCore freezes the container on
+    # return and takes any queued spans with it. On the async path this is not the last moment —
+    # `_investigate_in_thread` flushes again after its callback — but flushing twice is harmless and
+    # leaving it here keeps the synchronous path correct on its own. See flush_traces().
     flush_traces()
     return {
         "item_id": item.item_id,

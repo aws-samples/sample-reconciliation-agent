@@ -44,7 +44,7 @@
  * Node-runtime interceptors are registered in `.next/server/functions-config-manifest.json` (as
  * `/_middleware`), NOT in the top-level `middleware-manifest.json`, which only ever lists EDGE
  * interceptors and is therefore empty here. An empty middleware-manifest is not a sign the gate
- * is missing; verify by hitting the running server instead (see the design doc's probe script).
+ * is missing; verify by hitting the running server with and without a token instead.
  */
 
 import { NextResponse } from "next/server";

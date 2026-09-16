@@ -26,15 +26,6 @@ variable "additional_assets_bucket_arns" {
   default     = []
 }
 
-variable "user_pool_arn" {
-  description = <<-EOT
-    ARN of the Cognito user pool whose SPA client gets its callback URLs patched. Scoped to one
-    pool: UpdateUserPoolClient REPLACES a client's configuration, so a broader grant would let this
-    function reconfigure authentication on any pool in the account.
-  EOT
-  type        = string
-}
-
 variable "log_retention_days" {
   description = "CloudWatch retention for the actor's log group."
   type        = number

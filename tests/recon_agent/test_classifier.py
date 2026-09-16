@@ -26,10 +26,11 @@ CATALOG = [
 
 
 def test_a_known_class_is_kept_whatever_the_model_thought_of_itself() -> None:
-    """The 0.6 floor's only observed effect was turning good classifications into ``unknown``.
+    """A confidence floor on the model's own pick has one effect: turning good classifications into
+    ``unknown``.
 
-    ``unknown`` declares no evidence_steps, so such a case scored 0.0 and could not auto-resolve
-    however complete its evidence was — a silent, unappealable escalation off a self-asserted number.
+    ``unknown`` declares no evidence_steps, so such a case scores 0.0 and cannot auto-resolve however
+    complete its evidence is — a silent, unappealable escalation off a self-asserted number.
     """
     res = pick_class(catalog=CATALOG, fake_llm=lambda c: ("timing", "value date off by 1 day"))
     assert res.class_id == "timing"

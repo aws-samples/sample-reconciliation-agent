@@ -85,8 +85,8 @@ export async function rescoreAgreement(itemId: string): Promise<void> {
     const ds = await evalDataSource();
     const resp = await new BedrockAgentCoreClient({ region: REGION }).send(
       new StartBatchEvaluationCommand({
-        // Name pattern is [a-zA-Z][a-zA-Z0-9_]{0,47} — NO hyphens (verified live:
-        // ValidationException). Underscore-fold the item id and keep within 48 chars.
+        // Name pattern is [a-zA-Z][a-zA-Z0-9_]{0,47} — NO hyphens, and a hyphen is a
+        // ValidationException, not a silent trim. Underscore-fold the item id and keep within 48 chars.
         batchEvaluationName: `agree_${sanitize(itemId)
           .replace(/-/g, "_")
           .slice(0, 34)}_${Date.now() % 1_000_000}`,

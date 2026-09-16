@@ -247,18 +247,21 @@ export function SkillsCatalog<S extends SkillsCatalogSkill>({
   return (
     <div className="space-y-6">
       <header className="flex flex-wrap items-end justify-between gap-4">
-        <div>
+        {/* min-w-0 + flex-1 lets this column consume the leftover header width so the description
+            wraps at the viewport edge instead of a fixed max-width. basis-[320px] makes it drop to
+            its own row before it gets too narrow. */}
+        <div className="min-w-0 flex-1 basis-[320px]">
           <Eyebrow>{eyebrow}</Eyebrow>
           <h1 className="rc-display mt-2 text-[34px] font-black leading-none text-[var(--rc-ink)]">
             {title}
           </h1>
           {description && (
-            <p className="rc-mono mt-3 max-w-2xl text-[12px] leading-relaxed text-[var(--rc-ink-faint)]">
+            <p className="rc-mono mt-3 text-[12px] leading-relaxed text-[var(--rc-ink-faint)]">
               {description}
             </p>
           )}
         </div>
-        <div className="flex flex-wrap gap-3">
+        <div className="flex shrink-0 flex-wrap gap-3">
           {headerActions}
           {canEdit && (
             <button type="button" onClick={openNew} className={BTN_PRIMARY}>

@@ -48,24 +48,24 @@ source connected here produces that. That is a decision, not a gap — there is 
 `internal_validation_status` on a notice and no path by which a human marks one reviewed, so no case
 can ever be corroborated that way. Changing the ceiling means revisiting that first.
 
-| Document                                      | Ledger counterpart                | Scenario | Band          | What decides it                                                                  |
-| --------------------------------------------- | --------------------------------- | -------- | ------------- | -------------------------------------------------------------------------------- |
-| `02/Interest Payment & Rate Set Notice.pdf`   | `GL-2026-000107`                  | 1        | MEDIUM        | all four core dimensions align; MEDIUM is the ceiling                            |
-| `02/Interest Notice - Global Amount Only.pdf` | `GL-2026-000103`                  | 1        | MEDIUM        | `amount` absent, `amount_type = GLOBAL_ONLY` — fund-level validation unavailable |
-| `02/Commitment Fee Notice.pdf`                | `GL-2026-000110` (near miss)      | 3        | MEDIUM        | same borrower, facility and fee type; a different amount                         |
-| `02/Commitment Fee Notice - EUR.pdf`          | `GL-2026-000111` (EUR)            | 3        | MEDIUM / DISQ | currency: the EUR row matches, USD `…000110` is disqualified on it               |
-| `02/Rollover Rate Set Notice.pdf`             | `GL-2026-000109`                  | 4        | capped        | `activity_type = Rollover`, no payment line — no standalone cash expected        |
-| `02/Interest Notice - Other Fund.pdf`         | none (resembles `GL-2026-000108`) | Unknown  | DISQUALIFIED  | the fund alias resolves cleanly — to the wrong fund                              |
-| `03/Optional Paydown Notice.pdf`              | `GL-2026-000105`                  | 1        | MEDIUM        | clean single-row match                                                           |
-| `03/Mandatory Paydown Notice.pdf`             | `GL-2026-000108`                  | 1        | MEDIUM        | clean single-row match                                                           |
-| `03/Paydown and Interest Notice.pdf`          | `GL-2026-000101` + `…000102`      | 1        | MEDIUM        | two line items, two ledger rows — multi-line escalation                          |
-| `03/Paydown Notice - Unmapped Facility.pdf`   | `GL-2026-000105`                  | 1        | MEDIUM        | `SL-99001` with no crosswalk entry — asset identity unavailable                  |
-| `01/Borrowing Notice.pdf`                     | none (a draw disburses cash)      | Unknown  | no match      | a draw has no cash-receipt row to match                                          |
-| `04/Borrowing Cancellation Notice.pdf`        | none (direction conflict)         | Unknown  | DISQUALIFIED  | derives a DEBIT; every ledger row here is a CREDIT                               |
-| `05/… Consolidated Payment Advice.pdf`        | `…000103` + `…000104` + `…000105` | 1        | MEDIUM        | one wire, three components — sum-to-total aggregation                            |
-| `05/… Summary Statement.pdf`                  | one ledger row                    | 1        | MEDIUM        | clean single-row match                                                           |
-| `05/… Activity Memo.pdf`                      | one ledger fee row                | 1        | MEDIUM        | fee component matches a fee row                                                  |
-| `06/Agent Notice - Partial Fax Cover.pdf`     | none                              | Unknown  | DISQUALIFIED  | only the borrower name is legible — issuer text alone is never enough            |
+| Document                                      | Ledger counterpart                | Scenario | Band          | What decides it                                                                                   |
+| --------------------------------------------- | --------------------------------- | -------- | ------------- | ------------------------------------------------------------------------------------------------- |
+| `02/Interest Payment & Rate Set Notice.pdf`   | `GL-2026-000107`                  | 1        | MEDIUM        | all four core dimensions align; MEDIUM is the ceiling                                             |
+| `02/Interest Notice - Global Amount Only.pdf` | `GL-2026-000103`                  | 1        | MEDIUM        | `amount` absent, only a facility-wide total in `idp_sections` — fund-level validation unavailable |
+| `02/Commitment Fee Notice.pdf`                | `GL-2026-000110` (near miss)      | 3        | MEDIUM        | same borrower, facility and fee type; a different amount                                          |
+| `02/Commitment Fee Notice - EUR.pdf`          | `GL-2026-000111` (EUR)            | 3        | MEDIUM / DISQ | currency: the EUR row matches, USD `…000110` is disqualified on it                                |
+| `02/Rollover Rate Set Notice.pdf`             | `GL-2026-000109`                  | 4        | capped        | `activity_type = Rollover`, no payment line — no standalone cash expected                         |
+| `02/Interest Notice - Other Fund.pdf`         | none (resembles `GL-2026-000108`) | Unknown  | DISQUALIFIED  | the fund alias resolves cleanly — to the wrong fund                                               |
+| `03/Optional Paydown Notice.pdf`              | `GL-2026-000105`                  | 1        | MEDIUM        | clean single-row match                                                                            |
+| `03/Mandatory Paydown Notice.pdf`             | `GL-2026-000108`                  | 1        | MEDIUM        | clean single-row match                                                                            |
+| `03/Paydown and Interest Notice.pdf`          | `GL-2026-000101` + `…000102`      | 1        | MEDIUM        | two line items, two ledger rows — multi-line escalation                                           |
+| `03/Paydown Notice - Unmapped Facility.pdf`   | `GL-2026-000105`                  | 1        | MEDIUM        | `SL-99001` with no crosswalk entry — asset identity unavailable                                   |
+| `01/Borrowing Notice.pdf`                     | none (a draw disburses cash)      | Unknown  | no match      | a draw has no cash-receipt row to match                                                           |
+| `04/Borrowing Cancellation Notice.pdf`        | none (direction conflict)         | Unknown  | DISQUALIFIED  | derives a DEBIT; every ledger row here is a CREDIT                                                |
+| `05/… Consolidated Payment Advice.pdf`        | `…000103` + `…000104` + `…000105` | 1        | MEDIUM        | one wire, three components — sum-to-total aggregation                                             |
+| `05/… Summary Statement.pdf`                  | one ledger row                    | 1        | MEDIUM        | clean single-row match                                                                            |
+| `05/… Activity Memo.pdf`                      | one ledger fee row                | 1        | MEDIUM        | fee component matches a fee row                                                                   |
+| `06/Agent Notice - Partial Fax Cover.pdf`     | none                              | Unknown  | DISQUALIFIED  | only the borrower name is legible — issuer text alone is never enough                             |
 
 There is deliberately **no row for the top band**. It would be a case that can only fail.
 
@@ -94,8 +94,8 @@ the one check that looks for it.
 ## The extraction configuration
 
 `idp-extraction-config/classes.json` is the class-schema half of the deployed extraction
-configuration, tracked here because it previously existed only in the document pipeline's DynamoDB
-table — where it drifted away from the contract with nothing able to notice. See that folder's README;
+configuration, tracked here because its only other home is the document pipeline's DynamoDB table —
+where it can drift away from the contract with nothing able to notice. See that folder's README;
 `scripts/push_idp_extraction_config.py` installs it and `tests/input_corpus/test_extraction_config.py`
 holds it against both the contract and the ground truth above.
 

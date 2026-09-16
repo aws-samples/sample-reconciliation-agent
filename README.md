@@ -1,25 +1,19 @@
 # Reconciliation Workflow Agent
 
 A sample agentic reconciliation platform. Work arrives as a structured dataset posted to an API.
-Whatever matches deterministically clears without a model touching it. The rest goes to an LLM
-agent, which classifies the break, runs whichever investigation skills apply — including searching
-for corresponding unstructured data (e.g. notice documents) — and then either resolves the item
-itself or writes up a proposal for an analyst as a next step.
+Whatever matches deterministically clears without a model touching it. The rest goes to an agent, which classifies the break, runs whichever investigation skills apply — including searching for corresponding unstructured data (e.g. notice documents) —
+and then either resolves the item itself or writes up a proposal for an analyst as a next step (e.g. an email draft).
 
 It resolves on its own only when the computed evidence score clears an admin threshold and there is a
 clean, provable action available. That gate does not live in the prompt: an AgentCore Policy
 (Cedar) on the tools gateway checks the evidence score server-side, so a below-threshold model cannot
-write even if it talks itself into trying. Proposals that do reach a human get approved or
-corrected, and the corrections come back to the agent as lessons.
+write even if it talks itself into trying.
 
-The Tier-2 agent has two interchangeable backends, and a single SSM parameter (`agent_backend`)
-picks between them, which makes A/B and rollback instant. One is a container AgentCore Runtime
-running a hand-rolled Strands/Bedrock loop. The other is the managed AgentCore Harness, declared
-in config with no orchestration code of ours. Which Bedrock model either one invokes is a second
-runtime parameter (`agent-model-id`), also switchable from the Config tab, so comparing two models on
-one queue needs no redeploy. Alongside both, an evaluation pipeline scores
-sessions against analyst decisions as ground truth and surfaces prompt and tool recommendations
-in the Evals tab.
+The Tier-2 agent has two interchangeable backends, one is a container AgentCore Runtime
+running an agent with the Strands SDK. The other is the managed AgentCore Harness, declared
+in config with no orchestration code. Which Bedrock model either one invokes is configurable as well.
+Alongside both, an evaluation pipeline scores sessions against analyst decisions as ground truth and surfaces prompt and tool recommendations in the Evals tab.
+In addition AgentCore Memory and user feedback is used to extract generalizable lessons learned from each session.
 
 ## Two applications, one console
 
@@ -242,33 +236,35 @@ _Full interactive version: [`assets/Solution Architecture.html`](assets/Solution
 
 ![Operator console — every screen, in nav order](assets/img/demo.gif)
 
-_Each screen of the console, 2.5s apart. Stills in [`assets/img/`](assets/img/)._
-
 The architecture has three planes:
 
-| Plane               | Purpose                                                                                                                                                    | Key services                                                                                               |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| **Ingestion**       | Email/document intake → unique event id → raw storage → classification → field extraction (Bedrock LLM) → schema validation → per-field confidence scoring | IDP pipeline (Lambda, S3, DynamoDB)                                                                        |
-| **Application**     | Human-in-the-loop review frontend + backend API; agent runtime for the Reconciliation Agent                                                                | Frontend (React/Next.js), ECS/ALB, Backend API, AgentCore Runtime/Harness                                  |
-| **Shared services** | Tool access, memory, identity, policy, observability, evaluation for all agents; LLM access                                                                | AgentCore Gateway, Memory, Identity, Policy, Evaluation; Bedrock Knowledge Base; Bedrock foundation models |
+| Plane               | Purpose                                                                                                                                                    | Key services                                                                                                |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| **Ingestion**       | Email/document intake → unique event id → raw storage → classification → field extraction (Bedrock LLM) → schema validation → per-field confidence scoring | IDP pipeline (Lambda, S3, DynamoDB)                                                                         |
+| **Application**     | Human-in-the-loop review frontend + backend API; agent runtime for the Reconciliation Agent                                                                | Frontend (React/Next.js), ECS/ALB, Backend API, Step Functions (Tier-2 dispatch), AgentCore Runtime/Harness |
+| **Shared services** | Tool access, memory, identity, policy, observability, evaluation for all agents; LLM access                                                                | AgentCore Gateway, Memory, Identity, Policy, Evaluation; Bedrock Knowledge Base; Bedrock foundation models  |
 
 ### High-level architecture components
 
-| Concern            | Implementation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Entry points       | The IDP post-processing hook Lambda (`recon-dev-idp-hook`, invoked by the IDP stack on document completion), and an intake HTTP API (API Gateway + Cognito JWT) for structured datasets                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| Item / case stores | Five DynamoDB tables: `recon-dev-items` (canonical `ReconItem` inputs — **the only stream-enabled table**, which is what makes writing an item the way to open a case), `recon-dev-cases` (case lifecycle, status GSI), `recon-dev-audit` (append-only status-transition log), `recon-dev-lessons` (analyst decisions: approval, correction, auto-resolution, one row per item+trigger), and `recon-dev-notices` (extracted documents as **evidence**, deliberately with no stream, so an extracted document can never open a case). Operator configuration lives in three more: contacts, email templates and workflow types                                                                                                                                                                                                                                                                                                                            |
-| Deterministic tier | A Tier-1 Lambda consuming the items stream. Sided items match within tolerance; sides-less (IDP) items are looked up in a mocked general ledger (Athena over S3) and auto-clear only on an unambiguous attribute match: account name, entry-type direction, and amount within tolerance. Toggleable via SSM or the Config tab                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| Agent              | Two interchangeable backends selected by the `agent_backend` SSM parameter: an AgentCore Runtime container (Strands `Agent` agentic loop), or the managed AgentCore Harness (config-declared), with the model each one invokes selected by a second parameter (`agent-model-id`), read per invocation. Skills and the system prompt are live from S3, with a ~60 s cache on the runtime and per-session on the harness. Two AgentCore gateways (AWS_IAM/SigV4): the egress tools gateway (10 targets, 7 of them conditional — one is a managed `bedrock-knowledge-bases` **connector** target, the rest Lambda/OpenAPI/MCP) with the Cedar Policy confidence gate, and an ingress agent gateway fronting the runtime (one `http/agentcoreRuntime` target of its own). AgentCore Memory holds the `lessons_learned` semantic strategy, and a fully managed Bedrock Knowledge Base holds the guidance corpus, queried with agent-supplied metadata filters |
-| Evaluation         | AgentCore Online Evaluation (a custom analyst-agreement evaluator plus 3 builtins) over harness OTel traces, on-demand batch re-scores, managed recommendations, and a versioned harness-config store (immutable S3 docs + SSM pointer). All of it surfaces in the Evals tab                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Concern            | Implementation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Entry points       | The IDP post-processing hook Lambda (`recon-dev-idp-hook`, invoked by recon's **own** EventBridge rule when an IDP document-processing execution reaches a terminal status), and an intake HTTP API (API Gateway + an OIDC JWT authorizer on the same Okta/Entra provider the console uses) for structured datasets                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Item / case stores | Five DynamoDB tables: `recon-dev-items` (canonical `ReconItem` inputs — **the only stream-enabled table**, which is what makes writing an item the way to open a case), `recon-dev-cases` (case lifecycle, status GSI), `recon-dev-audit` (append-only status-transition log), `recon-dev-lessons` (analyst decisions: approval, correction, auto-resolution, one row per item+trigger), and `recon-dev-notices` (extracted documents as **evidence**). Operator configuration lives in three more: contacts, email templates and workflow types                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Deterministic tier | A Tier-1 Lambda consuming the items stream. Items match within tolerance and items are looked up in a mocked general ledger (Athena over S3) and auto-clear only on an unambiguous attribute match: account name, entry-type direction, and amount within tolerance (toggleable via SSM or the Config tab)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Tier-2 dispatch    | A Step Functions state machine (`recon-dev-tier2`, STANDARD) on an EventBridge schedule. It collects `PENDING` cases oldest-first off the status GSI to S3, then investigates them in a Distributed `Map` whose **`MaxConcurrency` is the Bedrock token budget** — the escalating consumer dispatches nothing. Each child claims its case, then hands the runtime a Step Functions **task token** so the dispatcher returns in ~1s instead of blocking for the investigation                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Agent              | Two interchangeable backends selected by the `agent_backend` SSM parameter: an AgentCore Runtime container (Strands `Agent` agentic loop), or the managed AgentCore Harness (config-declared), with the model each one invokes selected by a second parameter (`agent-model-id`), read per invocation. Skills and the system prompt are live from S3, with a ~60 s cache on the runtime and per-session on the harness. Two AgentCore gateways (AWS_IAM/SigV4): the egress tools gateway (9 targets, 6 of them conditional — one is a managed `bedrock-knowledge-bases` **connector** target, the rest Lambda/OpenAPI) with the Cedar Policy confidence gate, and an ingress agent gateway fronting the runtime (one `http/agentcoreRuntime` target of its own). AgentCore Memory holds the `lessons_learned` semantic strategy, and a fully managed Bedrock Knowledge Base holds the guidance corpus, queried with agent-supplied metadata filters |
+| Evaluation         | AgentCore Online Evaluation (a custom analyst-agreement evaluator plus 3 builtins) over harness OTel traces, on-demand batch re-scores, managed recommendations, and a versioned harness-config store (immutable S3 docs + SSM pointer). All of it surfaces in the Evals tab                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | Frontend           | Next.js on ECS Fargate behind an ALB and CloudFront, with a WAFv2 web ACL (`AWSManagedRulesCommonRuleSet`) on the distribution, which is the single internet entry point. Okta OIDC login (`auth_provider`, swappable to Entra) and same-origin BFF routes (`/api/recon/*`, plus `/api/pipeline/*` when the Deal Pipeline app is enabled) running under the task role, gated per app by identity-provider groups (see "Two applications, one console")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| Notifications      | Microsoft Graph is the only channel (app-only, from the shared mailbox), reached through the egress gateway's OpenAPI target. It carries resolution emails on approve/auto-resolve (`cases/notify.py` plus the frontend BFF calling `sendSharedMailboxMail` through the gateway with SigV4), counterparty email sent by the BFF from an analyst-approved draft, and mailbox reads (`listSharedMailboxMessages`, reached only through the `search_correspondence` wrapper). No agent holds a send tool on either backend: the model writes the counterparty message into its proposal and a human approves a specific revision of it. Nothing stores an address: a draft and a resolution notice both name a contact id, and the address is read from the contacts table at the moment of sending, so deactivating a contact stops mail to them even if a draft was already approved. Sends are gated at the gateway REQUEST interceptor.                 |
-| IaC                | Terraform (`infra/`) with S3-backed state. The AgentCore Harness lifecycle is an `aws_cloudformation_stack` (`infra/modules/recon-agent-harness`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Notifications      | Microsoft Graph is the only channel (app-only, from the shared mailbox), reached through the egress gateway's OpenAPI target. It carries resolution emails on approve/auto-resolve (`cases/notify.py` plus the frontend BFF calling `sendSharedMailboxMail` through the gateway with SigV4), counterparty email sent by the BFF from an analyst-approved draft, and mailbox reads (`listSharedMailboxMessages`, reached only through the `search_correspondence` wrapper). No agent holds a send tool on either backend: the model writes the counterparty message into its proposal and a human approves a specific revision of it. Nothing stores an address: a draft and a resolution notice both name a contact id, and the address is read from the contacts table at the moment of sending, so deactivating a contact stops mail to them even if a draft was already approved. Sends are gated at the gateway REQUEST interceptor.            |
+| IaC                | Terraform (`infra/`) with S3-backed state. The AgentCore Harness lifecycle is an `aws_cloudformation_stack` (`infra/modules/recon-agent-harness`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
 **Intelligent Document Processing (IDP) decoupling:** Two channels reach the independently-deployed
-IDP solution and no others: the inbound hook invocation and the IDP MCP tool. One storage read is
-sanctioned, and it happens at ingest, when the hook copies extracted field values and page images
-into the recon item. After that the runtime never touches IDP storage.
+IDP solution and no others: the completion event recon's own EventBridge rule reads, and the IDP MCP
+tool. IDP storage is touched in three sanctioned places, none of them the agent: the hook reads the
+output bucket at ingest, to copy extracted field values and page images into the notice; the console
+streams a document's raw bytes out of the input bucket for the Documents tab, rather than duplicating
+customer financial documents into recon storage; and an extraction upload is put into that same input
+bucket. The runtime and the agent never touch IDP storage at all.
 
 ---
 
@@ -282,10 +278,19 @@ backend/                Python 3.12 Lambda handlers
                         errors (ToolDenied), email_policy + templating (the
                         authority on which recipient and which wording a send may carry —
                         the BFF, the interceptor and the browser all defer to it),
-                        skills_s3, prompt_source
-                        (shared-core + harness-contract composition), otel_client
-                        (client-side spans, baggage, trace propagation)
-  tier1/                DynamoDB stream consumer + agent-worker (ingress-gateway / direct / harness selector)
+                        skills_s3, prompt_source (shared-core + harness-contract
+                        composition), session (the one owner of AgentCore session-id
+                        derivation), otel_client (client-side spans, baggage, trace
+                        propagation)
+  tier1/                DynamoDB stream consumer (opens the case PENDING; dispatches nothing) plus
+                        the BLOCKING agent-worker, still used for the harness backend and for the
+                        frontend's single-case Retry. Two independent switches, not a flat three-way
+                        choice: `harness` vs `runtime` (SSM-backed), and — for `runtime` only —
+                        ingress vs direct transport to the same container
+  tier2_dispatch/       Async dispatch for the map run: a dispatcher that hands the agent a Step
+                        Functions task token and returns in ~1s, a collector that materialises the
+                        PENDING list to S3 (a Distributed Map's ItemReader reads S3 only), and the
+                        two guarded case writes (claim / mark-failed)
   harness_agent/        Managed-Harness backend: worker, stream, intake (proposal validation +
                         reference derivation), prompting, session, config_store
   gl_tool/              General-ledger read + set_draw_status write (status allowlist only;
@@ -299,25 +304,27 @@ backend/                Python 3.12 Lambda handlers
                         must match the draft approved on the case at that revision
                         (log/enforce modes), plus OData argument normalization on the
                         listSharedMailboxMessages read
-  notify_tool/          Microsoft Graph email: graph.py (app-only client), send + search handlers
+  notice_tool/          search_notices target over the notices table; `_matches` is the single choke
+                        point that excludes tracking-only rows from the agent's evidence
   correspondence_tool/  correspondence-search gateway target: search_correspondence(query, top)
                         — sanitizes the model's arguments into Graph's OData form ($search
                         double-quoted, $top an integer) and re-enters this gateway to call
                         listSharedMailboxMessages, so the Graph credential stays in the vault
   eval_agreement/       Analyst-agreement custom evaluator Lambda
   intake/               Intake API handler
-  idp_hook/             IDP post-processing hook Lambda + mapper + explainability (aggregates
-                        IDP's per-field extraction confidences into the notice's
-                        extraction_confidence — IDP emits no document_class.confidence)
-  cases/                Resolution-email helper (notify.py), shared by the proposal service +
-                        approve path — the JWT cases BFF was removed (status writes now go
-                        through the recon-status gateway tool)
-  contacts/             Recipient list + email templates: store.py (ContactStore /
-                        TemplateStore — resolve_address is the only code path that reads a
-                        contact's address; the agent-facing read projects it away) and
-                        handler.py, the read-only gateway target the agent uses to pick a
-                        recipient and a template by id
-  skills_api/           Skills BFF (CRUD)
+  idp_hook/             IDP post-processing hook + mapper + explainability (aggregates IDP's
+                        per-field confidences into the notice's extraction_confidence) + tracking
+                        (the pipeline's own run snapshot embedded on the row). A terminal outcome
+                        that produced no notice recon could map still gets a tracking-only row
+  email_preprocess/     Called by the BFF upload route per .msg/.eml: derives body + attachments
+                        into the assets bucket and returns a manifest, so the bytes never pass
+                        through the web task. A refusable email returns a reason, not a raise
+  kb_ingest/            Knowledge-base ingestion for operator uploads: S3 → SQS delay queue at
+                        reserved concurrency 1, because StartIngestionJob fails while a job is
+                        in flight. Confirms a key by listing documents, never by job statistics
+  cases/                Resolution-email helper; no cases BFF — status writes go through the tool
+  contacts/             Recipient list + email templates; the agent-facing read projects addresses away
+  skills_api/           Skills BFF: read-only (`GET /skills`); the Skills tab's writes are BFF routes
   lessons_api/          Lessons BFF
   deal_pipeline/        Deal Pipeline: parser_handler (Bedrock Converse tool loop with
                         lookup_security_master + stage_deal), oms_upload_handler (mock OMS
@@ -349,26 +356,34 @@ docs/
                         environment, console integration, demo script
 
 infra/
-  modules/              Terraform modules: foundation, intake, tier1, idp-hook, recon-agent,
-                        recon-agent-harness, agent-evals, gl-mock, api, frontend-ecs,
-                        lambda-package, lambda-logs, network, observability, microsoft-graph-obo,
-                        deal-pipeline (bucket, tables, memories, parser + OMS Lambdas),
-                        console-settings (the console-wide layer's seeded SSM parameters)
-  environments/recon/   The console's root (S3-backed state via a partial backend config);
-                        enable_deal_pipeline composes modules/deal-pipeline into it
+  modules/              Terraform modules: foundation, notice-store, contact-store,
+                        workflow-types, upload-audit, intake, tier1, idp-hook, email-preprocess,
+                        kb-ingest-trigger, recon-agent, recon-agent-harness, agent-evals, gl-mock,
+                        api, frontend-ecs, lambda-package, lambda-logs, deploy-actions, network,
+                        observability, microsoft-graph-obo, tier2-dispatch, agentcore-memory,
+                        seeded-object, deal-pipeline (bucket, tables, memories, parser + OMS
+                        Lambdas), console-settings (the console-wide layer's seeded SSM parameters)
+  environments/recon/   The console's root, and the only one (S3-backed state via a partial
+                        backend config); enable_deal_pipeline composes modules/deal-pipeline
+                        into it
   bootstrap/            Terraform-state bucket bootstrap (local state; import-first — see
                         "Getting Started" step 1)
-  scripts/              Utility scripts (deploy-recon.sh, spike_harness.py, spike_evals.md)
+  scripts/              deploy-recon.sh, push_editable_seeds.py, gen_harness_config_json.py,
+                        reset_runtime_data.py, verify_harness_surface.py,
+                        evals-provisioning-notes.md
 
-data/                   Synthetic sample documents + mocked general-ledger CSV (recon);
+data/                   Synthetic sample documents, mocked general-ledger CSV, the kb-seed
+                        guidance corpus and the tracked IDP extraction config (recon);
                         deal-emails/ (the pipeline's seven fictional emails, file name = corpus
                         id) and security-master/ (issuers + canonical counterparties)
 tests/                  pytest (moto-mocked AWS), one directory per backend package incl.
                         tests/deal_pipeline; frontend: chatbot-app/frontend/__tests__
-assets/                 Architecture diagrams (SVG/HTML), screenshots, CUJ walkthrough + template
+assets/                 Architecture diagrams (SVG/HTML), screenshots, CUJ walkthrough +
+                        template, and the detail pages this README links out to (ci-cd.md,
+                        agent-evaluation.md, private-vpc-deployment.md)
 
 .github/workflows/      GitHub Actions: CI only (the public remote has no AWS account)
-.gitlab-ci.yml          GitLab: the same CI, plus plan + apply on main — see "CI/CD"
+.gitlab-ci.yml          GitLab: the same CI, plus plan + apply on main — see assets/ci-cd.md
 requirements-dev.txt    Test-only Python deps (pytest, moto, responses, ruff)
 ```
 
@@ -376,9 +391,9 @@ requirements-dev.txt    Test-only Python deps (pytest, moto, responses, ruff)
 
 | Layer    | Stack                                                                                                                                                            |
 | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Backend  | Python 3.12, `strands-agents==1.50.2`, `bedrock-agentcore==1.18.1`, `boto3==1.43.57`, `pydantic==2.13.4`, `aws-opentelemetry-distro==0.19.0` (runtime container) |
+| Backend  | Python 3.12, `strands-agents==1.54.0`, `bedrock-agentcore==1.22.0`, `boto3==1.43.89`, `pydantic==2.13.4`, `aws-opentelemetry-distro==0.19.0` (runtime container) |
 | Frontend | Next.js 16, React 18, Tailwind CSS, Radix UI, `@aws-sdk/client-bedrock-agentcore`, MSAL / `@okta/okta-auth-js`                                                   |
-| IaC      | Terraform (AWS provider `~> 6.55, != 6.57.0` — 6.57.0 corrupts request bodies under parallel refresh), S3 backend                                                |
+| IaC      | Terraform (AWS provider `>= 6.62.0, < 7.0.0` — 6.62.0 is the floor for three AgentCore schema features this stack uses), S3 backend                              |
 | Agent    | Amazon Bedrock AgentCore (Runtime, Harness, Gateway, Memory, Policy, Evaluation, Identity)                                                                       |
 | LLMs     | Claude Sonnet 5 (default for both the runtime and harness backends; selectable per backend)                                                                      |
 | Testing  | pytest + moto (backend), vitest + testing-library (frontend)                                                                                                     |
@@ -452,10 +467,31 @@ Register the `okta_redirect_uri_to_register` output as a sign-in redirect URI on
 and `frontend_url` as a sign-out redirect URI. This needs an Okta org admin. Until the callback URI is
 registered, login cannot complete and every route stops at `400 invalid_request`.
 
-### 5. Configure PostProcessingLambdaHookFunctionArn in IDP solution (if applicable)
+### 5. Point recon at the IDP document-processing state machine (if applicable)
 
-Set the IDP solution's `PostProcessingLambdaHookFunctionArn` to the `idp_hook_function_arn` output, so
-extracted documents reach the recon pipeline.
+Set `idp_state_machine_arn` to the ARN of the IDP deployment's document-processing Step Functions
+state machine, from that stack's outputs. An ARN and not a name, because IDP's stack generates a
+suffix that changes on every rebuild. Recon owns the EventBridge rule that matches that state
+machine's execution-status changes, and that rule is the only thing that invokes the ingest hook.
+
+Leave it empty and the rule is not created at all (`count = var.idp_state_machine_arn == "" ? 0 : 1`),
+so nothing reaches the hook: uploads complete, the pipeline runs, and the notices table stays
+permanently empty with no error anywhere. `terraform apply` names the gap in its
+`post_deploy_checklist` output rather than leaving it to be discovered.
+
+The rule matches `SUCCEEDED` plus every terminal non-`SUCCEEDED` status — `FAILED`, `TIMED_OUT`,
+`ABORTED` — because the hook records a tracking-only row for the outcomes that produced no notice, so
+a document cannot silently vanish from the Documents tab. It matches a state machine and not a
+configuration version, so recon ingests a row for every document that pipeline finishes, including
+another deployment's; the Documents tab is what filters by pinned configuration version.
+
+The IDP solution's own `PostProcessingLambdaHookFunctionArn` parameter is an alternative registration
+path for the same completion event, and this repo deliberately leaves it unset — it is a setting
+inside a stack this repo does not deploy and cannot verify from here. A Lambda permission is a grant,
+not an invocation: with that parameter empty and no rule on this side, the hook never fires and
+nothing reports it. If you do register the hook there instead — pointing it at the
+`idp_hook_function_arn` output — leave `idp_state_machine_arn` empty. Exactly one of the two may be
+wired, since both deliver the same event and both together ingest every document twice.
 
 ### 6. Optional flips
 
@@ -475,18 +511,18 @@ terraform apply -var="policy_enforcement_mode=LOG_ONLY"
 pip install -r agent-blueprint/recon-agent/requirements.txt -r requirements-dev.txt
 export AWS_DEFAULT_REGION=us-east-1   # moto builds real boto3 clients; botocore needs a region
 ruff check .
-python -m pytest -q            # 1874 passed, 21 skipped, ~50s
-#                              # 11 of the skips are in tests/integration/ — 10 need
+python -m pytest -q            # 2136 passed, 20 skipped, ~65s
+#                              # 10 of the skips are in tests/integration/ — 9 need
 #                              # RECON_GATEWAY_URL (+ dev-account creds), 1 also needs
 #                              # EMAIL_CONFIRMATION_TOKEN. 4 are in tests/skills/, one per
 #                              # skill that prescribes no required evidence steps. 6 are in
-#                              # tests/input_corpus/test_extraction_config.py, one per
-#                              # document class that configures no amount columns.
+#                              # tests/input_corpus/test_extraction_config.py, one per document
+#                              # class that does not configure both amount columns.
 
 # Frontend (chatbot-app/frontend). `npm run build` is the gate that matters — it compiles
 # every route, catching breakage both vitest and tsc miss.
 cd chatbot-app/frontend && npm ci && npx tsc --noEmit && npx vitest run && npm run build
-#                          # 124 files, 1711 passed
+#                          # 137 files, 1933 passed
 
 # Terraform module tests (plan-only, mocked providers, no credentials). Both CIs run these.
 for tests in infra/modules/*/tests; do
@@ -503,93 +539,41 @@ line being stale rather than as a missing test, and re-measure before quoting it
 
 ## CI/CD
 
-Two pipeline samples:
-
-| File                       | Remote | Runs on              | Does                                                             |
-| -------------------------- | ------ | -------------------- | ---------------------------------------------------------------- |
-| `.github/workflows/ci.yml` | GitHub | every push, every PR | verification only — no AWS credentials in any job                |
-| `.gitlab-ci.yml`           | GitLab | every MR, and `main` | the same verification plus SAST, then `plan` + `apply` on `main` |
-
-On GitLab the pipeline is merge-request-only on feature branches, so open the MR as part of the push
-and CI starts once, immediately:
-
-```bash
-git push -o merge_request.create -o merge_request.target=main \
-         -o merge_request.remove_source_branch origin <branch>
-```
-
-Both run the same four checks as independent jobs, so a Terraform typo and a failing test report on
-the same run instead of one masking the other:
-
-| Job           | Command                                                                                 |
-| ------------- | --------------------------------------------------------------------------------------- |
-| `python`      | `ruff check .` then `pytest -q` (full suite, nothing excluded)                          |
-| `frontend`    | `npm ci`, `tsc --noEmit`, `vitest run`, `npm run build`                                 |
-| `terraform`   | `terraform fmt -check -recursive infra/`, `validate` in `infra/environments/recon`, then `terraform test` in every `infra/modules/*/tests` |
-| `secret-scan` | `gitleaks` — the working tree on GitHub, the commit history on GitLab                   |
-
-`terraform validate` only means something from the environment directory; run from `infra/` it passes
-vacuously, because there is no root module there. `-backend=false` keeps it credential-free.
-`secret-scan` installs no project dependencies on purpose: scanning after `npm ci` walks
-`node_modules` and reports ~30 findings from vendored minified JS.
-
-### Static analysis (GitLab only)
-
-Two more jobs run in a `test` stage, which also gates `plan`. They are GitLab-only because the
-scanner is a GitLab-bundled CI template, not something a GitHub workflow can include:
-
-| Job            | Does                                                                             |
-| -------------- | -------------------------------------------------------------------------------- |
-| `semgrep-sast` | `include: - template: Security/SAST.gitlab-ci.yml` — scans Python and TypeScript |
-| `sast-gate`    | reads the report and fails on `Critical`/`High` that is not triaged              |
-
-### GitLab CI/CD variables
-
-Set these under Settings → CI/CD → Variables. None can be committed: the first two embed the AWS
-account ID, and the repo's pre-push guard rejects any 12-digit run in a tracked file.
-
-| Variable                | Type     | Value                                                                                                                   |
-| ----------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `AWS_CREDS_TARGET_ROLE` | Variable | `arn:aws:iam::<account-id>:role/<ci-role>` — read by the runner's credential-vendor hook                                |
-| `TF_STATE_BUCKET`       | Variable | the state bucket from step 1; the pipeline rebuilds `backend.hcl` from it                                               |
-| `RECON_TFVARS`          | File     | the contents of `infra/environments/recon/terraform.tfvars` — holds the Entra client secret and the IDP MCP credentials |
-
-Set all three with environment scope `*`: `terraform:apply` declares an environment but
-`terraform:plan` declares none, so an environment-scoped variable would silently not reach the plan
-job. `RECON_TFVARS` **cannot be masked**: GitLab
-only masks single-line values, and a tfvars file is multi-line. Mark it **Protected** instead, which
-restricts it to pipelines on protected branches — note that this also means a pipeline on an
-unprotected branch cannot plan, which is usually what you want and is worth knowing when testing.
+Two pipeline samples — `.github/workflows/ci.yml` (verification only, no AWS credentials in any job)
+and `.gitlab-ci.yml` (the same verification plus SAST, then `plan` + `apply` on `main`). The four
+verification jobs, the GitLab-only SAST gate, and the three CI/CD variables the pipeline needs are in
+**[assets/ci-cd.md](assets/ci-cd.md)**.
 
 ## Prerequisites & configuration
 
-| Variable                                                                                      | Required | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| --------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `region`                                                                                      | yes      | AWS region (default `us-east-1`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `name_prefix`                                                                                 | yes      | Resource name prefix (e.g. `recon-dev`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `otel_layer_account`                                                                          | **yes**  | AWS's own public publisher account for the `AWSOpenTelemetryDistroPython` layer. It declares no default on purpose: a wrong or absent value composes a valid-looking layer ARN that fails at apply with an opaque Lambda error, so Terraform stops and names the variable instead. Not a secret. It lives in tfvars only because the repo's pre-push guard rejects any 12-digit run in a committed file. Only read when `enable_worker_tracing = true`, though `terraform plan` requires it either way                                                                                                                                                                                                                                     |
-| `hosted_ui_prefix`                                                                            | yes      | Cognito Hosted UI domain prefix. It must be globally unique, so the `recon-dev-login` default will collide. Required only because `aws_cognito_user_pool_domain` is unconditional in `modules/foundation`; the Hosted UI login path itself has been orphaned since the Okta switch (`hosted_ui_domain` → `NEXT_PUBLIC_COGNITO_HOSTED_UI` → `src/lib/auth.ts` `buildLoginUrl`/`exchangeCode`, which nothing calls). The user pool is still live, as the issuer for the intake API's JWT authorizer, but that authorizer uses the pool's `cognito-idp` endpoint rather than this domain, so the domain can be dropped on its own                                                                                                             |
-| `idp_gateway_target_url`                                                                      | no       | IDP MCP endpoint (enables `document-extraction` target)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `idp_mcp_secret_json`                                                                         | no       | IDP OAuth2 client credentials JSON                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `recon_domain`                                                                                | no       | Recon domain the IDP hook stamps on ingested items (default `cash`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `graph_enabled`                                                                               | no       | Enable the `microsoft-graph` OpenAPI target (the platform's single email interface)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `graph_mailbox`                                                                               | no       | Shared mailbox SMTP address all Graph email is sent from / read (must be a real mailbox in the Entra tenant)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `notify_email`                                                                                | no       | Resolution-notification recipient (human approve + auto-resolve), sent **from** `graph_mailbox` via the gateway's `sendSharedMailboxMail` tool. Empty disables the email step. The dev environment points it at the shared mailbox itself, so notifications land in the same inbox the agent reads                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `entra_tenant_id/client_id/client_secret`                                                     | no       | Entra app-only credentials for Graph email                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `auth_provider`                                                                               | no       | Frontend IdP: `okta` (deployed) or `entra` (var default)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `okta_issuer` / `okta_client_id`                                                              | no       | Required when `auth_provider=okta`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `agent_backend`                                                                               | no       | `runtime` (default) or `harness`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Variable                                   | Required | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `region`                                   | yes      | AWS region (default `us-east-1`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `name_prefix`                              | yes      | Resource name prefix (e.g. `recon-dev`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `otel_layer_account`                       | **yes**  | AWS's own public publisher account for the `AWSOpenTelemetryDistroPython` layer. It declares no default on purpose: a wrong or absent value composes a valid-looking layer ARN that fails at apply with an opaque Lambda error, so Terraform stops and names the variable instead. Not a secret. It lives in tfvars only because the repo's pre-push guard rejects any 12-digit run in a committed file. Only read when `enable_worker_tracing = true`, though `terraform plan` requires it either way                                                        |
+| `idp_state_machine_arn`                    | no       | ARN of the IDP document-processing Step Functions state machine. Recon's own EventBridge rule matches its terminal execution statuses, and that rule is the only thing that invokes the ingest hook — so an environment with an IDP deployment **must** set it. Empty creates no rule: uploads complete and the notices table stays empty with no error anywhere. Mutually exclusive with registering the hook on the IDP side (step 5)                                                                                                                       |
+| `idp_input_bucket`                         | no       | Name of the IDP deployment's input bucket, from that stack's outputs. The Documents tab streams a document's source bytes from it, and an extraction-routed upload is put into it. Empty leaves the preview reporting it has nowhere to read from and the upload route nowhere to put a file — which is the correct behaviour, since the alternative is a put that lands where nothing reads it                                                                                                                                                               |
+| `idp_input_bucket_arn`                     | no       | ARN of the same bucket. Only the console task role is granted on it, and only `s3:PutObject` on the object path — never `ListBucket`, and never on the pipeline's output prefixes                                                                                                                                                                                                                                                                                                                                                                             |
+| `graph_enabled`                            | no       | Enable the `microsoft-graph` OpenAPI target (the platform's single email interface)                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `graph_mailbox`                            | no       | Shared mailbox SMTP address all Graph email is sent from / read (must be a real mailbox in the Entra tenant)                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `notify_email`                             | no       | Resolution-notification recipient (human approve + auto-resolve), sent **from** `graph_mailbox` via the gateway's `sendSharedMailboxMail` tool. Empty disables the email step. The dev environment points it at the shared mailbox itself, so notifications land in the same inbox the agent reads                                                                                                                                                                                                                                                            |
+| `entra_tenant_id/client_id/client_secret`  | no       | Entra app-only credentials for Graph email. `entra_tenant_id` + `entra_client_id` are **also** the intake API's JWT authorizer when `auth_provider=entra` (the default), and the plan fails without them                                                                                                                                                                                                                                                                                                                                                      |
+| `auth_provider`                            | no       | Identity provider for BOTH the console login and the intake API's JWT authorizer: `okta` (deployed) or `entra` (var default). There is no Cognito fallback — one of the two must be fully configured or the plan fails                                                                                                                                                                                                                                                                                                                                        |
+| `okta_issuer` / `okta_client_id`           | no       | Required when `auth_provider=okta`. They configure the console login **and** the intake API's authorizer — derived once in the root module's `oidc_*` locals so the API and the BFF accept identical tokens                                                                                                                                                                                                                                                                                                                                                   |
+| `agent_backend`                            | no       | `runtime` (default) or `harness`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `enable_deal_pipeline`                                                                        | no       | `false` (default) deploys the recon app alone. `true` composes `infra/modules/deal-pipeline` into this environment under the `<name_prefix>-pipeline` prefix and hands the console's task the `PIPELINE_*` variables plus `REQUIRE_ACCESS_GROUPS=true` and `PIPELINE_ENABLED=true`, so the Deal Pipeline app appears in the rail. The plan is **refused** while `recon_access_group` or `pipeline_access_group` is blank — see [Two applications, one console](#two-applications-one-console)                                                                                                                                                                                                                                              |
 | `recon_admin_group` / `recon_access_group` / `pipeline_admin_group` / `pipeline_access_group` | no       | The identity-provider groups behind `RECON_ADMIN_GROUP`, `RECON_ACCESS_GROUP`, `PIPELINE_ADMIN_GROUP`, `PIPELINE_ACCESS_GROUP`. With the pipeline off, an empty access group leaves recon open to every authenticated user; an empty admin group means nobody can change that app. With `enable_deal_pipeline = true` both access groups are required (the plan fails otherwise) and the task runs with `REQUIRE_ACCESS_GROUPS=true`, so a blank one would deny rather than open                                                                                                                                                                                                                                                           |
 | `console_admin_group` / `console_organization_label`                                          | no       | The console-wide layer — see [Console-wide configuration](#console-wide-configuration). `console_admin_group` is the identity-provider group behind `CONSOLE_ADMIN_GROUP` (who may edit console-wide settings; empty = nobody, fail closed, and it can never be changed from the UI). `console_organization_label` (default `Agentic Operations Console`) reaches the task as `CONSOLE_ORGANIZATION_LABEL` and seeds `<prefix>/defaults/organization-label`. The same apply seeds the four groups, the pipeline switch and the default model id (from `pipeline_agent_model_id`) under `/<name_prefix>/console` through `infra/modules/console-settings`; a value later changed from the Settings screen is **never reverted** by an apply |
-| `harness_model_id`                                                                            | no       | Override harness LLM (default `us.anthropic.claude-sonnet-5`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `policy_enforcement_mode`                                                                     | no       | `ENFORCE` (default) or `LOG_ONLY` (observe only)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `interceptor_mode`                                                                            | no       | Gateway REQUEST interceptor: `enforce` (default) or `log` (observes only, **never blocks**). The example tfvars also ships `"enforce"` explicitly; set `"log"` only for a first rollout, then remove it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `enable_worker_tracing`                                                                       | no       | `true` (default) attaches the ADOT layer and OTel env to the agent-worker Lambda so its invocations share one trace with the agent's own spans. `false` means no layer, no OTel env, PassThrough X-Ray                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `otel_layer_version`                                                                          | no       | Version of AWS's public `AWSOpenTelemetryDistroPython` Lambda layer (default `30`; pinned rather than `latest`, which AWS does not publish)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `reprocess_cap`                                                                               | no       | Max re-process attempts before a case ages out (default `3`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `private_vpc`                                                                                 | no       | `false` (default) = public CloudFront + internet-facing ALB. `true` = the whole private topology in one flag: internal ALB on private subnets, Fargate with no public IP, no CloudFront, plus the interface endpoints. Does **not** remove the NAT — see [Private VPC deployment](#private-vpc-deployment)                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `private_ingress_cidrs`                                                                       | no       | CIDRs allowed to reach the internal ALB when `private_vpc=true` (VPN/corporate ranges). Empty ⇒ the VPC CIDR only. Ignored when `private_vpc=false`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `harness_model_id`                         | no       | Override harness LLM (default `us.anthropic.claude-sonnet-5`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `policy_enforcement_mode`                  | no       | `ENFORCE` (default) or `LOG_ONLY` (observe only)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `interceptor_mode`                         | no       | Gateway REQUEST interceptor: `enforce` (default) or `log` (observes only, **never blocks**). The example tfvars also ships `"enforce"` explicitly; set `"log"` only for a first rollout, then remove it.                                                                                                                                                                                                                                                                                                                                                      |
+| `enable_worker_tracing`                    | no       | `true` (default) attaches the ADOT layer and OTel env to the agent-worker AND the Tier-2 dispatch Lambdas so its invocations share one trace with the agent's own spans. `false` means no layer, no OTel env, PassThrough X-Ray. On the runtime backend the dispatcher is the InvokeAgentRuntime caller, so without it that trace has no client end                                                                                                                                                                                                           |
+| `max_concurrent_investigations`            | no       | `14` (default). Ceiling on simultaneous Tier-2 investigations — the Bedrock token budget, applied as the Distributed Map's `MaxConcurrency` for the runtime backend and as reserved concurrency on the worker for the harness backend. Bounded on BOTH sides: too high throttles the model, too low lets the tail of a burst outlive the async queue's retention. Not a tuning knob                                                                                                                                                                           |
+| `schedule_enabled` / `schedule_expression` | no       | Whether the Tier-2 map run fires on a schedule, and how often. The module default is disabled; recon-dev runs `rate(5 minutes)`. This is the polling latency an escalated case waits before an investigation starts                                                                                                                                                                                                                                                                                                                                           |
+| `otel_layer_version`                       | no       | Version of AWS's public `AWSOpenTelemetryDistroPython` Lambda layer (default `30`; pinned rather than `latest`, which AWS does not publish)                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `reprocess_cap`                            | no       | Max re-process attempts before a case ages out (default `3`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `private_vpc`                              | no       | `false` (default) = public CloudFront + internet-facing ALB. `true` = the whole private topology in one flag: internal ALB on private subnets, Fargate with no public IP, no CloudFront, the interface endpoints, plus a VPC-only PRIVATE REST API onto the intake Lambda (an HTTP API cannot be made private, so `POST /items` would otherwise stay internet-facing). Does **not** remove the NAT — see [Private VPC deployment](assets/private-vpc-deployment.md) and [the intake API](assets/intake-http-api.md#reaching-it-from-a-private-vpc-deployment) |
+| `private_ingress_cidrs`                    | no       | CIDRs allowed to reach the internal ALB when `private_vpc=true` (VPN/corporate ranges). Empty ⇒ the VPC CIDR only. Ignored when `private_vpc=false`                                                                                                                                                                                                                                                                                                                                                                                                           |
 
 Copy `infra/environments/recon/terraform.tfvars.example` → `terraform.tfvars` and fill values.
 `terraform.tfvars.example` is the only committed record of which variables an environment is
@@ -598,50 +582,17 @@ adds a variable.
 
 ---
 
-## Status & Process Flow
+## Case lifecycle
 
-```mermaid
-stateDiagram-v2
-    [*] --> PENDING : item ingested (IDP hook / intake API)
-    PENDING --> AUTO_CLEARED : Tier-1 deterministic match
-    PENDING --> IN_PROGRESS : Tier-1 miss → escalate to agent
-    IN_PROGRESS --> PROPOSED : agent proposes resolution
-    IN_PROGRESS --> APPROVED : autonomous execution (confidence ≥ threshold + clean action, Policy-permitted)
-    PROPOSED --> APPROVED : analyst approves (+ optional comment)
-    APPROVED --> RESOLVED : notification email sent
-    PROPOSED --> REJECTED : analyst disapproves (comment required)
-    REJECTED --> CLOSED_NO_ACTION : outcome "no further action"
-    REJECTED --> IN_PROGRESS : outcome "re-process" (correction fed to agent)
-    IN_PROGRESS --> AGED : re-process cap reached (default 3)
-    IN_PROGRESS --> FAILED : investigation errored out (not a timeout)
-    FAILED --> IN_PROGRESS : analyst retries
-    FAILED --> CLOSED_NO_ACTION : analyst cancels
-    AUTO_CLEARED --> [*]
-    RESOLVED --> [*]
-    CLOSED_NO_ACTION --> [*]
-    AGED --> [*]
-```
+![Case lifecycle](assets/case-lifecycle.svg)
 
-### Step-by-step
-
-| #   | Step                                | Status                                  | What happens                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| --- | ----------------------------------- | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Ingest                              | → `PENDING`                             | A structured dataset hits the intake API, which validates the whole batch and writes canonical `ReconItem`s. Writing an item opens a `PENDING` case, because the items table is the only one carrying a DynamoDB stream. A completed IDP document takes the other path and does **not** open a case: the hook Lambda writes a **Notice** to `recon-dev-notices` (idempotent on `idp-<documentId>`) with the per-section classification, extracted field values, and page-preview images copied into recon's own assets bucket. Notices are evidence the agent searches, never work items, and the mechanism is that `recon-dev-notices` has no stream — an absence rather than a flag (`backend/idp_hook/handler.py`).                                                                                    |
-| 2   | Tier-1 deterministic                | → `AUTO_CLEARED` or → `IN_PROGRESS`     | A DynamoDB-stream Lambda runs rule-based matching. Sided items match within tolerance. Sides-less (IDP) items are matched against the mocked general ledger on the cash item's economic identity (`backend/tier1/gl_match.py`): account name (IDP `BorrowerName` → GL `borrower`), the entry-type direction (CREDIT/DEBIT, derived by keyword from the opaque IDP document class), and an amount within ±0.05 of an IDP-extracted amount. It never keys on the document filename or reference. Auto-clear requires exactly one surviving GL row; zero means no match, more than one means ambiguous, and both escalate to `IN_PROGRESS` with the candidate rows attached as `gl_candidates` context before invoking the agent worker. Tier-1 can be disabled at runtime from the Config tab (SSM-backed). |
-| 3   | Tier-2 agent                        | `IN_PROGRESS` → `PROPOSED`              | The agent characterizes the break (which selects the driving skill), investigates by invoking one or more relevant skills from the live SKILL.md library (gateway tools, with reasoning and cited evidence per step), then proposes a resolution and reports, step by step, which of its skill's prescribed evidence steps actually obtained data. The confidence is that fraction.                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| 3b  | Autonomous execution + auto-resolve | `IN_PROGRESS` → `APPROVED` → `RESOLVED` | When confidence clears the admin threshold and a single matched ledger reference exists, the agent executes `set_draw_status` through the Policy-gated egress gateway. The AgentCore Policy (Cedar, ENFORCE) gates it at the gateway, and the write Lambda additionally verifies provenance by checking the reference against the persisted proposal. On success the case auto-resolves: notification, `AUTO_RESOLVED` lesson, `RESOLVED`. Below threshold, or with no clean action, it halts at `PROPOSED` for human review.                                                                                                                                                                                                                                                                             |
-| 4   | Human review                        | `PROPOSED`                              | The analyst reviews the case: IDP document panel (section tabs ⇄ page images + extracted fields), classification and reasoning, the proposed resolution, and the step-by-step agent trace. Bulk status updates are supported, with comments.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| 5a  | Approve                             | → `APPROVED` → `RESOLVED`               | Optional comment. A notification email goes out and the case closes as `RESOLVED`. The decision is captured as a `USER_APPROVED` lesson.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| 5b  | Disapprove                          | → `REJECTED` → …                        | A correction comment is required, plus an outcome: _No further action_ → `CLOSED_NO_ACTION`, or _Re-process_ → stores the correction and re-invokes the agent (`IN_PROGRESS`). Re-processing is capped (default 3) and ages out at the cap. Captured as a `USER_CORRECTION` lesson.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| 3c  | Investigation failure               | `IN_PROGRESS` → `FAILED`                | Only the agent writes the `PROPOSED` row, so a run that dies leaves nothing behind. The agent worker therefore marks the case `FAILED` with the error text and a timestamp, and the case surfaces in the default triage queue with a **Retry** action (re-opens it to `IN_PROGRESS` and re-drives the worker) or **Cancel** (`CLOSED_NO_ACTION`). Timeouts are exempt: the investigation is still running server-side and will persist its own outcome, so a retry would duplicate it.                                                                                                                                                                                                                                                                                                                    |
-| 6   | Lessons learned                     | (parallel)                              | Every analyst decision is captured twice: in the `recon-lessons` DynamoDB ledger, and as an AgentCore Memory event (`lessons_learned` SEMANTIC strategy). Before classifying, the agent retrieves consolidated lessons and weights them in both classification and investigation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-
-### Terminal states
-
-`AUTO_CLEARED` · `RESOLVED` · `CLOSED_NO_ACTION` · `AGED`
-
-`FAILED` is deliberately **not** terminal — most causes are transient (throttling, an output-token
-cap, a tool outage), so it is a retry queue rather than an archive.
+An item is ingested as `PENDING`, deterministically cleared to `AUTO_CLEARED` or escalated — an
+escalated case STAYS `PENDING` until a Tier-2 map run claims it to `IN_PROGRESS`, because the stream
+consumer no longer dispatches — and then either `PROPOSED` for an analyst or executed autonomously straight to
+`APPROVED` → `RESOLVED`. `AUTO_CLEARED`, `RESOLVED`, `CLOSED_NO_ACTION` and `AGED` are terminal;
+`FAILED` deliberately is not, so it acts as a retry queue. The full state machine, the step-by-step
+account of who performs each transition, and the terminal-state rules are in
+**[assets/case-lifecycle.md](assets/case-lifecycle.md)**.
 
 ---
 
@@ -661,9 +612,11 @@ through one loop:
    evidence steps and therefore always escalates.
 3. **Investigate.** The agent receives the full skill library, where each skill's markdown body
    _is_ its procedure, and runs whichever ones apply, composing several when the evidence warrants.
-   Their gateway tools (`search_ledger`, `search_guidance`, `get_results`,
-   `search_correspondence` — all reads) each land in the trace as a typed `ReasoningStep` carrying
-   reasoning, cited evidence, and tool I/O.
+   Their tool calls (by the runtime's short aliases: `search_ledger`, `search_notices`,
+   `search_guidance`, `search_correspondence`, `list_contacts`, `list_templates` — all
+   reads) each land in the trace as a typed `ReasoningStep` carrying reasoning, cited evidence, and
+   tool I/O. Each alias resolves to a fully-qualified gateway tool (`search_guidance` →
+   `managed-kb___Retrieve`); a skill's `tools:` frontmatter names the qualified form, not the alias.
 4. **Propose.** A final pass produces the resolution, a per-evidence-step outcome report, and a structured
    `proposed_action`. The ledger reference in it is derived by the worker from the `search_ledger`
    results rather than supplied by the model; zero matches or more than one distinct match means no
@@ -675,10 +628,10 @@ through one loop:
 
 ### Two backends (`agent_backend` — instant A/B + rollback)
 
-| Backend                 | Where                                                             | How it runs                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ----------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`runtime`** (default) | `agent-blueprint/recon-agent/`                                    | An arm64 AgentCore Runtime container running a Strands `Agent` agentic loop (`strands_investigator.py`) with k-sample self-consistency classification. That classification is also a Strands call: every Bedrock request this container makes goes through the SDK with `streaming=False`. It makes autonomous gateway tool calls over MCP (SigV4) and returns a JSON proposal. Tools: `search_ledger`, `search_guidance`, `get_results`, `search_correspondence` — reads only, no send. |
-| **`harness`**           | `agent-blueprint/recon-agent-harness/` + `backend/harness_agent/` | The managed AgentCore Harness, declared in config with no orchestration container of ours. The harness calls the egress gateway (the `agentCoreGateway` tool) plus an `inline_function submit_proposal`, and a thin worker drives the round-trip, assembles the trace from the event stream, derives the reference, computes the evidence-completeness confidence and persists.                                                                                                          |
+| Backend                 | Where                                                             | How it runs                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ----------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`runtime`** (default) | `agent-blueprint/recon-agent/`                                    | An arm64 AgentCore Runtime container running a Strands `Agent` agentic loop (`strands_investigator.py`) with k-sample self-consistency classification. That classification is also a Strands call: every Bedrock request this container makes goes through the SDK with `streaming=False`. It makes autonomous gateway tool calls over MCP (SigV4) and returns a JSON proposal. Tools granted (short aliases; each maps to a `<target>___<tool>` gateway name in `gateway_mcp.py`): `search_ledger`, `search_notices`, `search_guidance`, `search_correspondence`, `list_contacts`, `list_templates` — reads only, no send. This is the granted surface, which is wider than what the shipped skills name. |
+| **`harness`**           | `agent-blueprint/recon-agent-harness/` + `backend/harness_agent/` | The managed AgentCore Harness, declared in config with no orchestration container of ours. The harness calls the egress gateway (the `agentCoreGateway` tool) plus an `inline_function submit_proposal`, and a thin worker drives the round-trip, assembles the trace from the event stream, derives the reference, computes the evidence-completeness confidence and persists.                                                                                                                                                                                                                                                                                                                            |
 
 Both backends share the egress gateway, Memory, KB, DynamoDB, and the same SKILL.md skill set, and
 both reach the same Microsoft Graph surface — for reading only. Mailbox reads go through the
@@ -691,8 +644,13 @@ analyst approved. Both models are propose-only. Neither is given
 code. What differs between the two is the calling mechanics, meaning who drives the loop and where
 the trace comes from, not the tool surface.
 
-The runtime is reached through the ingress agent gateway (SigV4, with a direct
-`InvokeAgentRuntime` fallback).
+On the map-run path the runtime is reached by the Tier-2 **dispatcher** Lambda calling
+`InvokeAgentRuntime` **directly**. The ingress gateway is deliberately not used there: it holds the
+connection until the runtime session ends, so it cannot forward the container's immediate
+`{"status": "accepted"}` — routing async dispatch through it reinstates the blocking behaviour the
+design removes. The gateway remains the audited SigV4 entry point for the agent-worker's
+**synchronous** paths (the harness backend and the console's single-case retry), which read the
+response and so lose nothing by waiting.
 
 Skills live as `SKILL.md` files in S3, one directory per skill (`skills/<name>/SKILL.md`), with
 frontmatter (`name`, `description`, `tools: [<gateway tools>]`, optional `model`) and a free-text
@@ -709,15 +667,25 @@ These ship as a starting library. They are composable rather than mutually exclu
 reconciliation often uses several: `document-cross-reference` plus `record-match-review` plus
 `correspondence-search`, then `ledger-status-resolution` to act on what they turned up.
 
-| Skill                        | Tools (`tools:` frontmatter)   | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| ---------------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `record-match-review`        | `search_ledger`                | Compare the two sides' key attributes (amount, date, identifier) with tolerance and aggregation to confirm or refute a match                                                                                                                                                                                                                                                                                                                                                                 |
-| `document-cross-reference`   | `get_results`, `search_ledger` | Retrieve and compare fields from the source document (via the IDP `document-extraction` MCP tool) against ledger records to confirm or refute a candidate match                                                                                                                                                                                                                                                                                                                              |
-| `consult-guidance`           | `search_guidance`              | Retrieve guidance, playbooks and archived counterparty correspondence from the recon Knowledge Base, narrowed by a metadata filter (`doc_type`, `break_class`, `skill`, `message_id`, date bounds). On the gateway the tool is `managed-kb___Retrieve`                                                                                                                                                                                                                                       |
-| `correspondence-search`      | `search_correspondence`        | Search the shared mailbox for messages that clarify the item — via the sanitized `correspondence-search` target, which builds the Graph OData arguments for the model                                                                                                                                                                                                                                                                                                                        |
-| `counterparty-contact-draft` | — (`tools: []`)                | Cite a counterparty email into `submit_proposal`'s `email_draft` and stop. The model does **not** write the message: `email_draft` takes a `recipient_contact_id` (from `contacts___list_contacts`), a `template_id` (from `templates___list_templates`) and the template's `variables` — never a subject, a body or an address. The platform renders the wording, the analyst approves a revision on the case, and the BFF sends that exact text. No send tool is offered on either backend |
-| `ledger-status-resolution`   | `set_draw_status`              | Resolve a confirmed break via a ledger status update (`{Confirmed, Cancelled, OnHold, Amended}`); executed by the worker/human-approve path as the Policy-gated write — reference derived from `search_ledger`, never model-supplied                                                                                                                                                                                                                                                         |
-| `unknown`                    | —                              | Escalate-with-context fallback when no skill conclusively applies — gather context and escalate (not deletable)                                                                                                                                                                                                                                                                                                                                                                              |
+| Skill                        | Tier         | Tools (`tools:` frontmatter, verbatim)                         | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------- | ------------ | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `record-match-review`        | `break-type` | `general-ledger___search_ledger`<br>`notices___search_notices` | Compare the two sides' key attributes (amount, date, identifier) with tolerance and aggregation to confirm or refute a match                                                                                                                                                                                                                                                                                                                                                                 |
+| `document-cross-reference`   | `probe`      | `general-ledger___search_ledger`<br>`notices___search_notices` | Compare a source document's extracted fields — read off its own notice row as `idp_sections`, which `search_notices` returns, so there is no call into the extraction pipeline — against ledger records to confirm or refute a candidate match                                                                                                                                                                                                                                               |
+| `consult-guidance`           | `probe`      | `managed-kb___Retrieve`                                        | Retrieve guidance, playbooks and archived counterparty correspondence from the recon Knowledge Base, narrowed by a metadata filter (`doc_type`, `break_class`, `skill`, `message_id`, date bounds). The runtime wraps this tool under the local Strands alias `search_guidance`, which builds the nested `Retrieve` argument shape                                                                                                                                                           |
+| `correspondence-search`      | `probe`      | `correspondence-search___search_correspondence`                | Search the shared mailbox for messages that clarify the item — via the sanitized `correspondence-search` target, which builds the Graph OData arguments for the model                                                                                                                                                                                                                                                                                                                        |
+| `counterparty-contact-draft` | `resolution` | `contacts___list_contacts`<br>`templates___list_templates`     | Cite a counterparty email into `submit_proposal`'s `email_draft` and stop. The model does **not** write the message: `email_draft` takes a `recipient_contact_id` (from `contacts___list_contacts`), a `template_id` (from `templates___list_templates`) and the template's `variables` — never a subject, a body or an address. The platform renders the wording, the analyst approves a revision on the case, and the BFF sends that exact text. No send tool is offered on either backend |
+| `ledger-status-resolution`   | `break-type` | `set-draw-status___set_draw_status`                            | Resolve a confirmed break via a ledger status update (`{Confirmed, Cancelled, OnHold, Amended}`); executed by the worker/human-approve path as the Policy-gated write — reference derived from `search_ledger`, never model-supplied                                                                                                                                                                                                                                                         |
+| `unknown`                    | `fallback`   | `[]`                                                           | Escalate-with-context fallback when no skill conclusively applies — gather context and escalate (not deletable)                                                                                                                                                                                                                                                                                                                                                                              |
+
+`Tier` is the skill's declared `metadata.tier`, and it is descriptive only — **nothing routes on it.**
+A `break-type` skill names the break's primary class, a `probe` is one the agent elects when the
+investigation needs it, a `resolution` acts on what was found, and `fallback` is where an item lands
+when nothing matched. Tier-1's class is an advisory hint the agent may overrule, not a dispatch key.
+
+Tool names are given exactly as the frontmatter carries them — fully qualified as
+`<target>___<tool>`, which is what a skill author has to type and what the runtime's `ALLOWED_TOOLS`
+filter matches. Short names like `search_ledger` are the runtime's local Strands wrapper aliases, not
+values the `tools:` key accepts.
 
 The model is configurable per backend: runtime `MODEL_ID` (default `us.anthropic.claude-sonnet-5`),
 harness `harness_model_id` (default `us.anthropic.claude-sonnet-5`).
@@ -792,59 +760,52 @@ Two gateways, both AWS_IAM inbound (SigV4):
     environment can be rolled out on `interceptor_mode = "log"` first, then flipped to `"enforce"`.
 
 - **Ingress agent gateway** (`recon-dev-ingress-gateway`) is an `http/agentcoreRuntime` target
-  fronting the Runtime: one controlled SigV4 entry point for the Tier-1 worker and the BFF.
+  fronting the Runtime: one controlled SigV4 entry point for the agent-worker's synchronous retry path and the BFF. The Tier-2 dispatcher deliberately does NOT use it — see the Tier-2 section.
 
 ### Egress tools
 
-| Target                  | Type                                          | Enabled by                                       | Tools                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ----------------------- | --------------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `general-ledger`        | Lambda (Athena over S3)                       | always                                           | `search_ledger(reference, borrower, facility, amount, date)`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `set-draw-status`       | Lambda (DynamoDB GL status overlay)           | always                                           | `set_draw_status(reference, status, reason, item_id, confidence)` — Policy-gated + interceptor-provenance-checked write; executed by the WORKER (autonomous) or the BFF (human approve) — never by the model directly on the harness backend                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `recon-status`          | Lambda (cases + audit tables)                 | always                                           | `recon_update_status(item_id, new_status, comment, actor)` — **platform-only** workflow-status tool (Cedar forbids agent principals); guarded by the case state machine + audited                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `managed-kb`            | **Connector** (`bedrock-knowledge-bases`)     | always                                           | `Retrieve` — the Bedrock Retrieve API surfaced directly, no Lambda in the path. The agent supplies `retrievalQuery.text`, `numberOfResults` and a **metadata `filter`**, and `knowledgeBaseId` is deliberately NOT an exposed override, which is the whole trust boundary. This is the ONE resource Terraform has no provider support for yet (nothing models `targetConfiguration.mcp.connector`), so it is an `aws_cloudformation_stack` — see `infra/modules/recon-agent/kb-connector-target.tf`. Arguments are NESTED, mirroring the Retrieve request.                                                                                                         |
-| `microsoft-graph`       | OpenAPI target (app-only, client_credentials) | `graph_enabled` + Entra app credentials          | The one Graph interface for email. `sendSharedMailboxMail` sends from the shared mailbox, called only by the platform — the approve/auto-resolve notification and the BFF's counterparty send of an analyst-approved draft, never by a model; `listSharedMailboxMessages` reads and searches it, used by `correspondence-search`. See [The Graph target in detail](#the-graph-target-in-detail).                                                                                                                                                                                                                                                                   |
-| `correspondence-search` | Lambda (re-enters this gateway)               | `graph_enabled` (shares `graph_mailbox`)         | `search_correspondence(query, top)` — the model-safe mailbox read. Declares only pattern-legal property names, then assembles the OData form (`$search` double-quoted, `$top` an integer, `mailboxAddress` from `GRAPH_MAILBOX`) and calls `microsoft-graph___listSharedMailboxMessages` back through this gateway with SigV4. It re-enters rather than calling Graph directly because the Graph credential lives in the AgentCore OAuth2 provider and there is no Lambda-readable copy — so the read still passes Cedar and the interceptor. Cedar permits both the wrapper action and the inner Graph action (the inner call arrives as the wrapper's own role). |
-| `document-extraction`   | MCP server (IDP endpoint, client_credentials) | `idp_gateway_target_url` + `idp_mcp_secret_json` | `get_results(document_id)` — full IDP extraction results. The parameter is **snake_case** (`document_id`); `documentId` and `batch_id` both fail for a single document.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `notices`               | Lambda (notices table)                        | `notice_tool_enabled`                            | `search_notices(counterparty, fund, reference, amount, amount_tolerance, date_from, date_to, notice_class, activity_type, limit)` — the EXPECTED side's counterpart: extracted counterparty notices, which is what makes a document evidence rather than a work item. A field this notice's class never extracts comes back in `fields_unavailable`, which is **not** a non-match; an empty `rows` means searched-and-found-nothing, and a read failure raises.                                                                                                                                                                                                    |
-| `contacts`              | Lambda (contacts table)                       | `contact_tool_enabled`                           | `list_contacts(kind, active_only)` — who the platform may email. Read-only, and **addresses are never returned**: the model cites a `contact_id` and the address is resolved at send time.                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `templates`             | Lambda (templates table, same Lambda)         | `contact_tool_enabled`                           | `list_templates(purpose, active_only)` — the operator-authored wording the platform may send. Read-only, and the subject/body bytes are never returned. Two targets in front of one Lambda on purpose: the gateway composes the tool name as `<target>___<tool>`, so one combined target would expose this as `contacts___list_templates`, a name the Cedar permit and both backends' allowlists silently fail to match.                                                                                                                                                                                                                                           |
+| Target                  | Type                                          | Enabled by                                   | Tools                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ----------------------- | --------------------------------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `general-ledger`        | Lambda (Athena over S3)                       | `gl_tool_enabled` (root sets `true`)         | `search_ledger(reference, borrower, facility, amount, date)`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `set-draw-status`       | Lambda (DynamoDB GL status overlay)           | `set_draw_status_enabled` (root sets `true`) | `set_draw_status(reference, status, reason, item_id, confidence)` — Policy-gated, provenance-checked write, executed by the worker (autonomous) or the BFF (human approve), never by the model.                                                                                                                                                                                                                                                                                                                                                                      |
+| `recon-status`          | Lambda (cases + audit tables)                 | always                                       | `recon_update_status(item_id, new_status, comment, actor)` — **platform-only** (Cedar forbids agent principals); state-machine-guarded and audited.                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `managed-kb`            | **Connector** (`bedrock-knowledge-bases`)     | always                                       | `Retrieve` — the Bedrock Retrieve API surfaced directly, no Lambda in the path, with NESTED arguments mirroring the Retrieve request. The agent supplies `retrievalQuery.text`, `numberOfResults` and a metadata `filter`; `knowledgeBaseId` is deliberately not an exposed override, and that omission is the trust boundary. Provisioned via `infra/modules/recon-agent/kb-connector-target.tf`.                                                                                                                                                                   |
+| `microsoft-graph`       | OpenAPI target (app-only, client_credentials) | `graph_enabled` + Entra app credentials      | The one Graph interface for email. `sendSharedMailboxMail` sends from the shared mailbox and is platform-only; `listSharedMailboxMessages` reads it and is reached only through `correspondence-search`. See [The Graph target in detail](#the-graph-target-in-detail).                                                                                                                                                                                                                                                                                              |
+| `correspondence-search` | Lambda (re-enters this gateway)               | always (shares `graph_mailbox`)              | `search_correspondence(query, top)` — the model-safe mailbox read. Registered unconditionally, so with `graph_enabled = false` the target exists and its inner call has no Graph target to reach. Declares only pattern-legal property names, assembles the OData form, and calls `microsoft-graph___listSharedMailboxMessages` back through this gateway with SigV4 rather than calling Graph directly, because the Graph credential lives in the OAuth2 provider with no Lambda-readable copy. Cedar permits both the wrapper and the inner action.                |
+| `notices`               | Lambda (notices table)                        | `notice_tool_enabled`                        | `search_notices(counterparty, fund, reference, amount, amount_tolerance, date_from, date_to, notice_class, activity_type, limit)` — the EXPECTED side's counterpart. Returns extracted notices only: the table also holds tracking-only rows for documents that produced none, and `_matches` excludes them, so a failed extraction is never returned as reconciliation evidence. A field this notice's class never extracts comes back in `fields_unavailable`, which is **not** a non-match; empty `rows` means searched-and-found-nothing; a read failure raises. |
+| `contacts`              | Lambda (contacts table)                       | `contact_tool_enabled`                       | `list_contacts(kind, active_only)` — who the platform may email. Read-only, and **addresses are never returned**: the model cites a `contact_id`, resolved at send time.                                                                                                                                                                                                                                                                                                                                                                                             |
+| `templates`             | Lambda (templates table, same Lambda)         | `contact_tool_enabled`                       | `list_templates(purpose, active_only)` — the wording the platform may send. Read-only; subject/body bytes are never returned. Two targets in front of one Lambda on purpose: the gateway composes `<target>___<tool>`, so a combined target would expose `contacts___list_templates`, which the Cedar permit and both allowlists silently fail to match.                                                                                                                                                                                                             |
 
 #### The Graph target in detail
 
 Auth is the configured Entra app (client-credentials, `auth_mode` pinned in
-`environments/recon/main.tf`). The app holds admin-consented **application** permissions
-`Mail.Read` and `Mail.Send`, so both send and read are live, and a read through the gateway comes
-back with a normal Graph payload. The target mailbox comes from `graph_mailbox` / `GRAPH_MAILBOX`
-and has to be a real mailbox in the tenant.
+`environments/recon/main.tf`), holding admin-consented **application** `Mail.Read` and `Mail.Send`,
+so both send and read are live. The mailbox comes from `graph_mailbox` / `GRAPH_MAILBOX` and has to
+be a real mailbox in the tenant. None of these ops are confidence-gated, because OpenAPI ops carry no
+`confidence` argument for Cedar to compare against; `sendSharedMailboxMail` is gated at the REQUEST
+interceptor instead, which rejects any send without a valid `confirmationToken` and a `sendPurpose`
+whose conditions hold.
 
-None of these ops are confidence-gated, because OpenAPI ops carry no `confidence` argument for Cedar
-to compare against. `sendSharedMailboxMail` is gated at the REQUEST interceptor instead, which
-rejects any send arriving without a valid `confirmationToken` and a `sendPurpose` whose conditions
-hold (see the interceptor bullet above).
+`getUserProfile` and `searchSharePointSites` are denied by **Cedar, not by Graph**: `cedar_reads`
+permits exactly nine actions and omits both, and the engine denies by default, so a call returns
+`No policy applies to the request (denied by default)` and never reaches Graph. Don't read that as a
+missing permission grant.
 
-`getUserProfile` and `searchSharePointSites` are denied by Cedar, not by Graph. `cedar_reads`
-permits exactly six actions and omits both, and the policy engine denies by default, so a call
-returns `No policy applies to the request (denied by default)` and never reaches Graph. Whatever the
-Entra app is consented for is beside the point for these two. Don't read that denial as a missing
-permission grant.
+`sendSharedMailboxMail` reaches the model on neither backend — a design choice, not a technical limit,
+since its argument names are all pattern-legal. The model cites a recipient and a wording BY ID in
+`submit_proposal`'s `email_draft` (`recipient_contact_id`, `template_id`, `variables`), the platform
+renders it, an analyst approves a specific revision, and the BFF sends that text.
 
-`sendSharedMailboxMail` reaches the model on neither backend, and this one is a design choice rather
-than a technical limit — its argument names are all pattern-legal and it would work if offered. The
-model cites a recipient and a wording BY ID in `submit_proposal`'s `email_draft` (`recipient_contact_id`,
-`template_id`, `variables` — it authors neither the address nor the text), the platform renders it,
-an analyst approves a specific revision, and the BFF sends that text.
+`listSharedMailboxMessages`, as the gateway advertises it, reaches the model on neither backend: its
+`$`-prefixed OData arguments surface as tool-schema property names and violate Bedrock's
+`^[a-zA-Z0-9_.-]{1,64}$` pattern. The model always goes through a `search_correspondence` wrapper (the
+runtime's in-process one, or the `correspondence-search` target), and on the harness the raw op sits in
+the decorative `GATEWAY_TOOLS` list while being deliberately absent from the enforced `ALLOWED_TOOLS`.
+The op wants `$top` an integer and `$search` a double-quoted string, which the interceptor normalizes:
+a `$top` of `"3"` is coerced and the read succeeds.
 
-`listSharedMailboxMessages`, as the gateway advertises it, reaches the model on neither backend.
-Its `$`-prefixed OData arguments surface as tool-schema property names and violate Bedrock's
-`^[a-zA-Z0-9_.-]{1,64}$` pattern, so the model always goes through a `search_correspondence` wrapper
-(the runtime's in-process one, or the `correspondence-search` target) and only those wrappers call
-the op. On the harness the raw op sits in the decorative `GATEWAY_TOOLS` list but is deliberately
-absent from the enforced `ALLOWED_TOOLS`. The op wants two strict argument forms, `$top` an integer
-and `$search` a double-quoted string, which the interceptor normalizes; verified live, a `$top` of
-`"3"` is coerced and the read succeeds.
-
-One naming trap worth knowing: the runtime registers its in-process wrapper under the raw op name as
-a tolerant-matching alias (`strands_investigator.py`). So
+One naming trap: the runtime registers its in-process wrapper under the raw op name as a
+tolerant-matching alias (`strands_investigator.py`), so
 `microsoft-graph___listSharedMailboxMessages` in a runtime model's tool list means the clean
 `query`/`top` wrapper, not the raw Graph schema.
 
@@ -852,97 +813,11 @@ a tolerant-matching alias (`strands_investigator.py`). So
 
 ## Agent evaluation & optimization
 
-The harness emits OTel traces, and a continuous evaluation pipeline scores them.
-
-- **Online evaluation** (100% sampling, 4 evaluators): the `GoalSuccessRate`, `Helpfulness` and
-  `Correctness` builtins, plus a custom analyst-agreement evaluator (a code-based Lambda scoring
-  against the lessons ledger). Online eval scores each session about 5 min after it closes, which is
-  before any analyst decision exists, so the agreement evaluator abstains at that point.
-
-  The authoritative agreement pass is a batch re-score. Nothing schedules it weekly; it fires two
-  ways. Every analyst decision triggers one automatically, so approving or correcting a case starts a
-  targeted `StartBatchEvaluation` for that case's latest session with the agreement evaluator alone,
-  and the metric updates within a few minutes with no manual step. The other way is the Evals-tab
-  "Re-run evaluation" button, which re-scores the active backend's recent sessions against all
-  evaluators.
-
-- **Recommendations**: managed `SYSTEM_PROMPT_RECOMMENDATION` and
-  `TOOL_DESCRIPTION_RECOMMENDATION` over a trace window. It is backend-agnostic, since the API
-  distinguishes only the trace source, and the prompt sent for optimization is the shared policy core
-  `s3://<assets>/system-prompt.md` that both backends run (see "One prompt, two backends" below).
-  The harness's calling contract is deliberately kept out of what the optimizer sees, so an applied
-  recommendation can never paraphrase the `submit_proposal` field list into the shared core.
-
-- **Versioned config store**: `harness-configs/v<NNNN>.json` in S3 plus an SSM active-pointer. A
-  deploy writes the version's `system_prompt` into the shared core object (`system-prompt.md`)
-  first, then moves the pointer, and rollback is just deploying the older version. That order is
-  what makes a deploy reach both backends: the runtime container reads the prompt object and never
-  the pointer, so the prompt write _is_ the deploy and the pointer is the harness worker's view of
-  it. A version with a blank `system_prompt` returns 409 instead of blanking the live prompt.
-
-  A version's `system_prompt` is a snapshot at save time and is never rewritten, so it stays an
-  honest record of what ran. The live prompt object, though, is also writable from the Skills tab
-  (Skills → System Prompt), which does not move the pointer, so the deployed version can stop being
-  the live text. The list endpoint compares the two and returns `liveMatchesDeployed`; when that is
-  `false` the row reads **LIVE · edited since** and the panel explains that the edited text is what
-  both backends run. `null`, meaning the prompt object could not be read, shows as `LIVE ?` and
-  never as agreement.
-
-  **Archive, not delete.** A bad version can be soft-archived out of the list
-  (`PATCH /api/recon/harness/configs` `{version, archived}`), and "Show archived (n)" brings them
-  back. There is no delete at all: the deployed version is both the rollback target and the drift
-  baseline, and the documents are the record of every prompt that ever ran. Archiving the deployed
-  version returns 409. Version numbering counts archived documents too, so a number is never reused.
-
-Prerequisites: the harness backend active, and account-level CloudWatch Transaction Search enabled.
-
-### Client → agent trace continuity
-
-AgentCore traces the agent side for you, but the caller is a separate trace unless the client
-propagates context. The SDK does not forward `traceparent` or `baggage`, so a worker invocation and
-the agent's own spans land as two unrelated traces. The agent-worker Lambda closes that gap with
-five pieces:
-
-| Piece                                         | Where                                                                                                               | What it does                                                                                                                                                                                                                                                                                                                                                                                           |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **ADOT layer** `AWSOpenTelemetryDistroPython` | `enable_worker_tracing` / `otel_layer_version` (`infra/.../recon`)                                                  | supplies the `opentelemetry` packages + `/opt/otel-instrument` (`AWS_LAMBDA_EXEC_WRAPPER`). Deliberately **not** vendored into the shared Lambda zip, which every other Lambda uses.                                                                                                                                                                                                                   |
-| **`backend/recon_core/otel_client.py`**       | worker + harness worker                                                                                             | `traced(...)` custom spans around each invoke, `set_recon_baggage(...)` for item/domain/backend/session, `register_trace_propagation(client)`.                                                                                                                                                                                                                                                         |
-| **boto3 `before-send` hook**                  | `register_trace_propagation`                                                                                        | injects `traceparent` + `baggage` (and forces `X-Amzn-Trace-Id` to `Sampled=1`) **after** SigV4, so the headers ride along unsigned and cannot invalidate the signature. The ingress path is hand-signed urllib with no botocore event system, so it takes the same headers through `invoke_via_ingress(extra_headers=…)`, merged after `signed_headers` — `ingress_invoke.py` itself stays OTel-free. |
-| **`OTEL_BAGGAGE_SPAN_ATTRIBUTE_KEYS`**        | set identically on **all three** participants: the worker Lambda, the harness definition, and the Runtime container | promotes the allow-listed baggage keys onto the agent-side spans — this is what makes `recon.item_id` / `session.id` searchable in Transaction Search. The allow-list is **per-participant**: the header propagates either way, but a participant without its own copy records nothing (the container runtime's spans showed only `session.id` until it got one).                                      |
-| **Harness `environmentVariables`**            | `infra/modules/recon-agent-harness` (`HARNESS_ENV_JSON`)                                                            | span-noise reduction (`OTEL_PYTHON_EXCLUDED_URLS`, `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS`) plus the baggage allow-list; hashed into `config_hash` so an edit is never a no-op.                                                                                                                                                                                                                        |
-
-Two settings are asymmetric on purpose. `AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT` and
-`OTEL_SEMCONV_STABILITY_OPT_IN` are on for the Lambda, which emits no gen-ai content, and off for the
-harness, because the live online evaluators score the gen-ai content records the harness emits;
-opting out there would silently starve them.
-
-Set `enable_worker_tracing = false` to detach the layer and make the whole client-side path inert. In
-a private VPC the `xray` interface endpoint is required, and without it spans are dropped silently.
-
-### One prompt, two backends
-
-The agent's instructions live in one editable artifact, and both Tier-2 backends read it:
-
-| Artifact                                 | Holds                                                                                   | Read by                                  | Written by                                      |
-| ---------------------------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------- | ----------------------------------------------- |
-| `s3://<assets>/system-prompt.md`         | the shared **policy core** — role, skills-as-procedures, workflow, autonomy, principles | runtime container **and** harness worker | Skills-tab prompt editor; config-version deploy |
-| `s3://<assets>/system-prompt-harness.md` | the harness's **calling contract** only — `submit_proposal` fields, prefixed tool names | harness worker (appended after the core) | repo seed, re-pushed by every apply             |
-
-`backend/recon_core/prompt_source.py` owns the composition and fails loudly on an empty core.
-Switching `agent_backend` therefore cannot change the agent's policy, only its calling mechanics.
-
-One core object keeps the policy single-sourced, and the harness file holds only calling mechanics,
-which cannot drift into policy.
-
-Both S3 objects (and every `skills/<name>/SKILL.md`) are `ignore_changes` create-only
-`aws_s3_object` seeds, so Terraform itself never overwrites live text — that is the prompt editor's
-job. Keeping the repo and the live objects in step is instead
-`aws_lambda_invocation.seed_push`, which runs on **every apply**: it re-pushes each entry of
-`local.editable_seeds` whose repo file changed, and **fails the apply**, naming the key, when the
-repo file _and_ the live object have both changed since the last push. A repo-side prompt or skill
-edit therefore reaches an existing environment through a normal apply, with no manual `aws s3 cp`.
-The one case it cannot see is an edit made **only** through the UI: that wins silently, because
-there is nothing on the repo side to conflict with it.
+The harness emits OTel traces and a continuous evaluation pipeline scores them: four online
+evaluators at 100% sampling, managed prompt/tool-description recommendations, and a versioned
+config store with rollback. Both Tier-2 backends read one shared policy-core prompt, so switching
+`agent_backend` cannot change the agent's policy. Full account, including client → agent trace
+continuity, in **[assets/agent-evaluation.md](assets/agent-evaluation.md)**.
 
 ---
 
@@ -955,16 +830,16 @@ groups, app enablement, console defaults, each user's preferences — are on the
 screen, not in either Config tab; see
 [Console-wide configuration](#console-wide-configuration).
 
-| Tab             | Purpose                                                                                                                                                                                                                                                                                                                                                                                                |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Dashboard**   | Lifecycle status counts across all cases; click-through to filtered history                                                                                                                                                                                                                                                                                                                            |
-| **Queue**       | Open exceptions (PENDING / IN_PROGRESS / PROPOSED); class, confidence meter; multi-select bulk actions; click-through to case detail                                                                                                                                                                                                                                                                   |
-| **Case detail** | IDP document split view (section ⇄ page images + extracted fields), classification + reasoning, evidence score with one row per prescribed step, the notices the investigation matched (expandable to every extracted field beside the source document they were read off), the skill that drove the score, proposed resolution, agent trace (tool calls + evidence), approve/disapprove with comments |
-| **Documents**   | What the extraction pipeline processed, newest window first, with the config version each row ran under; per-document sections, confidence alerts and evaluation status; streams the source file beside what was extracted from it; upload                                                                                                                                                             |
-| **Skills**      | Browse/create/edit/delete SKILL.md files (live, ~60 s). Each tile shows tools; click opens read-only (Edit is explicit). System prompt also editable here                                                                                                                                                                                                                                              |
-| **Lessons**     | Captured analyst decisions/corrections fed back to the agent                                                                                                                                                                                                                                                                                                                                           |
-| **Evals**       | Last-7-days evaluation metrics; on-demand batch; managed recommendations; versioned harness-config (save/deploy/rollback)                                                                                                                                                                                                                                                                              |
-| **Config**      | Toggle Tier-1 (with inline read-only source); set/disable auto-resolve threshold (rewrites Cedar); switch agent backend runtime↔harness (with inline code viewer / harness skill list); model selection; the email contact list and templates                                                                                                                                                          |
+| Tab             | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Dashboard**   | Lifecycle status counts across all cases; click-through to filtered history                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| **Queue**       | Open exceptions (PENDING / IN_PROGRESS / PROPOSED); class, confidence meter; multi-select bulk actions; click-through to case detail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| **Case detail** | IDP document split view (section ⇄ page images + extracted fields), classification + reasoning, evidence score with one row per prescribed step, the notices the investigation matched (expandable to every extracted field beside the source document they were read off), the skill that drove the score, proposed resolution, agent trace (tool calls + evidence), approve/disapprove with comments                                                                                                                                                                                                                                                                                                                                               |
+| **Documents**   | Every document the pipeline reached a terminal status on, from recon's **own** notice store (the hook writes each row at ingest), newest-first and paged off a GSI over ingest time; sections, confidence alerts, and the config version each ran under — `?` where recon captured none, `≈` on a start time derived from a business date; source bytes stream from the pipeline's input bucket, never copied into recon storage; failures, and documents recon could map no notice from, appear as tracking-only rows carrying the reason, so none vanishes silently; `Object status`/`Evaluation` are a snapshot at extraction, and no human-review information exists — the event carries none, so **Pipeline reports** links out instead; upload |
+| **Skills**      | Browse/create/edit/delete SKILL.md files (live, ~60 s). Each tile shows tools; click opens read-only (Edit is explicit). System prompt also editable here                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| **Lessons**     | Captured analyst decisions/corrections fed back to the agent                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **Evals**       | Last-7-days evaluation metrics; on-demand batch; managed recommendations; versioned harness-config (save/deploy/rollback)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| **Config**      | Toggle Tier-1 (with inline read-only source); set/disable auto-resolve threshold (rewrites Cedar); switch agent backend runtime↔harness (with inline code viewer / harness skill list); model selection; the email contact list and templates                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 ### Authentication
 
@@ -976,8 +851,12 @@ providers:
 - `entra` is Microsoft Entra ID via MSAL. It is the Terraform variable's default, so it applies when
   `auth_provider` is unset.
 
-`UserMenu` (`src/components/app-ui/UserMenu.tsx`, shared by both apps' headers) shows the signed-in user's name and a Logout button. Cognito survives only as the intake
-HTTP API's JWT authorizer; it is not the frontend login.
+`UserMenu` (`src/components/app-ui/UserMenu.tsx`, shared by both apps' headers) shows the signed-in
+user's name and a Logout button. The intake HTTP API's JWT authorizer validates this **same**
+provider — issuer and audience are derived from `auth_provider` once, in the root module's `oidc_*`
+locals — so the API and the BFF accept identical tokens. There is no Cognito user pool in this
+deployment. That authorizer, the two routes behind it, the VPC-only SigV4 door and the
+`POST /items` contract are in **[assets/intake-http-api.md](assets/intake-http-api.md)**.
 
 Which apps a signed-in user may open, and where they are an admin, comes from the token's group claim
 (`AUTH_GROUPS_CLAIM`) matched against the four `*_ACCESS_GROUP` / `*_ADMIN_GROUP` variables (or the
@@ -1026,200 +905,12 @@ it to. No rate-based rule is configured on the ACL, so request-rate abuse is unm
 
 ## Private VPC deployment
 
-The dev default trades isolation for cost: public Fargate subnets and a single NAT. For a regulated or
-internet-restricted deployment, the frontend and backend both run entirely on private subnets with no
-route to an Internet Gateway, and every AWS dependency is reached over PrivateLink interface endpoints
-instead of the public internet. CloudFront is an optional edge layer here rather than part of the
-isolation: the workload isolation is identical without it, and only the ingress hop differs.
-
-### Ingress options (CloudFront optional)
-
-| Option                       | Ingress path                                                                                        | When to use                                                                                                                                                                                                                                               |
-| ---------------------------- | --------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **A — CloudFront (prod)**    | CloudFront → **PrivateLink VPC origin** → **internal ALB**                                          | Production: global edge, WAF attachment point, managed TLS, no internet-facing ALB                                                                                                                                                                        |
-| **B — Direct ALB (testing)** | Internet-facing ALB in the two public subnets, **SG locked to tester CIDRs** → private Fargate task | Easier testing without CloudFront: the workloads stay exactly as private; only the ALB is reachable, and only from allowlisted IPs. Needs an ACM cert on the ALB (or HTTP for quick tests) and the ALB DNS name added to the Okta/Entra **redirect URIs** |
-| **C — Fully private**        | **Internal ALB**, reached via Client VPN / Direct Connect, or an SSM port-forward for ad-hoc tests  | Internet-restricted environments; nothing is reachable from the internet at all                                                                                                                                                                           |
-
-### What changes vs. the dev default
-
-| Concern             | Dev default (cost-optimized)                        | Private VPC mode                                                                                                                                                                                                                  |
-| ------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Fargate placement   | Public subnets, `assign_public_ip = true`, no NAT   | Private subnets, `assign_public_ip = false`, no public IP                                                                                                                                                                         |
-| ALB                 | Internet-facing, open to the CloudFront prefix list | Option A/C: **internal** ALB · Option B: internet-facing but **CIDR-allowlisted** (testing)                                                                                                                                       |
-| Egress to AWS APIs  | Direct (Fargate) + single NAT (Lambdas/Runtime)     | All AWS access via **VPC interface endpoints** (PrivateLink) + S3/DynamoDB gateway endpoints. No IGW route for the frontend; the NAT is what the endpoints make **removable** — the flag does not delete it (see "Enabling it")   |
-| Bedrock / AgentCore | Over NAT to public endpoints                        | `bedrock-runtime`, `bedrock-agentcore` and `bedrock-agentcore.gateway` (Gateway has its own PrivateLink service) **interface endpoints**. No `bedrock-agent-runtime` — the KB `Retrieve` is made by the Gateway, not from the VPC |
-| Blast radius        | Task can reach the internet                         | Task can reach **only** the enumerated endpoint services                                                                                                                                                                          |
-
-### Interface (PrivateLink) endpoints required
-
-Beyond the S3 + DynamoDB **gateway** endpoints and the `ecr.api` / `ecr.dkr` / `logs`
-interface endpoints already provisioned, the root `private_vpc = true` flag (which sets the
-network module's `enable_private_endpoints`) adds the following
-(`infra/modules/network/main.tf`, `_private_interface_endpoints`) so nothing needs the NAT:
-`bedrock-runtime`, `bedrock-agentcore`, `bedrock-agentcore.gateway`, `ssm`, `secretsmanager`,
-`sts`, `elasticloadbalancing`, `ecs` / `ecs-agent` / `ecs-telemetry`, and
-`xray` (OTel span export — without it the VPC-attached worker drops every span while otherwise
-working normally). Each carries a security group allowing 443 from the workload SGs.
-
-`bedrock-agent-runtime` used to be in that list and no longer is. It existed for the
-Lambda-backed `knowledge-base` tool, which called Bedrock KB `Retrieve` through
-`boto3.client("bedrock-agent-runtime")` — a different service from `bedrock-runtime` (model
-inference) — and hung without the endpoint in a no-NAT deployment. That Lambda and its gateway
-target were deleted in Phase 3, and the KB read the agent uses now does **not** need the endpoint:
-`managed-kb` is a connector target, so the `Retrieve` call is made by the AgentCore Gateway's own
-service role from outside the VPC, and the only thing the workload has to reach is
-`bedrock-agentcore.gateway`. Add it back if you ever put an in-VPC caller of `Retrieve` /
-`RetrieveAndGenerate` / `InvokeAgent` in. `states` is deliberately absent.
-
-> **AgentCore Gateway PrivateLink Support:** AgentCore publishes three PrivateLink services, and Gateway is supported on both
-> data and control plane:
->
-> | Service name                                       | Private DNS                                          | Purpose                         |
-> | -------------------------------------------------- | ---------------------------------------------------- | ------------------------------- |
-> | `com.amazonaws.<region>.bedrock-agentcore`         | `bedrock-agentcore.<region>.amazonaws.com`           | data plane (Runtime, Memory, …) |
-> | `com.amazonaws.<region>.bedrock-agentcore.gateway` | `*.gateway.bedrock-agentcore.<region>.amazonaws.com` | **Gateway invocation**          |
-> | `com.amazonaws.<region>.bedrock-agentcore-control` | `bedrock-agentcore-control.<region>.amazonaws.com`   | control plane (Runtime/Memory)  |
->
-> The gateway endpoint is not redundant with the data-plane one. A gateway URL is
-> `<gateway-id>.gateway.bedrock-agentcore.<region>.amazonaws.com`, a subdomain the data-plane
-> endpoint's exact-name private zone does not resolve. An earlier version of this README claimed
-> egress-tool traffic "still leaves via the `bedrock-agentcore` interface endpoint's service"; that
-> was wrong, and in a no-NAT deployment those calls had no private path at all.
-> `bedrock-agentcore.gateway` is in `_private_interface_endpoints` for exactly this reason.
->
-> Both recon gateways use AWS_IAM/SigV4 inbound auth, so the default full-access endpoint policy works
-> and a custom policy can scope `Principal` to specific IAM identities. There is an asymmetry to watch
-> if the ingress is ever switched to OAuth/JWT: endpoint policies can only match IAM principals, so an
-> OAuth-ingress gateway requires `Principal: "*"` or every call over the endpoint is denied.
->
-> Separately, gateway targets can now reach private VPC resources through a `privateEndpoint` /
-> `managedVpcResource` block (VPC Lattice) on MCP and OpenAPI targets, so a target no longer has to be
-> publicly reachable. Nothing here uses it: Lambda targets need no configuration and already run in
-> the VPC, and the Graph OpenAPI target is a public third-party API. It is the supported route if the
-> IDP MCP endpoint is ever moved inside a VPC. It does not apply to Smithy targets, and API Gateway
-> targets need the export-as-OpenAPI workaround with `routingDomain` set to the API's VPCE DNS name.
-
-### Architecture (private-VPC mode)
-
-![Private VPC architecture](assets/private-vpc-architecture.svg)
-
-```mermaid
-flowchart TB
-    user([Analyst / Browser])
-    user -.->|"A (prod, optional): HTTPS"| cf["CloudFront (OPTIONAL)<br/>WAF / edge TLS"]
-    cf -.->|PrivateLink VPC origin| alb
-    user -->|"B (testing): HTTPS direct,<br/>SG allowlisted CIDRs · ACM cert"| alb
-    user -.->|"C: VPN / SSM port-forward"| alb
-
-    subgraph aws["AWS account / Region"]
-      subgraph vpc["VPC (no IGW / no NAT on workload subnets)"]
-        subgraph ingress["Ingress (2 AZs)"]
-          alb["ALB<br/>internal (A/C) · internet-facing + CIDR allowlist (B)"]
-        end
-
-        subgraph app["Private subnets — Application"]
-          fe["ECS Fargate<br/>Next.js + BFF /api/recon/*<br/>assign_public_ip = false"]
-          rt["AgentCore Runtime<br/>container (network_mode = VPC)"]
-          lam["Lambdas<br/>idp-hook · intake · tier1 · agent-worker ·<br/>gl · recon-status · kb · interceptor · eval-agreement"]
-        end
-
-        subgraph pl["VPC Endpoints (PrivateLink)"]
-          gw["Gateway endpoints:<br/>S3 · DynamoDB"]
-          ife["Interface endpoints:<br/>bedrock-runtime · bedrock-agentcore ·<br/>bedrock-agentcore.gateway ·<br/>ecr.api · ecr.dkr · logs · ssm ·<br/>secretsmanager · sts · xray ·<br/>elasticloadbalancing · ecs"]
-        end
-      end
-
-      subgraph data["Regional AWS services (via PrivateLink)"]
-        ddb[(DynamoDB<br/>items · cases · audit · lessons)]
-        s3[(S3<br/>assets · skills · configs)]
-        bedrock["Bedrock<br/>Foundation models · Knowledge Base"]
-        acore["AgentCore<br/>Gateway · Memory · Policy · Identity · Evaluation"]
-        cw["CloudWatch Logs / X-Ray<br/>(aws/spans, eval results)"]
-      end
-    end
-
-    alb --> fe
-    fe -->|SigV4| rt
-    fe --> lam
-    lam --> rt
-
-    fe --> ife
-    rt --> ife
-    lam --> ife
-    fe --> gw
-    rt --> gw
-    lam --> gw
-
-    gw --> ddb
-    gw --> s3
-    ife --> bedrock
-    ife --> acore
-    ife --> cw
-
-    classDef vpcbox fill:#eef6ff,stroke:#4a90d9;
-    classDef svc fill:#f5f5f5,stroke:#999;
-    classDef optional stroke-dasharray:5 5,fill:#fffbe6,stroke:#b8962e;
-    class vpc,app,pl,ingress vpcbox;
-    class data,ddb,s3,bedrock,acore,cw svc;
-    class cf optional;
-```
-
-**Request path.** The user arrives by exactly one of three routes: (A) CloudFront → PrivateLink VPC
-origin → internal ALB, (B) allowlisted HTTPS straight to the ALB for testing without CloudFront, or
-(C) a VPN/SSM tunnel to the internal ALB. All three land on the same ECS Fargate task (Next.js plus
-the same-origin `/api/recon/*` BFF, running under the task role). The OIDC login runs in the SPA and
-behaves identically on every option; each origin URL, whether the CloudFront domain or the ALB DNS
-name, just has to be registered as a redirect URI in the IdP app.
-
-From the task inward nothing differs between the options. BFF and agent calls reach the AgentCore
-Runtime over SigV4, through the ingress gateway or a direct `InvokeAgentRuntime`, and every AWS API
-call (Bedrock models, the AgentCore control and data planes, DynamoDB, S3, SSM, Secrets Manager,
-CloudWatch) flows through the S3/DynamoDB gateway endpoints and the interface endpoints. No workload
-holds a public IP, and in option B the only internet-reachable component is the CIDR-allowlisted ALB.
-
-The diagram shows the end-state topology. `private_vpc` gets you the endpoints and the private
-frontend; removing the NAT gateway is the last manual step, described under "Enabling it".
-
-### Enabling it
-
-One flag does it. `terraform apply -var="private_vpc=true"` switches the whole topology to option C in
-a single change, with no per-module wiring to do:
-
-```bash
-cd infra/environments/recon
-terraform apply -var="private_vpc=true" -var='private_ingress_cidrs=["10.0.0.0/8"]'
-```
-
-| What the flag does                                                                                                                                                          | Where                        |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
-| Adds the twelve interface endpoints listed above (`enable_private_endpoints`)                                                                                               | `infra/modules/network`      |
-| ALB becomes **internal**; ingress from `private_ingress_cidrs` (empty ⇒ the VPC CIDR only)                                                                                  | `infra/modules/frontend-ecs` |
-| Fargate moves to the private subnets, `assign_public_ip = false`, private-endpoint SG                                                                                       | `infra/modules/frontend-ecs` |
-| **CloudFront is not created at all** — distribution, WAF web ACL, log bucket, and origin-request policy all `count = 0`, and no public subnets / IGW route for the frontend | `infra/modules/frontend-ecs` |
-
-`private_ingress_cidrs` is your VPN or corporate range; leave it empty to allow the VPC CIDR only.
-Register the internal ALB's DNS name as an OIDC redirect URI in Okta/Entra, then reach the UI over
-Client VPN / Direct Connect or
-`aws ssm start-session --document-name AWS-StartPortForwardingSessionToRemoteHost`.
-
-Three things stay manual, and the flag does none of them:
-
-1. **The NAT gateway survives.** `aws_nat_gateway.this`, its EIP and public subnet, and the private
-   route table's `0.0.0.0/0 → NAT` route are unconditional in `infra/modules/network/main.tf`. A
-   `private_vpc = true` apply therefore gives you the interface endpoints and a fully private
-   frontend while the backend subnets still hold a default route out. Removing the NAT, and the
-   ~$35/mo it costs, is a follow-up edit to that module. Do it only after confirming the endpoint set
-   covers every dependency. The one easiest to miss is `bedrock-agentcore.gateway` — every egress
-   tool call goes through it, including the KB read, since `managed-kb` is a connector target the
-   gateway calls Bedrock for.
-2. **Option A is out of reach of the flag**, which removes CloudFront outright. A CloudFront →
-   PrivateLink-VPC-origin front end has to be added back on top of the internal ALB.
-3. **Option B is a hand edit too.** Keep `private_vpc = false`, replace the CloudFront prefix-list
-   ingress rule on the ALB SG with your tester CIDRs, and attach an ACM certificate. Workloads stay
-   as private as the module makes them, but no variable expresses this.
-
-The dev environment root defaults to `private_vpc = false`, the cost-optimized public-subnet variant.
-Private mode is the hardened profile of the same modules, not a different deployment.
+`terraform apply -var="private_vpc=true"` switches the whole topology in one change: internal ALB,
+Fargate on private subnets with no public IP, no CloudFront, and fourteen PrivateLink interface
+endpoints so nothing needs the NAT. The NAT itself survives the flag — removing it is a follow-up
+edit. The three ingress options, the endpoint set and why `bedrock-agent-runtime` is deliberately
+absent, and the private-mode architecture diagram are in
+**[assets/private-vpc-deployment.md](assets/private-vpc-deployment.md)**.
 
 ---
 
@@ -1239,51 +930,46 @@ escalated item.
 The frontend is one always-on ECS Fargate task (0.5 vCPU / 1 GB) behind an ALB, fronted by CloudFront,
 with a single NAT gateway, running 24×7.
 
-Bedrock runs Claude Sonnet as both the agent and the LLM-judge model: ~300 investigations at ~50K
-input and ~3K output tokens each, plus the online-eval judges (~4 evaluators over sampled sessions).
+Bedrock runs Claude Sonnet as both the agent and the LLM-judge model: ~300 investigations at
+**~190K input and ~12K output tokens each** (measured off the `token_usage` attribute on real cases —
+an earlier estimate of ~50K/~3K was low by roughly 4×, which is what kept the account's
+tokens-per-minute ceiling out of view until a burst hit it), plus the online-eval judges (~4
+evaluators over sampled sessions). Note the per-investigation figure is `k+1` model calls, not one:
+`k` self-consistency classification samples plus the multi-turn investigation loop.
 
 The guidance corpus lives in a **fully managed** Knowledge Base (`type = "MANAGED"`, in
 `infra/modules/recon-agent/main.tf`), which owns its own vector store — nothing to size, no
 OpenSearch Serverless collection and no OCU floor, and no embedding model of ours to pay for. It is
-the only knowledge base: the customer-managed S3 Vectors KB that ran alongside it during the
-migration was deleted in Phase 3.
+the only knowledge base — there is no customer-managed S3 Vectors KB alongside it.
 
 DynamoDB, Lambda, S3 and Athena are all on-demand at demo volume.
 
+The Bedrock line was revised upward once real `token_usage` was measured: ~190K in / ~~12K out per
+investigation, roughly 4x the original estimate — which is why the account's tokens-per-minute ceiling
+stayed out of view until a burst reached it. The dollar figure scales the measured token volume at the
+same per-token rate the previous estimate implied (~~$3/M in, ~$15/M out) rather than a fresh price
+lookup, so treat it as an order of magnitude. Note it now dominates the bill.
+
 ### Estimated monthly cost (demo profile, us-east-1)
 
-| Service                                                                 | Driver                                                       | Est. $/mo     |
-| ----------------------------------------------------------------------- | ------------------------------------------------------------ | ------------- |
-| **Amazon Bedrock — Claude Sonnet**                                      | ~300 investigations + eval judges (~20M in / ~1M out tokens) | **~$70**      |
-| **NAT Gateway**                                                         | 1 gateway (~$0.045/hr) + data processing                     | **~$35**      |
-| **CloudWatch** (logs, metrics, Transaction Search spans, Logs Insights) | OTel spans + eval queries                                    | **~$25**      |
-| **AgentCore** (Runtime/Harness, Gateway, Memory, Evaluations)           | low invocation volume; consumption-priced                    | **~$20**      |
-| **ECS Fargate** (frontend)                                              | 1 task, 0.5 vCPU + 1 GB, 24×7                                | **~$18**      |
-| **Application Load Balancer**                                           | 1 ALB, low LCU                                               | **~$18**      |
-| **WAF** (CloudFront web ACL)                                            | 1 web ACL + 1 managed rule group + low request volume        | **~$6**       |
-| **Secrets Manager / SSM / ECR / CodeBuild**                             | few secrets, params, image builds                            | **~$5**       |
-| **Bedrock — Knowledge Base ingestion + `Retrieve`**                     | seed corpus + retrievals (managed KB owns the embedding)     | **~$3**       |
-| **Lambda** (idp-hook, tier1, worker, gl, interceptor, evaluator, etc.)  | demo invocations, mostly free-tier-adjacent                  | **~$3**       |
-| **DynamoDB** (items, cases, audit, lessons — on-demand)                 | low RCU/WCU                                                  | **~$3**       |
-| **S3** (assets, skills, configs, GL, IDP page copies)                   | few GB + requests                                            | **~$2**       |
-| **CloudFront**                                                          | low egress                                                   | **~$2**       |
-| **Athena** (GL queries via `search_ledger`)                             | small scans, $5/TB                                           | **~$1**       |
-| **Total (demo profile)**                                                |                                                              | **≈ $211/mo** |
-
-What moves the number:
-
-- Bedrock is already the top line at ~$70, a third of the bill, and it scales with volume while the
-  ~$71 of always-on NAT, ALB and Fargate does not. No large fixed cost is left to cut here. The one
-  remaining lever on the floor is the NAT gateway.
-- `private_vpc = true` is the most expensive flag in the repo (see
-  [Private VPC deployment](#private-vpc-deployment)). It adds the 12 endpoints in
-  `_private_interface_endpoints`, and each one gets an ENI in both private subnets
-  (`subnet_ids = aws_subnet.private[*].id`, `count = 2`). At ~$0.01/ENI-hour that is ~$15/mo per
-  endpoint, so ≈ +$175/mo, not the ~$75 an earlier version of this table claimed by counting one AZ.
-  Removing CloudFront and its WAF web ACL gives back ≈ $8, and dropping the NAT gateway another $35,
-  but the NAT removal is a manual follow-up edit and the flag alone leaves it running. Net: roughly +$167/mo, or +$132 once the NAT goes.
-- At production volume the shape inverts. Ten to a hundred times the traffic leaves the ~$71
-  infrastructure floor untouched and takes Bedrock past everything else combined.
+| Service                                                                                     | Driver                                                            | Est. $/mo     |
+| ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | ------------- |
+| **Amazon Bedrock — Claude Sonnet**                                                          | ~300 investigations (~57M in / ~3.6M out, measured) + eval judges | **~$225**     |
+| **NAT Gateway**                                                                             | 1 gateway (~$0.045/hr) + data processing                          | **~$35**      |
+| **CloudWatch** (logs, metrics, Transaction Search spans, Logs Insights)                     | OTel spans + eval queries                                         | **~$25**      |
+| **AgentCore** (Runtime/Harness, Gateway, Memory, Evaluations)                               | low invocation volume; consumption-priced                         | **~$20**      |
+| **ECS Fargate** (frontend)                                                                  | 1 task, 0.5 vCPU + 1 GB, 24×7                                     | **~$18**      |
+| **Application Load Balancer**                                                               | 1 ALB, low LCU                                                    | **~$18**      |
+| **WAF** (CloudFront web ACL)                                                                | 1 web ACL + 1 managed rule group + low request volume             | **~$6**       |
+| **Secrets Manager / SSM / ECR / CodeBuild**                                                 | few secrets, params, image builds                                 | **~$5**       |
+| **Bedrock — Knowledge Base ingestion + `Retrieve`**                                         | seed corpus + retrievals (managed KB owns the embedding)          | **~$3**       |
+| **Step Functions** (Tier-2 map run, STANDARD)                                               | ~8,600 scheduled runs/mo + one child execution per case           | **~$1**       |
+| **Lambda** (idp-hook, tier1, worker, tier2 dispatch trio, gl, interceptor, evaluator, etc.) | demo invocations, mostly free-tier-adjacent                       | **~$3**       |
+| **DynamoDB** (items, cases, audit, lessons — on-demand)                                     | low RCU/WCU                                                       | **~$3**       |
+| **S3** (assets, skills, configs, GL, IDP page copies)                                       | few GB + requests                                                 | **~$2**       |
+| **CloudFront**                                                                              | low egress                                                        | **~$2**       |
+| **Athena** (GL queries via `search_ledger`)                                                 | small scans, $5/TB                                                | **~$1**       |
+| **Total (demo profile)**                                                                    |                                                                   | **≈ $365/mo** |
 
 _These are rough list-price estimates for planning only. Validate them against the AWS Pricing
 Calculator and your actual traffic before relying on them._

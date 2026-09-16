@@ -3,15 +3,22 @@
  *
  * This module replaced a reader that called the document pipeline's GraphQL API twice per section. The
  * substance of the change is that recon now answers from data it already owns, so the tests worth
- * having are about the three answers it has to keep apart:
+ * having are about the answers it has to keep apart:
  *
  *  - no notice row at all — recon never wrote one, which is `UnknownDocumentError` and a 404;
- *  - a row whose per-field detail was dropped to fit DynamoDB's item limit, or written before the hook
- *    embedded any: the notice EXISTS, so this is `unavailable` with a reason, not an absence;
+ *  - a row whose per-field detail was dropped to fit DynamoDB's item limit: the notice EXISTS, so this
+ *    is `unavailable` with the row's stored sentence, not an absence;
+ *  - a tracking-only row (`record_kind == "document"`): the pipeline finished the document but recon
+ *    mapped no notice out of it, and the row's own `notice_failure_reason` is the true explanation.
+ *    Anything the reader inferred instead would be a guess, and the guess this file used to assert
+ *    ("re-uploading the document produces a notice that has it") was wrong on exactly this row;
+ *  - a notice row with no `idp_sections` at all: stated without a cause, because the row names none;
  *  - a row with an empty `idp_sections`: the extractor genuinely read nothing, which is `sections: []`
  *    and no reason at all.
  *
- * Collapsing any two of those turns an ordinary outcome into a red failure, or hides a real gap.
+ * Collapsing any two of those turns an ordinary outcome into a red failure, hides a real gap, or —
+ * the case that reached the deployed console — explains a document with a sentence about a different
+ * kind of row entirely.
  */
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -97,6 +104,11 @@ describe("readNoticeExtraction", () => {
     // row exists" distinguishable from "the row exists and carries no extraction".
     expect(input.ProjectionExpression).toContain("notice_id");
     expect(input.ProjectionExpression).toContain("idp_sections");
+    // And both attributes the tracking-row branch reads. A projected-away attribute is
+    // indistinguishable from an absent one, so leaving either out would not fail anywhere -- it would
+    // quietly send every tracking row back down the notice path with the wrong sentence attached.
+    expect(input.ProjectionExpression).toContain("record_kind");
+    expect(input.ProjectionExpression).toContain("notice_failure_reason");
   });
 
   it("returns the stored sections with no reason attached", async () => {
@@ -133,10 +145,15 @@ describe("readNoticeExtraction", () => {
   });
 
   it("reports the stored reason when the detail was dropped to fit the row", async () => {
+    // The branch that survives: the hook HAD the detail and dropped it to stay under DynamoDB's item
+    // limit. A genuinely reachable state, unlike the migration case this file used to assert.
     const reason =
       "the extraction was 812345 bytes, over the 380000-byte row budget";
     send.mockResolvedValue({
-      Item: row("big.pdf", { idp_sections_omitted: reason }),
+      Item: row("big.pdf", {
+        record_kind: "notice",
+        idp_sections_omitted: reason,
+      }),
     });
     const got = await readNoticeExtraction({ objectKey: "big.pdf" });
     // The stored sentence names the sizes, so it is shown rather than paraphrased.
@@ -144,13 +161,73 @@ describe("readNoticeExtraction", () => {
     expect(got.sections).toEqual([]);
   });
 
-  it("names the gap for a notice written before the hook embedded any detail", async () => {
-    // The rows already in the table have no `idp_sections` attribute at all. Not an error and not an
-    // empty extraction -- and the remedy is specific enough to be worth saying.
-    send.mockResolvedValue({ Item: row("old.pdf") });
-    const got = await readNoticeExtraction({ objectKey: "old.pdf" });
-    expect(got.unavailable).toContain("re-uploading");
+  it("reports the row's own reason for a document that never became a notice", async () => {
+    // The row an operator actually meets: IDP finished the document, recon could not map a notice out
+    // of it because nothing in it gave a notice date, and the row records that. The reason belongs to
+    // the row -- the reader must not substitute an explanation of its own.
+    send.mockResolvedValue({
+      Item: row("fax-cover.pdf", {
+        record_kind: "document",
+        notice_failure_reason: "extracted no notice_date",
+      }),
+    });
+    const got = await readNoticeExtraction({ objectKey: "fax-cover.pdf" });
+    expect(got.unavailable).toContain("extracted no notice_date");
+    // Says WHOSE failure it was, because the table renders this as a single line beside a filename.
+    expect(got.unavailable).toContain("recon mapped no notice");
+    // And never the sentence that used to be returned here, which claimed the document was extracted
+    // before recon stored per-field detail and that re-uploading would fix it. Both false: this
+    // document was extracted today, and re-uploading it produces the same unmappable document.
+    expect(got.unavailable).not.toMatch(/re-uploading/i);
     expect(got.sections).toEqual([]);
+  });
+
+  it("admits it when a tracking row carries no reason at all", async () => {
+    // `_failure_reason` in `backend/idp_hook/handler.py` guarantees a non-blank string, so this is only
+    // reachable if something else wrote the row. It still must not fall back to inventing a cause.
+    send.mockResolvedValue({
+      Item: row("bare.pdf", { record_kind: "document" }),
+    });
+    const got = await readNoticeExtraction({ objectKey: "bare.pdf" });
+    expect(got.unavailable).toBe(
+      "recon mapped no notice from this document and recorded no reason for it",
+    );
+    expect(got.sections).toEqual([]);
+  });
+
+  it("states plainly that a notice carries no per-field detail, with no invented cause", async () => {
+    // The residual case: a `notice` row with no `idp_sections` attribute. Nothing on the row says why,
+    // so nothing here says why either -- the sentence that used to fill the gap ("extracted before
+    // recon stored per-field detail ... re-uploading produces a notice that has it") was written for
+    // rows predating 2026-09-08, and the notices table is deliberately never seeded, so no deployment
+    // can hold one.
+    send.mockResolvedValue({
+      Item: row("plain.pdf", { record_kind: "notice" }),
+    });
+    const got = await readNoticeExtraction({ objectKey: "plain.pdf" });
+    expect(got.unavailable).toBe(
+      "recon has no per-field detail stored for this document",
+    );
+    expect(got.unavailable).not.toMatch(/re-uploading/i);
+    expect(got.unavailable).not.toMatch(/before recon stored/i);
+    expect(got.sections).toEqual([]);
+  });
+
+  it("treats a row with no record_kind as a notice rather than as a document", async () => {
+    // ⚠️ ABSENT means `"notice"` -- 16 live rows predate the attribute. The row here also carries a
+    // `notice_failure_reason`, which no notice row should have, precisely to pin down that the branch
+    // keys on `record_kind` and not on a reason being present: a truthiness test on either would
+    // report this row as a document that never became a notice.
+    send.mockResolvedValue({
+      Item: row("legacy.pdf", {
+        notice_failure_reason: "extracted no notice_date",
+      }),
+    });
+    const got = await readNoticeExtraction({ objectKey: "legacy.pdf" });
+    expect(got.unavailable).toBe(
+      "recon has no per-field detail stored for this document",
+    );
+    expect(got.unavailable).not.toContain("mapped no notice");
   });
 
   it("treats an empty section list as a real answer rather than a gap", async () => {
@@ -233,6 +310,31 @@ describe("readNoticeExtractions", () => {
     const got = await readNoticeExtractions({ objectKeys: ["big.pdf"] });
     expect(got.extractions).toEqual({});
     expect(got.failed["big.pdf"]).toBe("over the budget");
+  });
+
+  it("routes a tracking row's own reason into the per-key reasons", async () => {
+    // The path the Documents tab reads. Both readers share `unavailableReason`, so the line under the
+    // table and the line in the detail panel cannot say different things about the same row -- and this
+    // is the one the operator saw the wrong sentence on.
+    send.mockResolvedValue({
+      Responses: {
+        [TABLE]: [
+          row("ok.pdf", { idp_sections: [SECTION] }),
+          row("fax-cover.pdf", {
+            record_kind: "document",
+            notice_failure_reason: "extracted no notice_date",
+          }),
+        ],
+      },
+    });
+    const got = await readNoticeExtractions({
+      objectKeys: ["ok.pdf", "fax-cover.pdf"],
+    });
+    expect(Object.keys(got.extractions)).toEqual(["ok.pdf"]);
+    expect(got.failed["fax-cover.pdf"]).toBe(
+      "recon mapped no notice from this document: extracted no notice_date",
+    );
+    expect(got.failed["fax-cover.pdf"]).not.toMatch(/re-uploading/i);
   });
 
   it("retries the keys DynamoDB left unprocessed", async () => {

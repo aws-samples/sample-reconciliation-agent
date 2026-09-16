@@ -7,7 +7,6 @@ environments/recon/          the ONE root: the recon platform, the console and �
                              enable_deal_pipeline — the deal-pipeline app beside it; CI plans
                              and applies it
 modules/                     one module per component, composed by the root
-registry/definitions/        workflow-type definitions seeded into DynamoDB
 bootstrap/                   the state bucket, applied once before anything else
 scripts/                     operational tooling (deploy driver, seed push, resets)
 ```
@@ -172,6 +171,22 @@ both.
   secret _name_ rather than ARN: an ARN reference would close a module cycle.
 - **`observability/`** — delivers runtime traces into `aws/spans`, which is what lets the online
   evaluation config score runtime-backend sessions at all.
+- **`tier2-dispatch/`** — the only Step Functions in the repo, and the thing that bounds Bedrock token
+  spend for the **runtime** backend via the Distributed Map's `MaxConcurrency`. Four things to know
+  before editing it:
+  - **The schedule ships `DISABLED` in the module, and recon-dev has opted in** at `rate(5 minutes)`.
+    Enabling it starts firing agent runs, and therefore Bedrock spend, unattended, so a new
+    environment opts in deliberately. That interval is also the latency an escalated case waits
+    before its investigation begins.
+  - **`terraform validate` does not check the ASL.** An invalid definition applies cleanly and fails
+    at runtime. Validate the rendered definition with
+    `aws stepfunctions validate-state-machine-definition` before merging.
+  - **The states role needs `states:StartExecution` on itself.** A Distributed Map runs each iteration
+    as a child execution of the same state machine, and the failure without it names `StartExecution`
+    rather than the Map.
+  - **`MaxConcurrency` here and `max_concurrent_investigations` on `tier1/` are the same quota** in two
+    mechanisms — the map bounds the runtime backend, the worker's reserved concurrency bounds the
+    harness backend. Change one and change the other.
 - **`agentcore-memory/`** — one AgentCore Memory, its execution role and policy, and an optional
   CUSTOM / SEMANTIC_OVERRIDE extraction strategy; `recon-agent` uses it for the lessons memory,
   `deal-pipeline` for its knowledge memory (with a strategy) and chat memory (without, sharing the

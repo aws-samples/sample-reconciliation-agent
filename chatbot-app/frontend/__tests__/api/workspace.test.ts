@@ -536,9 +536,9 @@ describe("Frontend Workspace File Fetching (useStreamEvents)", () => {
       );
     });
 
-    it("should fail to find files when headers are missing (demonstrates the bug)", async () => {
+    it("should fail to find files when headers are missing (the failure mode)", async () => {
       /**
-       * This test demonstrates what happens when headers are NOT included:
+       * What happens when headers are NOT included:
        * - BFF receives request without Authorization → userId = 'anonymous'
        * - BFF receives request without X-Session-ID → generates new session
        * - S3 lookup uses wrong path → returns empty files
@@ -553,7 +553,7 @@ describe("Frontend Workspace File Fetching (useStreamEvents)", () => {
           }),
       });
 
-      // BAD: Fetch without headers (the bug we fixed)
+      // BAD: fetch without headers
       const response = await fetch("/api/workspace/files?docType=word");
       const data = await response.json();
 
@@ -596,13 +596,12 @@ describe("Frontend Workspace File Fetching (useStreamEvents)", () => {
 
     it("should construct correct headers object for workspace fetch", () => {
       /**
-       * Test the header construction logic that should be used in useStreamEvents.
-       * This verifies the fix pattern.
+       * Test the header construction logic that useStreamEvents must use.
        */
       const currentSessionId = "user123_timestamp_uuid";
       const authToken = "mock-jwt-token";
 
-      // The correct pattern (as implemented in the fix)
+      // The correct pattern
       const workspaceHeaders: Record<string, string> = {
         "X-Session-ID": currentSessionId,
       };

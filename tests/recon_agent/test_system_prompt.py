@@ -30,7 +30,10 @@ def test_prompt_does_not_promise_a_composite_score() -> None:
     """
     for stale in (
         "self-consistency across samples",
-        "document-extraction alerts",
+        # Deliberately the bare phrase, not the target-prefixed spelling the prompt once used: it is a
+        # substring of that spelling, so this catches the original wording AND any respelling of the
+        # same retired composite input.
+        "extraction alerts",
         "Your confidence therefore carries weight",
     ):
         assert stale not in _PROMPT, f"prompt still describes the deleted composite: {stale!r}"
@@ -50,10 +53,10 @@ def test_no_prompt_asks_the_model_to_grade_itself(path: Path) -> None:
     """The model reports EVIDENCE; the platform computes the confidence from it.
 
     Both prompts are UI-editable S3 objects read at invoke time, so a stale instruction here outlives
-    every code change — the field it names is gone from the submit schema, but a prompt that still
-    asks for a number gets one, and the next reader wires it back up. The 0.6 cliff both files used to
-    describe does not exist any more either, and a prompt describing a removed gate is worse than one
-    that says nothing.
+    every code change — no such field exists in the submit schema, but a prompt that asks for a number
+    gets one, and the next reader wires it back up. The same goes for a 0.6 confidence cliff: no code
+    implements one, and a prompt describing a gate that does not exist is worse than one that says
+    nothing.
 
     :param path: the prompt file to lint.
     :returns: None.

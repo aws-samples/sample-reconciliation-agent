@@ -1,11 +1,11 @@
 ####################################################################################
 # deploy-actions: one Lambda that performs the apply-time steps Terraform cannot express.
 #
-# Readiness waits on asynchronous service validation, and one-shot API calls with no matching
-# resource. These were `local-exec` provisioners driving the AWS CLI, so an apply needed the CLI —
-# at a new enough botocore — on whatever machine ran Terraform. Callers now invoke this with
-# `aws_lambda_invocation`, which runs synchronously at apply time in dependency order and fails the
-# apply when the action fails: the same contract, with the work moved into the account.
+# Its actions are readiness waits on asynchronous service validation, and one-shot API calls that
+# have no matching Terraform resource. Callers reach it with `aws_lambda_invocation`, which runs
+# synchronously at apply time in dependency order and fails the apply when the action fails — the
+# same contract a `local-exec` provisioner would give, except the work happens in the account rather
+# than on whatever machine runs Terraform, so no local AWS CLI or botocore version matters.
 #
 # ⚠️ THIS FUNCTION IS DELIBERATELY NOT BUILT BY infra/modules/lambda-package.
 #
@@ -14,8 +14,6 @@
 # only the stdlib and the boto3 the Lambda runtime already ships, so `archive_file` zips src/
 # directly with nothing to install. Do not add a third-party import, and do not route this through
 # lambda-package: either one reintroduces the coupling this function exists to remove.
-#
-# Packaged from committed sources so `terraform apply` needs no build toolchain.
 ####################################################################################
 
 data "aws_caller_identity" "current" {}
@@ -49,7 +47,7 @@ resource "aws_iam_role" "actions" {
 }
 
 resource "aws_iam_role_policy" "actions" {
-  #checkov:skip=CKV_AWS_290:The bedrock-agent and bedrock-agentcore-control read/start actions below do not support resource-level scoping in this API; the mutating grant (cognito-idp:UpdateUserPoolClient) IS scoped to the single user pool.
+  #checkov:skip=CKV_AWS_290:The bedrock-agent and bedrock-agentcore-control read/start actions below do not support resource-level scoping in this API. Every grant that MUTATES anything is resource-scoped: the S3 seed writes to the assets bucket, StartIngestionJob to a knowledge-base ARN pattern (the cycle it avoids is explained below).
   name = "${local.function_name}-policy"
   role = aws_iam_role.actions.id
   policy = jsonencode({
@@ -97,8 +95,7 @@ resource "aws_iam_role_policy" "actions" {
         # ⚠️ NOT "s3:GetBucketEncryption". The API call is GetBucketEncryption but the IAM action
         # that authorizes it is s3:GetEncryptionConfiguration — one of S3's several action names that
         # do not match their API. Granting the API name is silently ineffective: a valid-looking
-        # policy that authorizes nothing, and the call fails with AccessDenied. It did, on the first
-        # live apply of this module.
+        # policy that authorizes nothing, and every call fails with AccessDenied.
         Action   = ["s3:GetEncryptionConfiguration"]
         Resource = var.assets_bucket_arn
       },
@@ -106,14 +103,6 @@ resource "aws_iam_role_policy" "actions" {
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject"]
         Resource = "${var.assets_bucket_arn}/*"
-      },
-      {
-        # The Cognito callback patch. Scoped to the ONE user pool: this call REPLACES a client's
-        # configuration, so a broad grant here would be a grant to reconfigure authentication on
-        # any pool in the account.
-        Effect   = "Allow"
-        Action   = ["cognito-idp:UpdateUserPoolClient"]
-        Resource = var.user_pool_arn
       },
       ], flatten([
         # Seed reconciliation for each additional bucket (the deal pipeline's): the same two

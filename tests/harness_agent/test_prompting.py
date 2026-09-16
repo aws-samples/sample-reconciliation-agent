@@ -58,8 +58,8 @@ _CATALOG_WITH_STEPS = [
 def test_the_prompt_names_every_declared_step_id():
     """The harness has NO skill-loading tool, so this block is the only place the ids exist.
 
-    Without it the model invents plausible ids from the skill's prose (live on 2026-09-02:
-    ``ledger_lookup``, ``amount_tolerance_check``). Every invented id is unscoreable, so each
+    Without it the model invents plausible ids from the skill's prose — a live run produced
+    ``ledger_lookup`` and ``amount_tolerance_check``. Every invented id is unscoreable, so each
     prescribed step it stood for counts as never attempted and the case scores 0.
     """
     text = prompting.build_first_message(item=_item(), catalog=_CATALOG_WITH_STEPS)["content"][0][

@@ -6,20 +6,20 @@
  * (`backend/recon_core/email_policy.py`), which sits on the send path, fails closed, and re-derives
  * the verdict from its own copy on every send. That is the only place it is consulted.
  *
- * It used to be mirrored here as well, for "early feedback", and the mirror was a net loss:
+ * Do NOT mirror it here for "early feedback". A mirror is a net loss three ways:
  *
- *  - The BFF read a container env var fixed at task start, so a narrowed allowlist was enforced by
- *    the interceptor while the UI still showed the old one -- a control that misreports its own
+ *  - The BFF reads a container env var fixed at task start, so a narrowed allowlist is enforced by
+ *    the interceptor while the UI still shows the wider one -- a control that misreports its own
  *    configuration.
- *  - Saving an out-of-domain contact returned a 201 WITH an amber advisory, which read as "the save
- *    was blocked" when the row had in fact been written. Contact-list membership and send permission
- *    are different questions, and answering the second on the screen that asks the first taught the
- *    operator that their edit had failed.
- *  - The draft `PUT` refused out-of-domain addresses too, so the same rule lived in three places and
- *    could only ever agree with the interceptor or be wrong.
+ *  - Saving an out-of-domain contact would return a 201 WITH an amber advisory, which reads as "the
+ *    save was blocked" when the row has in fact been written. Contact-list membership and send
+ *    permission are different questions, and answering the second on the screen that asks the first
+ *    tells the operator their edit failed.
+ *  - Refusing out-of-domain addresses on the draft `PUT` as well puts the same rule in three places,
+ *    where it can only ever agree with the interceptor or be wrong.
  *
- * Do not reintroduce it. If an analyst needs to know whether an address is sendable, the answer has
- * to come from the thing that decides.
+ * If an analyst needs to know whether an address is sendable, the answer has to come from the thing
+ * that decides.
  *
  * {@link storableAddressReason} stays and the contact routes do refuse on it, because it authorizes
  * nothing: rejecting `"Foo <a@b>"` or `"not an address"` is a shape check, and a malformed string
@@ -87,10 +87,9 @@ export interface ContactChoice {
  *
  * The three refusals mirror `resolve_address` in `backend/contacts/store.py` — unknown id,
  * deactivated, wrong kind — with the same caveat as everything else in this file: it is inline form
- * feedback, and the server decides. It exists because the draft form now picks a contact instead of
- * typing an address, so {@link recipientRejectionReason} can no longer say anything about the
- * selection, and a form with no feedback at all would be a regression against what the address field
- * used to give the analyst.
+ * feedback, and the server decides. It exists because the draft form picks a CONTACT rather than
+ * taking a typed address, so {@link recipientRejectionReason} has nothing to say about the selection
+ * and the form would otherwise give the analyst no feedback at all.
  *
  * The fourth refusal `resolve_address` raises on — a contact with no address stored — has no mirror
  * here on purpose: this side never receives the address, so it cannot tell a blank one from a withheld

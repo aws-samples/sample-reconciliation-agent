@@ -149,10 +149,10 @@ def check_screen(page: Page, name: str, path: str, expect: str, base: str, shots
 
 
 def check_case_detail(page: Page, base: str, shots: Path) -> list[Result]:
-    """Open the first case in the queue and verify the panels this release touched.
+    """Open the first case in the queue and verify the panels an analyst reads there.
 
-    Specifically the three things !26 changed: the Skills panel's new label, the absence of the
-    "also loaded" list, and the Matched Notices section.
+    Three things specifically: the Skills panel's label, the absence of an "also loaded" list, and the
+    Matched Notices section.
 
     :param page: the page to drive.
     :param base: deployment base URL.
@@ -383,10 +383,10 @@ def check_document_preview(page: Page, base: str, shots: Path) -> list[Result]:
 
 
 def check_config_contacts(page: Page, base: str, shots: Path) -> list[Result]:
-    """Verify the Config tab no longer publishes or opines on the send gate.
+    """Verify the Config tab neither publishes nor opines on the send gate.
 
-    The three things !27 removed: the amber "on file, but unsendable" badge, the "Allowed
-    counterparty domains: ..." banner, and any stale entity names on the contact list.
+    Three things must be absent: the amber "on file, but unsendable" badge, the "Allowed counterparty
+    domains: ..." banner, and any stale entity names on the contact list.
 
     :param page: the page to drive.
     :param base: deployment base URL.

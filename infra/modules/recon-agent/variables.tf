@@ -40,19 +40,6 @@ variable "assets_bucket_arn" {
   type = string
 }
 
-variable "idp_gateway_target_url" {
-  description = "Independently-deployed IDP (document-extraction) endpoint to register as a Gateway target. Empty disables it."
-  type        = string
-  default     = ""
-}
-
-variable "idp_mcp_secret_json" {
-  description = "JSON {token_url, client_id, client_secret, scope} for IDP MCP client-credentials. Empty disables the secret."
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
 variable "model_id" {
   description = "Bedrock model (or inference-profile) id the agent's classify/investigate loop calls."
   type        = string
@@ -246,7 +233,7 @@ variable "confidence_threshold" {
 }
 
 variable "policy_enforcement_mode" {
-  description = "AgentCore Policy mode on the egress gateway: LOG_ONLY (evaluate + log, don't block) or ENFORCE (block below-threshold writes). Defaults to ENFORCE: the Cedar confidence gate is the SOLE threshold enforcement for autonomous writes (the write Lambda no longer re-checks the threshold). Set LOG_ONLY only to temporarily observe decisions without blocking."
+  description = "AgentCore Policy mode on the egress gateway: LOG_ONLY (evaluate + log, don't block) or ENFORCE (block below-threshold writes). Defaults to ENFORCE: the Cedar confidence gate is the SOLE threshold enforcement for autonomous writes — the write Lambda deliberately does not re-check it. Set LOG_ONLY only to temporarily observe decisions without blocking."
   type        = string
   default     = "ENFORCE"
   validation {

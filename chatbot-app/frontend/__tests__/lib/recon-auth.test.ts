@@ -1,5 +1,5 @@
 /**
- * Browser-side Authorization header for the recon BFF (live-QA P0-2, client half).
+ * Browser-side Authorization header for the recon BFF — the client half of its deny-by-default gate.
  *
  * Exercised through the Entra/MSAL path because that is the default provider
  * (NEXT_PUBLIC_AUTH_PROVIDER is unset in tests); the Okta branch is the same shape.

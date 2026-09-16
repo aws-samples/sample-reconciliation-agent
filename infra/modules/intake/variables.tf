@@ -13,14 +13,26 @@ variable "items_table_arn" {
   type        = string
 }
 
-variable "user_pool_endpoint" {
-  description = "Cognito user pool endpoint (JWT issuer base, without scheme)."
+variable "jwt_issuer" {
+  description = "OIDC issuer the HTTP API's JWT authorizer validates (`iss`), including scheme. Derived from auth_provider in the root module."
   type        = string
+
+  # No default and no fallback: an empty issuer would create an authorizer that rejects every token,
+  # and the failure looks like a broken deployment rather than missing configuration.
+  validation {
+    condition     = startswith(var.jwt_issuer, "https://")
+    error_message = "jwt_issuer must be the provider's issuer URL including https:// (Okta: okta_issuer; Entra: https://login.microsoftonline.com/<tenant>/v2.0)."
+  }
 }
 
-variable "spa_client_id" {
-  description = "Cognito SPA app client id (JWT audience)."
+variable "jwt_audience" {
+  description = "Expected `aud` claim — the OIDC client id of the app whose tokens may call the API."
   type        = string
+
+  validation {
+    condition     = var.jwt_audience != ""
+    error_message = "jwt_audience must be the OIDC client id (okta_client_id or entra_client_id)."
+  }
 }
 
 variable "lambda_zip" {
@@ -43,3 +55,27 @@ variable "vpc_security_group_ids" {
   type    = list(string)
   default = []
 }
+
+variable "private_api_enabled" {
+  description = <<-EOT
+    Create the PRIVATE REST API door onto the intake Lambda (private_api.tf). The root wires this from
+    `private_vpc`, because an HTTP API cannot be made private and the public one would otherwise be the
+    only way to POST an item in an internet-restricted deployment.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "execute_api_vpc_endpoint_id" {
+  description = "Id of the execute-api interface endpoint the private REST API is locked to."
+  type        = string
+  default     = ""
+
+  # Fail the plan rather than build a private API nobody can reach: an empty id produces a resource
+  # policy whose Deny matches every caller, and the symptom is a 403 with no clue where it came from.
+  validation {
+    condition     = !var.private_api_enabled || var.execute_api_vpc_endpoint_id != ""
+    error_message = "private_api_enabled = true requires execute_api_vpc_endpoint_id (network module output execute_api_endpoint_id, which is only non-empty when enable_private_endpoints = true)."
+  }
+}
+

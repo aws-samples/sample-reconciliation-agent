@@ -21,11 +21,24 @@ variable "notices_table_arn" {
   type        = string
 }
 
+# The inverted index over every extracted field. The hook is its only writer, for the same reason it
+# is the notices table's only writer: both are derived from one extraction, and a second writer could
+# leave the index describing a notice that no longer says that.
+variable "notice_search_table" {
+  description = "DynamoDB table name of the notice search index (recon-notice-search)."
+  type        = string
+}
+
+variable "notice_search_table_arn" {
+  description = "ARN of the notice search index, for the hook's BatchWriteItem grant."
+  type        = string
+}
+
 # Two buckets, not one: the section results and page images live in IDP's OUTPUT bucket, but for any
 # document whose tracking record exceeds Step Functions' 256 KB output cap the record itself is written
 # to IDP's WORKING bucket and the event carries only a pointer to it (see
 # `IdpOutputReader.resolve_document`). Without the working-bucket grant every large document — which in
-# recon-dev is all of them — fails ingest on an AccessDenied.
+# a realistic corpus is all of them — fails ingest on an AccessDenied.
 #
 # Name patterns rather than exact names because IDP's stack names its buckets with a generated suffix
 # and redeploys change it; the hook must not need a recon apply every time IDP is rebuilt. Still
@@ -33,11 +46,9 @@ variable "notices_table_arn" {
 variable "idp_source_buckets" {
   description = "IDP bucket name patterns the hook may read at ingest (output bucket for extracted values and page images, working bucket for compressed tracking records)."
   type        = list(string)
-  # Two patterns PER IDP deployment, and the pairs are easy to break apart: when the `idp-unified-*`
-  # deployment replaced `idp-*`, its OUTPUT bucket was added here and its WORKING bucket was not.
-  # Because the working bucket holds the compressed tracking record for every recon-dev document,
-  # that omission failed ingest for 100% of uploads — with an AccessDenied naming a bucket that
-  # appears nowhere in this repo. Add both patterns together or neither.
+  # ⚠️ Two patterns PER IDP deployment — add both or neither. An output pattern with no matching
+  # working pattern is the easy mistake, and it fails ingest for every large document with an
+  # AccessDenied naming a bucket that appears nowhere in this repo.
   default = [
     "idp-outputbucket-*",
     "idp-workingbucket-*",
@@ -49,7 +60,7 @@ variable "idp_source_buckets" {
 # The IDP workflow whose SUCCEEDED event carries a completed document. Recon owns the EventBridge
 # rule that reads it (see main.tf) rather than relying on IDP's own
 # `PostProcessingLambdaHookFunctionArn` parameter, which is a setting in a stack this repo does not
-# deploy — and which was found empty while the hook sat unreachable for weeks.
+# deploy and cannot verify from here.
 #
 # An ARN rather than a name because the rule matches on `detail.stateMachineArn`, and a variable
 # rather than a literal because IDP's stack names its state machine with a generated suffix that

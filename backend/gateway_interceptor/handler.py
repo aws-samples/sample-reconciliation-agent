@@ -15,16 +15,16 @@ enforces the two guards Cedar cannot express (they need a DynamoDB lookup):
         the tool's declared inputs (``confidence, item_id, reason, reference, status``), none of which
         say anything about the evidence.
 
-        This guard used to look the cited notice up here and read its extraction alert count. That
-        worked while extraction was the only route a document took. It is now one of two, and the
-        other produces no alert count — so the guard was silently VOIDED on that route: a proposal
-        grounded on retrieved correspondence cited no notice, an absent notice id read as "nothing to
-        be doubtful about", and the write passed. Reading a recorded verdict instead covers both
-        routes, closes the multi-candidate hole (a search matching several notices also derived no id),
-        and costs one fewer DynamoDB read on the write path.
+        It reads that RECORDED verdict rather than re-deriving one here from the cited notice's
+        extraction alert count. An alert count only exists for documents that arrived through
+        extraction, which is one of two routes a document takes; on the other route the derivation
+        yields nothing, so a proposal grounded on retrieved correspondence would cite no notice, the
+        absent notice id would read as "nothing to be doubtful about", and the write would pass. A
+        recorded verdict covers both routes, closes the same hole for a search that matched several
+        notices (which also derives no single id), and costs one fewer DynamoDB read on the write path.
 
-        ⚠️ An ABSENT verdict REFUSES. Every case row written before this guard changed lacks the key,
-        and those cases must be re-run rather than written from. Absence is not permission.
+        ⚠️ An ABSENT verdict REFUSES. A case row lacking the key must be re-run rather than written
+        from. Absence is not permission.
   * ``recon-status___recon_update_status`` — the case state machine: the requested transition
     must be legal from the case's CURRENT stored status (same ``can_transition`` the tool
     Lambda itself uses — one state machine, enforced at the gateway too).
@@ -237,17 +237,16 @@ def _evidence_quality_reason(*, row: dict) -> str | None:
     backend's intake) and read here. Two consequences of that split, both deliberate:
 
     * this function does no I/O. The case row it reads was already fetched for the provenance check, so
-      the whole guard costs zero additional reads — where the notice lookup it replaces cost one on
-      every write;
+      the whole guard costs zero additional reads — deriving the verdict here would cost a notice
+      lookup on every write;
     * the verdict reflects the evidence as it stood when the proposal was made. A notice re-extracted
       between proposal and write is judged on its earlier state. That is acceptable because a notice
       changes only by re-extraction, which is grounds for re-running the case rather than writing from a
       stale proposal — but it is a real window and it is recorded here rather than left to be found.
 
-    An ABSENT verdict refuses. This inverts the rule the previous guard used, where an absent notice id
-    meant "nothing to be doubtful about" — the branch that let knowledge-base-grounded writes through
-    ungated. Absence now means the proposal predates this guard, and a proposal the guard cannot evaluate
-    is not one it may allow.
+    An ABSENT verdict refuses. Reading absence as "nothing to be doubtful about" is what would let a
+    knowledge-base-grounded write — which cites no notice at all — through ungated. A proposal this
+    guard cannot evaluate is not one it may allow.
 
     :param row: the case row (never None; a missing row is already denied by provenance).
     :returns: a denial reason, or None when the write may proceed.

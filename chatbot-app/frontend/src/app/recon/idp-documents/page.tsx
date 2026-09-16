@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   listIdpDocuments,
   getIdpDocument,
@@ -29,29 +29,46 @@ import {
 import { UploadDialog } from "@/components/recon/UploadDialog";
 import { useReconSubject } from "@/hooks/useReconSubject";
 
-// What came out of the document pipeline. Uploads land as email attachments and as files an operator
-// drops in; extraction runs somewhere else entirely, and until this tab existed the only way to find out
-// whether a notice had been read was to ask whoever ran that pipeline.
+// What recon recorded about every document the extraction pipeline handled. Uploads land as email
+// attachments and as files an operator drops in; the extraction itself runs in that pipeline, but this
+// tab reads RECON'S OWN notice table, which the IDP post-processing hook writes at ingest — see
+// `src/lib/idpDocumentStore.ts`. Until this tab existed the only way to find out whether a notice had
+// been read was to ask whoever ran that pipeline.
 //
 // The column that earns the tab is `ConfigVersion`. A workflow type on the Config tab pins a version by
 // name, typed in by hand because nothing exposes the list of valid names. That typo has no other symptom:
 // the upload succeeds, the wrong configuration runs, and the extraction is quietly worse. Here the pinned
 // name and the used name sit in the same row, so the disagreement is something an operator can see.
 //
-// The table shows ONLY the configuration versions this deployment's workflow types pin. That pipeline is
-// shared: most of what it has processed was queued by something else entirely, against configurations
-// recon has never heard of, and listing those rows here made the tab read as recon's history when almost
-// none of it was. Hidden rows are counted rather than dropped silently — see the caption under the
-// filter — because "no documents" and "documents, none of them ours" are different answers.
+// The table opens on the configuration versions this deployment's workflow types pin, AND the rows recon
+// recorded no version for at all. The pipeline is shared and the hook fires for everything it finishes,
+// so recon's own table holds rows for documents queued by something else entirely, against
+// configurations recon has never heard of. Listing those made the tab read as recon's history when
+// almost none of it was.
+//
+// That restriction is the FILTER BOX'S OWN VALUE, not an invisible rule: the pinned versions are seeded
+// into the box once they load, so an operator can read what is being applied to them and CLEAR IT to get
+// every loaded row back. It used to be applied silently, with a paragraph of prose underneath as its only
+// evidence and no way off it at all.
+//
+// The rows with no version are the pre-change history: recon's own notices from before the hook captured
+// a tracking snapshot, put into this tab's index by a backfill precisely so they would be visible. They
+// are shown with their provenance marked rather than filtered out, because an ABSENT version is not a
+// FOREIGN one — see `matchesFilterTerm`, which is the part a reader is otherwise likely to "tighten"
+// back.
 //
 // Clicking a row opens its detail inside the table, directly under that row, with a live view of the
-// source file beside the extracted record. The file comes from the extraction pipeline's input bucket
-// through this app's own route rather than from the pipeline's API, which exposes no URL for it — see
+// source file beside the extracted record. The file comes from the pipeline's input bucket through this
+// app's own route, which resolves the key against recon's own row before reading a byte: raw documents
+// are deliberately not copied into recon's storage — see
 // `src/app/api/recon/idp-documents/[objectKey]/source/route.ts`.
 //
-// Deliberately absent, because the upstream API has no such thing: a production/test filter and a total
-// count. Where the pipeline gave us a review URL the detail links out to it, for the reviewer's own
-// corrections; the file itself no longer needs that trip.
+// Deliberately absent: a production/test filter, because recon stores no such flag, and any count of the
+// window at all — the strip that used to carry one is gone, and the table's own pager says how much is in
+// front of the operator. Absent for a harder reason: anything about human review. The pipeline's
+// completion event carries no review fields at all, so recon holds none and this tab says nothing about
+// it — rendering "no review was triggered" from an absent field would answer a question recon cannot
+// answer. What survives of the way out to the pipeline's own UI is the report pointers in the detail panel.
 
 /** Days of history the tab opens with. Long enough to cover a month-end run. */
 const DEFAULT_WINDOW_DAYS = 30;
@@ -74,12 +91,217 @@ function basename(key: string | null): string {
   return parts[parts.length - 1] || key;
 }
 
-/** Local time, or an em dash. The pipeline reports UTC; an operator reads their own clock. */
+/** Local time, or an em dash. The stored timestamps are UTC; an operator reads their own clock. */
 function localTime(iso: string | null): string {
   if (!iso) return "—";
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return iso;
   return new Date(t).toLocaleString();
+}
+
+/**
+ * Why a derived start time cannot be read as an ingest time. One sentence, shown in two places.
+ *
+ * Most of the history carries one: the backfill that put the pre-existing rows into this tab's index had
+ * no ingest timestamp to use, so it derived one from the notice's own BUSINESS date. Those dates scatter
+ * across the year and one of them is in the future, so in a wide window they sort above documents that
+ * genuinely arrived this week.
+ */
+const APPROXIMATE_START_TITLE =
+  "Approximate. This row predates recon's tracking snapshot, so its time was derived from the " +
+  "notice's own date — the document's business date, not when the pipeline ran it. Its position in " +
+  "this list is approximate.";
+
+/**
+ * Why a row can carry no configuration version at all. One sentence, shown in two places.
+ *
+ * Not the same statement as "another deployment's configuration": the pipeline records the version it
+ * ran, so a foreign document always has a NAME here. Nothing means nothing was ever captured.
+ */
+const UNKNOWN_CONFIG_TITLE =
+  "Recon recorded no configuration version for this row. It predates recon's tracking snapshot, so no " +
+  "version was ever captured and it cannot be attributed to a pinned one. It is still recon's own row: " +
+  "a document processed against another deployment's configuration always reports a version name.";
+
+/**
+ * True when recon recorded no configuration version for this row.
+ *
+ * Trimmed and empty-checked rather than a plain null test, so a stored blank cannot be mistaken for a
+ * version name — the same normalisation the pinned-version comparison does.
+ *
+ * @param d - one loaded row.
+ * @returns true when there is no version to compare against the pins.
+ */
+function hasNoConfigVersion(d: IdpDocument): boolean {
+  return (d.ConfigVersion ?? "").trim() === "";
+}
+
+/**
+ * A row's configuration version, normalised for comparison against the pins.
+ *
+ * @param d - one loaded row.
+ * @returns the version, trimmed and lowercased.
+ */
+function configKey(d: IdpDocument): string {
+  return (d.ConfigVersion ?? "").trim().toLowerCase();
+}
+
+/**
+ * Does one term from the filter box admit this row?
+ *
+ * Two kinds of term, and which one a term is depends on the pins rather than on how it was typed:
+ *
+ * A term that IS one of the pinned configuration versions is the CONFIGURATION RESTRICTION — the rule
+ * that used to be applied invisibly before the operator's text ever ran. It admits rows carrying that
+ * version, matched case-insensitively because the pin is typed by hand and a version pinned as
+ * `Recon-IDP` against a pipeline reporting `recon-idp` is the same configuration.
+ *
+ * ⚠️ It ALSO admits rows with NO version at all. That is not a hole in the filter: an ABSENT version is a
+ * different fact from a FOREIGN one. A document processed against another deployment's configuration
+ * always reports a version NAME (`default`, `slim15-assess-no-granular` — both live in this deployment's
+ * table right now), because the pipeline records what it ran. Null happens only where no snapshot was
+ * ever captured, which is exactly recon's own rows from before the tracking snapshot existed — the 16
+ * rows the backfill put into this index to make that history visible. Excluding them defeated the
+ * backfill and left the tab showing a third of the history it had, with no symptom other than a shorter
+ * table. Do NOT "tighten" this to the version comparison alone; their unknown provenance is stated on the
+ * row instead, in the Config version column.
+ *
+ * Any other term is free text over the fields a reader can SEE. `ObjectStatus` is deliberately not among
+ * them, for the same reason it has no column: the hook observes it mid-evaluation, so it is `EVALUATING`
+ * on every row, and searching a constant either matches everything or nothing.
+ *
+ * @param row - one loaded row.
+ * @param term - one comma-separated term from the box, already trimmed and lowercased.
+ * @param pinnedLower - every configuration version this deployment pins, lowercased.
+ * @returns true when this term admits the row.
+ */
+function matchesFilterTerm({
+  row,
+  term,
+  pinnedLower,
+}: {
+  row: IdpDocument;
+  term: string;
+  pinnedLower: Set<string>;
+}): boolean {
+  if (pinnedLower.has(term))
+    return hasNoConfigVersion(row) || configKey(row) === term;
+  return [row.ObjectKey, row.ConfigVersion, row.WorkflowStatus]
+    .filter(Boolean)
+    .some((v) => (v as string).toLowerCase().includes(term));
+}
+
+/**
+ * A configuration version, marked when recon never recorded one.
+ *
+ * The marker is VISIBLE and not only a tooltip, for the same reason the derived-time marker is: these
+ * rows are shown alongside rows whose version was checked against the pins, and a bare em dash reads as
+ * "no version" when what it means is "not attributable to a pin, and included anyway".
+ *
+ * @param version - the version recon stored, or null when it stored none.
+ */
+function ConfigVersionCell({ version }: { version: string | null }) {
+  if ((version ?? "").trim() !== "")
+    return (
+      <span className="rc-mono text-[12px] text-[var(--rc-ink)]">
+        {version}
+      </span>
+    );
+  return (
+    <span
+      className="rc-mono text-[12px] text-[var(--rc-ink-faint)]"
+      title={UNKNOWN_CONFIG_TITLE}
+    >
+      —<span className="ml-1.5 text-[var(--rc-amber)]">?</span>
+    </span>
+  );
+}
+
+/**
+ * What the Alerts count includes, and what it deliberately leaves out. Shown on the header and the cell.
+ *
+ * The column is `confidence_alert_count`, which `below_threshold_count` in
+ * `backend/idp_hook/explainability.py` computes over the fields the extractor actually READ A VALUE FOR
+ * (`rec["extracted"]`). The detail panel lists the pipeline's own raw flags instead, and those include
+ * attributes the extractor found nothing for — which arrive as `0.00` against a `0.80` threshold. So the
+ * panel legitimately lists more entries than this column counts, and BOTH numbers are right.
+ *
+ * Recon's number is also the one the gateway interceptor refuses ledger writes on, so it is not free to
+ * be redefined to match the panel. The disagreement is explained on screen instead: here, and in the
+ * sentence under the panel's own heading.
+ */
+const EXTRACTED_ALERTS_TITLE =
+  "Counts only attributes the extractor read a value for and scored below that attribute's own " +
+  "threshold. The pipeline also flags attributes it found no value for at all; those are listed in the " +
+  "document's detail panel and are deliberately not counted here, so the panel can show more of them " +
+  "than this counts.";
+
+/** Why the evaluation status can disagree with the pipeline. One sentence, shown in two places. */
+const EVALUATION_SNAPSHOT_TITLE =
+  "As at extraction. Recon's hook runs while the pipeline is still evaluating, so this is the status " +
+  "at that moment and a later change is not reflected here.";
+
+/**
+ * A start time, marked when it was derived rather than observed.
+ *
+ * The marker is VISIBLE and not only a tooltip. This column sorts, most of the loaded history carries a
+ * derived value, and a reader ordering by it would otherwise have no way to tell a real ingest time from
+ * a business date standing in for one — the ordering would look authoritative and be partly guessed.
+ *
+ * @param iso - the stored timestamp, or null.
+ * @param approximate - true when the timestamp was derived from the notice date.
+ */
+function StartedTime({
+  iso,
+  approximate,
+}: {
+  iso: string | null;
+  approximate: boolean;
+}) {
+  return (
+    <span className="rc-mono text-[12px] text-[var(--rc-ink-faint)]">
+      {localTime(iso)}
+      {approximate && (
+        <span
+          className="ml-1.5 text-[var(--rc-amber)]"
+          title={APPROXIMATE_START_TITLE}
+        >
+          ≈
+        </span>
+      )}
+    </span>
+  );
+}
+
+/**
+ * A pointer to one of the pipeline's own report objects.
+ *
+ * An `s3://` URI is NOT rendered as an anchor: a browser has no handler for that scheme, so the link
+ * would look openable and do nothing. Those show the URI itself, which is what an operator pastes into
+ * the S3 console or `aws s3 cp`. A configuration that publishes its reports over HTTP gets a real link.
+ *
+ * @param label - what the report is.
+ * @param uri - the pointer recon stored, verbatim.
+ */
+function ReportLink({ label, uri }: { label: string; uri: string }) {
+  if (/^https?:\/\//i.test(uri))
+    return (
+      <a
+        href={uri}
+        target="_blank"
+        rel="noreferrer"
+        className={`${BUTTON} inline-block`}
+        title={uri}
+      >
+        {label} ↗
+      </a>
+    );
+  return (
+    <span className="rc-mono block break-all text-[12px] text-[var(--rc-ink)]">
+      <span className="text-[var(--rc-ink-faint)]">{label} — </span>
+      {uri}
+    </span>
+  );
 }
 
 // The pipeline's statuses are its own vocabulary, not the case queue's, so this maps them here rather
@@ -122,8 +344,8 @@ function DocStatus({ status }: { status: string | null }) {
  * The source file sits on the left and what was extracted from it on the right, deliberately in one
  * view: every number on the right is a claim ABOUT the document, and checking a low-confidence
  * attribute means reading the page it came from. Two fetches, not one — the record and the file are
- * independent, so a pipeline API that answers while the bucket does not (or the reverse) shows one
- * side and says why the other is missing, instead of blanking both.
+ * independent, so a notice row that reads while the bucket does not (or the reverse) shows one side
+ * and says why the other is missing, instead of blanking both.
  *
  * @param objectKey - the key to read.
  * @param onClose - called when the panel is dismissed.
@@ -164,6 +386,17 @@ function DocumentDetail({
       .catch((e) => setSectionsError(String(e)));
   }, [objectKey]);
 
+  // Why recon holds no notice for this document, straight off the row -- present only on a
+  // tracking-only row, which is exactly the row that needs explaining.
+  const failureReason = doc?.notice_failure_reason ?? null;
+
+  // The one place the two independent fetches are allowed to wait for each other, and only to choose
+  // BETWEEN two "no fields" sentences: the row's own reason is the accurate one, so showing
+  // `extraction.unavailable`'s inference first and replacing it a moment later would flash a wrong
+  // answer. It stops waiting as soon as the tracking read fails, so a failure there still cannot hide
+  // the fields.
+  const waitingForFailureReason = !doc && !error;
+
   return (
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-4">
@@ -200,22 +433,53 @@ function DocumentDetail({
             <Placeholder kind="loading">◆ reading document…</Placeholder>
           ) : (
             <>
+              {/* The third entry of each tuple is a tooltip for the LABEL, used where the value needs a
+                  caveat the value itself cannot carry. Typed rather than inferred because one of the
+                  values is a node. */}
               <div className="grid gap-4 sm:grid-cols-2">
-                {[
-                  ["Object status", doc.ObjectStatus],
-                  ["Workflow status", doc.WorkflowStatus],
-                  ["Config version", doc.ConfigVersion],
-                  ["Evaluation", doc.EvaluationStatus],
-                  ["Queued", localTime(doc.QueuedTime)],
-                  ["Started", localTime(doc.InitialEventTime)],
-                  ["Completed", localTime(doc.CompletionTime)],
+                {(
                   [
-                    "Pages",
-                    doc.PageCount === null ? "—" : String(doc.PageCount),
-                  ],
-                ].map(([label, value]) => (
-                  <div key={label as string}>
-                    <div className="rc-eyebrow">{label}</div>
+                    // No "Object status" here either, for the reason given at the Workflow column in
+                    // `columns` below: it is `EVALUATING` on every row because recon's hook observes it
+                    // mid-evaluation, so beside the two terminal statuses under it, it read as a
+                    // contradiction. Still recorded, just not shown.
+                    ["Workflow status", doc.WorkflowStatus],
+                    // The same marked cell as the column, so a row opened from the table does not
+                    // contradict the row it was opened from.
+                    [
+                      "Config version",
+                      <ConfigVersionCell
+                        key="config_version"
+                        version={doc.ConfigVersion}
+                      />,
+                    ],
+                    // The one snapshot field that genuinely goes stale — hence the caveat in the label
+                    // rather than only in a tooltip nobody hovers.
+                    [
+                      "Evaluation (as at extraction)",
+                      doc.EvaluationStatus,
+                      EVALUATION_SNAPSHOT_TITLE,
+                    ],
+                    ["Queued", localTime(doc.QueuedTime)],
+                    [
+                      "Started",
+                      <StartedTime
+                        key="started"
+                        iso={doc.InitialEventTime}
+                        approximate={doc.idp_started_at_approximate === true}
+                      />,
+                    ],
+                    ["Completed", localTime(doc.CompletionTime)],
+                    [
+                      "Pages",
+                      doc.PageCount === null ? "—" : String(doc.PageCount),
+                    ],
+                  ] as [string, React.ReactNode, string?][]
+                ).map(([label, value, hint]) => (
+                  <div key={label}>
+                    <div className="rc-eyebrow" title={hint}>
+                      {label}
+                    </div>
                     <div className="rc-mono mt-1 break-all text-[12px] text-[var(--rc-ink)]">
                       {value || "—"}
                     </div>
@@ -223,37 +487,47 @@ function DocumentDetail({
                 ))}
               </div>
 
-              {/* Review state, and the way out to the pipeline's own UI. The link is not a second route
-                  to the file — it opens the pipeline's review screen, where a reviewer's corrections
-                  live. This tab shows the document; that UI is where it gets changed. */}
-              <div className="border-t border-[var(--rc-line)] pt-4">
-                <div className="rc-eyebrow">Human review</div>
-                <p className="rc-mono mt-2 text-[12px] leading-relaxed text-[var(--rc-ink-faint)]">
-                  {doc.HITLTriggered
-                    ? `Review was triggered${doc.HITLStatus ? ` — ${doc.HITLStatus}` : ""}${
-                        doc.HITLReviewedBy
-                          ? `, reviewed by ${doc.HITLReviewedBy}`
-                          : ""
-                      }.`
-                    : "No review was triggered for this document."}
-                </p>
-                {doc.HITLReviewURL && (
-                  <a
-                    href={doc.HITLReviewURL}
-                    target="_blank"
-                    rel="noreferrer"
-                    className={`${BUTTON} mt-3 inline-block`}
-                  >
-                    Open in review UI ↗
-                  </a>
-                )}
-              </div>
+              {/* The pipeline's own reports on this document, and the only way out to them: recon stores
+                  the pointers the completion event carried, not the reports themselves. Rendered only
+                  when the row actually has one — an empty heading would read as a report that exists
+                  and cannot be reached. Most configurations write an evaluation report and no summary
+                  one, so the two are independent. */}
+              {(doc.EvaluationReportURI || doc.SummaryReportURI) && (
+                <div className="border-t border-[var(--rc-line)] pt-4">
+                  <div className="rc-eyebrow">Pipeline reports</div>
+                  <p className="rc-mono mt-2 text-[12px] leading-relaxed text-[var(--rc-ink-faint)]">
+                    Where the extraction pipeline wrote its own report for this
+                    document. Recon holds the pointer, not the report.
+                  </p>
+                  <div className="mt-3 space-y-2">
+                    {doc.EvaluationReportURI && (
+                      <ReportLink
+                        label="Evaluation report"
+                        uri={doc.EvaluationReportURI}
+                      />
+                    )}
+                    {doc.SummaryReportURI && (
+                      <ReportLink
+                        label="Summary report"
+                        uri={doc.SummaryReportURI}
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
 
               <div className="border-t border-[var(--rc-line)] pt-4">
+                {/* "every attribute the pipeline flagged", not "confidence alerts". What is listed below
+                    is the pipeline's RAW flags, and they include attributes the extractor found no value
+                    for at all — those arrive as `0.00` against a `0.80` threshold, which under the old
+                    heading read as doubt about a value rather than as a value that is not there.
+                    The parenthetical is recon's OWN count, the one in the table's Alerts column, so it is
+                    labelled as such: it counts a strict subset of this list (see `EXTRACTED_ALERTS_TITLE`)
+                    and an unlabelled number beside a longer list reads as a miscount. */}
                 <div className="rc-eyebrow">
-                  Sections and confidence alerts
+                  Sections and every attribute the pipeline flagged
                   {doc.ConfidenceAlertCount
-                    ? ` (${doc.ConfidenceAlertCount})`
+                    ? ` (${doc.ConfidenceAlertCount} counted under Alerts)`
                     : ""}
                 </div>
                 {!doc.Sections || doc.Sections.length === 0 ? (
@@ -261,81 +535,119 @@ function DocumentDetail({
                     ◇ no sections recorded
                   </p>
                 ) : (
-                  <div className="mt-3 space-y-3">
-                    {doc.Sections.map((s, i) => (
-                      <div
-                        key={s.Id ?? i}
-                        className="border border-[var(--rc-line)] p-3"
-                      >
-                        <div className="rc-mono flex flex-wrap items-baseline gap-x-3 text-[12px] text-[var(--rc-ink)]">
-                          <span>{s.Class ?? "unclassified"}</span>
-                          <span className="text-[var(--rc-ink-dim)]">
-                            pages {s.PageIds?.join(", ") || "—"}
-                          </span>
-                          {s.Excluded && (
-                            <span className="text-[var(--rc-amber)]">
-                              excluded
-                              {s.ExclusionReason
-                                ? ` — ${s.ExclusionReason}`
-                                : ""}
+                  <>
+                    {/* Why this list is routinely longer than the Alerts column, said on screen because
+                        the two numbers are visible together and both are correct. Recon's count requires
+                        `extracted` — see `below_threshold_count` in
+                        `backend/idp_hook/explainability.py` — and it is the number the gateway
+                        interceptor refuses ledger writes on, so neither side is free to be redefined to
+                        agree with the other. */}
+                    <p className="rc-mono mt-2 text-[11px] leading-relaxed text-[var(--rc-ink-faint)]">
+                      An entry reading 0.00 means the extractor read no value
+                      for that attribute at all, not that it was unsure of one.
+                      The Alerts column counts only attributes it did extract
+                      and scored below their own threshold, which is why it is
+                      the smaller number.
+                    </p>
+                    <div className="mt-3 space-y-3">
+                      {doc.Sections.map((s, i) => (
+                        <div
+                          key={s.Id ?? i}
+                          className="border border-[var(--rc-line)] p-3"
+                        >
+                          <div className="rc-mono flex flex-wrap items-baseline gap-x-3 text-[12px] text-[var(--rc-ink)]">
+                            <span>{s.Class ?? "unclassified"}</span>
+                            <span className="text-[var(--rc-ink-dim)]">
+                              pages {s.PageIds?.join(", ") || "—"}
                             </span>
-                          )}
-                        </div>
-                        {/* An alert means the extractor was below its own threshold for that attribute.
+                            {s.Excluded && (
+                              <span className="text-[var(--rc-amber)]">
+                                excluded
+                                {s.ExclusionReason
+                                  ? ` — ${s.ExclusionReason}`
+                                  : ""}
+                              </span>
+                            )}
+                          </div>
+                          {/* An alert means the extractor was below its own threshold for that attribute.
                             Showing the two numbers side by side says how far below, which is the
                             difference between "re-check this figure" and "re-key the whole page" — and
                             the page itself is on the left, which is what makes that call possible. */}
-                        {s.ConfidenceThresholdAlerts &&
-                          s.ConfidenceThresholdAlerts.length > 0 && (
-                            <ul className="mt-2 space-y-1">
-                              {s.ConfidenceThresholdAlerts.map((a, j) => (
-                                <li
-                                  key={`${a.attributeName ?? j}`}
-                                  className="rc-mono text-[11px] text-[var(--rc-amber)]"
-                                >
-                                  {a.attributeName ?? "attribute"} —{" "}
-                                  {a.confidence === null
-                                    ? "?"
-                                    : a.confidence.toFixed(2)}{" "}
-                                  below{" "}
-                                  {a.confidenceThreshold === null
-                                    ? "?"
-                                    : a.confidenceThreshold.toFixed(2)}
-                                </li>
-                              ))}
-                            </ul>
-                          )}
-                      </div>
-                    ))}
-                  </div>
+                          {s.ConfidenceThresholdAlerts &&
+                            s.ConfidenceThresholdAlerts.length > 0 && (
+                              <ul className="mt-2 space-y-1">
+                                {s.ConfidenceThresholdAlerts.map((a, j) => (
+                                  <li
+                                    key={`${a.attributeName ?? j}`}
+                                    className="rc-mono text-[11px] text-[var(--rc-amber)]"
+                                  >
+                                    {a.attributeName ?? "attribute"} —{" "}
+                                    {a.confidence === null
+                                      ? "?"
+                                      : a.confidence.toFixed(2)}{" "}
+                                    below{" "}
+                                    {a.confidenceThreshold === null
+                                      ? "?"
+                                      : a.confidenceThreshold.toFixed(2)}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                        </div>
+                      ))}
+                    </div>
+                  </>
                 )}
               </div>
             </>
           )}
 
-          {/* Outside the branch above on purpose: this is a different fetch against a different part of
-              the pipeline, and it is the half of the panel an operator came for. A tracking record that
-              will not load must not take the extracted fields with it. */}
+          {/* Outside the branch above on purpose: this is a separate request, and it is the half of the
+              panel an operator came for. A tracking record that will not load must not take the
+              extracted fields with it. */}
           <div className="border-t border-[var(--rc-line)] pt-4">
             <div className="rc-eyebrow">Extracted fields</div>
-            <p className="rc-mono mt-1 text-[11px] leading-relaxed text-[var(--rc-ink-faint)]">
-              What the extractor read, with the confidence it read each field
-              at. Amber means below that field&rsquo;s own threshold — the
-              thresholds differ per field, so a 0.85 can be fine in one row and
-              flagged in the next. The page it came from is on the left.
-            </p>
+            {failureReason ? (
+              // A tracking-only row: the pipeline finished and recon mapped no notice out of it. Worded
+              // as why no notice was MAPPED, because the commonest reason -- no notice date the
+              // extractor could read -- is what a document belonging to ANOTHER deployment's
+              // configuration looks like from here. Nothing is broken and nobody is at fault.
+              <p className="rc-mono mt-1 text-[11px] leading-relaxed text-[var(--rc-ink-faint)]">
+                Recon mapped no notice from this document, so there are no
+                fields to show. The reason it recorded is below. A document
+                carrying no notice date recon could read is usually one this
+                deployment was never meant to reconcile — the source file is
+                still on the left.
+              </p>
+            ) : (
+              <p className="rc-mono mt-1 text-[11px] leading-relaxed text-[var(--rc-ink-faint)]">
+                What the extractor read, with the confidence it read each field
+                at. Amber means below that field&rsquo;s own threshold — the
+                thresholds differ per field, so a 0.85 can be fine in one row
+                and flagged in the next. The page it came from is on the left.
+              </p>
+            )}
             <div className="mt-3">
               {sectionsError ? (
                 <Placeholder kind="error">
                   Failed to read what was extracted — {sectionsError}
                 </Placeholder>
-              ) : !extraction ? (
+              ) : failureReason ? (
+                // Dim, not red, and the row's own sentence rather than a paraphrase. Kept in
+                // preference to `extraction.unavailable` even though the reader now reports this same
+                // reason for a tracking-only row: this comes from the document read, which the panel
+                // has already awaited, so the two cannot disagree and the accurate one is here first.
+                // The reader's old inference from an absent `idp_sections` — "extracted before recon
+                // stored per-field detail", plus advice to re-upload — is deleted; see
+                // `unavailableReason` in `src/lib/noticeExtraction.ts`.
+                <Placeholder kind="empty">◇ {failureReason}</Placeholder>
+              ) : !extraction || waitingForFailureReason ? (
                 <Placeholder kind="loading">
                   ◆ reading extracted fields…
                 </Placeholder>
               ) : extraction.unavailable ? (
                 // Dim, not red, and it says why. Recon having no fields for a document is an ordinary
-                // outcome -- an unmapped class, an unreadable notice date -- and dressing it as a
+                // outcome -- an unmapped class, detail dropped to fit the row -- and dressing it as a
                 // failure would send an operator looking for a broken console instead of a document
                 // the pipeline classified as something reconciliation does not handle.
                 <Placeholder kind="empty">
@@ -439,10 +751,10 @@ function deriveFieldColumns(
 /**
  * One cell of an extracted-field column: the value and, under it, the confidence.
  *
- * Three distinct states, and telling them apart is the point. Nothing loaded for this document yet
- * reads as a middle dot; loaded and the field is absent reads as an em dash; loaded and present shows
- * the value with its score. Collapsing the first two would make "press the button" look like "this
- * document does not have that field".
+ * Three distinct states, and telling them apart is the point. Nothing read for this document yet reads as
+ * a middle dot; read and the field is absent reads as an em dash; read and present shows the value with
+ * its score. Collapsing the first two would make "still arriving, or named under the table as unreadable"
+ * look like "this document does not have that field".
  *
  * @param sections - the document's extraction, or undefined when it has not been loaded.
  * @param column - the column being rendered.
@@ -458,7 +770,7 @@ function FieldCell({
     return (
       <span
         className="rc-mono text-[12px] text-[var(--rc-ink-faint)]"
-        title="Not loaded — press “Load extracted fields”"
+        title="Not read yet — either this row's fields are still arriving, or the document is one of those listed under the table as having no extracted fields to show."
       >
         ·
       </span>
@@ -521,20 +833,36 @@ export default function IdpDocumentsPage() {
   const [nextToken, setNextToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Seeded from the pins once they arrive — see the seeding effect. Starts empty so that nothing is being
+  // applied that the operator cannot see in the box.
   const [filter, setFilter] = useState("");
+  // True as soon as the operator touches the box, INCLUDING clearing it. The seed checks this so a pin
+  // arriving late cannot overwrite what they typed, and so a cleared box stays cleared.
+  const filterTouched = useRef(false);
+  // Set the first time the pins are known, whether or not any were pinned, so the seed is a one-off.
+  const seededPins = useRef(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [showUpload, setShowUpload] = useState(false);
   const [submissions, setSubmissions] = useState<SubmissionRow[] | null>(null);
   const [submissionsError, setSubmissionsError] = useState<string | null>(null);
-  // Extractions, keyed by object key, and only for the documents somebody asked for. Reading these is
-  // one call per document plus one per section against the pipeline's API, so it is not something the
-  // tab does on load — see the button below the table.
+  // Extractions, keyed by object key, and only for the documents on screen. One BatchGetItem over the
+  // shown rows' notice rows, and each of those rows carries the document's whole extracted content, so it
+  // is read a route page at a time as the rows arrive — see the auto-load effect below.
   const [extractions, setExtractions] = useState<
     Record<string, ExtractedSection[]>
   >({});
   const [extractionsFailed, setExtractionsFailed] = useState<
     Record<string, string>
   >({});
+  // ⚠️ THE bound on the auto-load loop. Every key this tab has asked about, whatever came back — a hit, a
+  // per-key failure, a whole-call failure, or nothing at all. Nothing here is ever requested twice, so the
+  // loop cannot spin on a key the route answers for in neither map, and a failed batch is not retried
+  // forever. A ref rather than state because it must not itself trigger the effect that reads it.
+  const requestedKeys = useRef<Set<string>>(new Set());
+  // Bumped by Apply, and in the auto-load effect's dependencies. Emptying the ledger above is invisible to
+  // that effect on its own — a ref does not re-run anything — so this is what turns "the operator asked
+  // again" into the one event allowed to retry a read that failed wholesale.
+  const [fieldsRetry, setFieldsRetry] = useState(0);
   const [loadingFields, setLoadingFields] = useState(false);
   const [fieldsError, setFieldsError] = useState<string | null>(null);
   // The pins, read from the Config tab's own list. Null until they arrive; an error here leaves the
@@ -546,6 +874,11 @@ export default function IdpDocumentsPage() {
   const [workflowTypesError, setWorkflowTypesError] = useState<string | null>(
     null,
   );
+  // ⚠️ THE bound on the auto-pagination loop. Every continuation token already handed to `load`. A page
+  // that fails leaves `nextToken` untouched, so without this the effect below would re-fire the moment
+  // `loading` went false and retry the same token for as long as the tab stayed open. Cleared when Apply
+  // starts a new window, which is the only time a token can legitimately be asked for again.
+  const requestedTokens = useRef<Set<string>>(new Set());
 
   /**
    * Read one page.
@@ -582,8 +915,8 @@ export default function IdpDocumentsPage() {
     [start, end],
   );
 
-  // Separate from `load`: this reads recon's own audit table, and the date window above belongs to
-  // the pipeline's API. Tying the two together would make an upload disappear from this tab because
+  // Separate from `load`: this reads recon's upload audit table, and the date window above belongs to
+  // the document listing. Tying the two together would make an upload disappear from this tab because
   // somebody narrowed the dates to look at an extraction from last week.
   const loadSubmissions = useCallback(async () => {
     try {
@@ -612,10 +945,27 @@ export default function IdpDocumentsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // The configuration versions this deployment pins, in the operator's own casing for the caption and
-  // lowercased for the comparison. Retired types are included: a document processed last month was
-  // processed against the version its type pinned then, and dropping retired pins would erase it from
-  // this tab for no reason anyone could see.
+  // The window, in full, without a button. The list route pages a DynamoDB Query and there is no total,
+  // so the old "Load more" was the operator's only way to find out whether what they were looking for was
+  // simply on the next page — and the filter box only ever searched what had been fetched, which made a
+  // missing document and an unfetched one look identical.
+  //
+  // Three things bound this, and it needs all three: no token means the index is exhausted; a token is
+  // requested at most ONCE, so a page that failed (which leaves `nextToken` as it was) cannot be retried
+  // when `loading` drops; and `load` writes the token it was given away before the next effect run reads
+  // it. What is NOT a bound is `error` — a failure on page four must keep the three pages already on
+  // screen and say so, not clear them.
+  useEffect(() => {
+    if (!nextToken || loading) return;
+    if (requestedTokens.current.has(nextToken)) return;
+    requestedTokens.current.add(nextToken);
+    void load(nextToken);
+  }, [nextToken, loading, load]);
+
+  // The configuration versions this deployment pins, kept in the operator's own casing because they are
+  // seeded into the filter box and read there. Retired types are included: a document processed last
+  // month was processed against the version its type pinned then, and dropping retired pins would erase
+  // it from this tab for no reason anyone could see.
   const pinnedVersions = useMemo(() => {
     const labels = new Set<string>();
     for (const t of workflowTypes ?? []) {
@@ -633,33 +983,100 @@ export default function IdpDocumentsPage() {
     [pinnedVersions],
   );
 
-  // Two filters, in order. First: only the configurations this deployment pins — unless the pins could
-  // not be read at all, in which case everything is shown and the error below explains why.
-  const ours = useMemo(() => {
-    if (!rows) return [];
-    if (workflowTypes === null || workflowTypesError) return rows;
-    return rows.filter((r) =>
-      pinnedLower.has((r.ConfigVersion ?? "").trim().toLowerCase()),
-    );
-  }, [rows, workflowTypes, workflowTypesError, pinnedLower]);
+  // The pins, put INTO the filter box, which is the whole of this tab's configuration restriction now.
+  //
+  // Three things this is careful about, and each of them is a way it has been got wrong:
+  //
+  //  - ONCE. `workflowTypes` is null while the read is in flight and an array afterwards — including the
+  //    empty array, and including the empty array an error leaves behind. The guard flips on the first
+  //    NON-NULL value, so a deployment that pins nothing seeds an empty box and is then left alone,
+  //    rather than being re-seeded on every later render.
+  //  - NEVER OVER THE OPERATOR. The pins take a moment to arrive and the box is usable immediately, so a
+  //    naive seed would eat a term typed in the meantime. `filterTouched` is set by the box's own
+  //    `onChange`, so anything typed wins.
+  //  - NEVER BACK. Clearing the box is `onChange` too, so a cleared box is a touched box. Between that and
+  //    the once-only guard, the seed cannot re-apply itself over the very gesture it exists to allow.
+  useEffect(() => {
+    if (filterTouched.current || seededPins.current) return;
+    if (workflowTypes === null) return;
+    seededPins.current = true;
+    // Comma-separated, and `matchesFilterTerm` splits on the same separator, so several pins read as a
+    // list and admit a row processed under any one of them.
+    if (pinnedVersions.length > 0) setFilter(pinnedVersions.join(", "));
+  }, [workflowTypes, pinnedVersions]);
 
-  // Second: the operator's text, over the rows already loaded rather than a server-side search — there
-  // is no search argument on the upstream query. The caption below says so, because a filter that
-  // silently searches one page is indistinguishable from a document that was never processed.
+  /**
+   * The rows the filter box admits.
+   *
+   * ONE filter, where there used to be two. The configuration restriction ran invisibly ahead of the
+   * operator's text, so the table was narrowed by a rule with no value on screen and no way off it; it is
+   * now expressed AS the text, seeded above. Clearing the box therefore shows every loaded row — that is
+   * the point of the change, not a side effect of it.
+   *
+   * The terms are unioned rather than intersected: several pinned versions arrive as one comma-separated
+   * string, and a row processed under either one is recon's own.
+   *
+   * Still over the rows already loaded, not a server-side search — the list route pages a DynamoDB Query
+   * over a time index, which has nothing to search a file name with. That is now much less of a trap than
+   * it was, because the pages no longer wait for a button.
+   */
   const shown = useMemo(() => {
-    const q = filter.trim().toLowerCase();
-    if (!q) return ours;
-    return ours.filter((r) =>
-      [r.ObjectKey, r.ConfigVersion, r.ObjectStatus, r.WorkflowStatus]
-        .filter(Boolean)
-        .some((v) => (v as string).toLowerCase().includes(q)),
+    if (!rows) return [];
+    const terms = filter
+      .toLowerCase()
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+    // An empty box is EVERY loaded row, other deployments' configurations included. A reader who clears
+    // the filter has asked to see what was being kept from them, and has to actually get it.
+    if (terms.length === 0) return rows;
+    return rows.filter((row) =>
+      terms.some((term) => matchesFilterTerm({ row, term, pinnedLower })),
     );
-  }, [ours, filter]);
+  }, [rows, filter, pinnedLower]);
 
-  /** Rows the pipeline returned that belong to some other deployment's configuration. */
-  const hiddenByConfig = (rows?.length ?? 0) - ours.length;
+  /**
+   * The keys of loaded rows that never became a notice — a tracking-only row, carrying the reason recon
+   * mapped nothing out of the document.
+   *
+   * Read off `notice_failure_reason`, which the list route already returns on every row (see
+   * `toIdpDocument`), rather than by matching the sentence the extractions read hands back: the two
+   * would then have to be edited together, and a reworded sentence would silently re-admit these rows.
+   *
+   * Built from every LOADED row and not from `shown`, so typing in the filter box cannot make a row
+   * reappear in the block below by taking it out of the set that excludes it.
+   */
+  const trackingOnlyKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const r of rows ?? []) {
+      if ((r.notice_failure_reason ?? "") !== "" && r.ObjectKey)
+        keys.add(r.ObjectKey);
+    }
+    return keys;
+  }, [rows]);
 
-  /** Shown rows whose extraction has not been read yet — what the button below the table will fetch. */
+  /**
+   * The failed keys worth warning about: everything except a tracking-only row.
+   *
+   * A tracking-only row has no extracted fields because recon mapped no notice from the document — an
+   * ordinary outcome the pipeline reached and recorded, not a read that failed. Its reason is already on
+   * the row's own detail panel under "Extracted fields", so listing it here duplicated that and dressed
+   * it as a warning. What is LEFT is the set a reader genuinely cannot explain from the row: a notice
+   * whose `idp_sections` were dropped to fit DynamoDB's item limit, a key the table did not answer for,
+   * and a document recon holds no notice for at all. Those are why a field column shows a middle dot.
+   *
+   * One list, used for both the count and the entries, so the summary line cannot claim a number the
+   * block does not list.
+   */
+  const unexplainedFailures = useMemo(
+    () =>
+      Object.entries(extractionsFailed).filter(
+        ([key]) => !trackingOnlyKeys.has(key),
+      ),
+    [extractionsFailed, trackingOnlyKeys],
+  );
+
+  /** Shown rows whose extraction has not been read yet — what the effect below will fetch. */
   const unloadedKeys = useMemo(
     () =>
       shown
@@ -670,20 +1087,26 @@ export default function IdpDocumentsPage() {
   );
 
   /**
-   * Read the extractions for the shown rows that have none yet.
+   * Read the extractions for a batch of keys.
    *
-   * Bounded to one page of keys per press, matching the route's own ceiling, so an operator who has
-   * loaded five pages presses it more than once rather than firing one request the route refuses.
+   * Takes its keys rather than reading `unloadedKeys` itself, so the caller can subtract the keys already
+   * asked about — the identity that bounds the loop. Marking happens BEFORE the first `await`, so two
+   * renders in a row cannot both decide the same key is unrequested.
+   *
+   * @param keys - object keys to read, at most one route page of them.
    */
-  const loadFields = useCallback(async () => {
-    if (unloadedKeys.length === 0) return;
+  const loadFields = useCallback(async (keys: string[]): Promise<void> => {
+    if (keys.length === 0) return;
+    for (const k of keys) requestedKeys.current.add(k);
     setLoadingFields(true);
-    setFieldsError(null);
+    // ⚠️ A previous failure is NOT cleared here. When a press cleared it, the next press was the operator's
+    // own decision to move on; the batches now go out on their own, so clearing would erase the only
+    // explanation of a page of middle dots the moment the following page happened to succeed. Apply clears
+    // it, which is also what asks for the failed read to be tried again.
     try {
-      const batch = unloadedKeys.slice(0, 100);
-      const res = await getIdpExtractions(batch);
-      // Merged, not replaced: the operator may have loaded an earlier page's fields already, and
-      // replacing would empty every column they are currently reading.
+      const res = await getIdpExtractions(keys);
+      // Merged, not replaced: an earlier page's fields are already on screen, and replacing would empty
+      // every column the operator is currently reading.
       setExtractions((prev) => ({ ...prev, ...res.extractions }));
       setExtractionsFailed((prev) => ({ ...prev, ...res.failed }));
     } catch (e) {
@@ -691,7 +1114,33 @@ export default function IdpDocumentsPage() {
     } finally {
       setLoadingFields(false);
     }
-  }, [unloadedKeys]);
+  }, []);
+
+  // The extracted fields, for whatever is on screen, without a button. They are not in the rows this table
+  // already has — they are a separate read of each document's notice row — so before this the per-field
+  // columns were empty until somebody knew to press for them, which is a thing nobody discovers.
+  //
+  // ⚠️ What stops this spinning, given that its own result is what changes its input:
+  //
+  //  - A key is added to `requestedKeys` before the request goes out and never leaves, so the same key is
+  //    never asked about twice. That holds even if the route answers for a key in NEITHER map — which
+  //    would otherwise leave it in `unloadedKeys` forever and re-fire this on every render.
+  //  - The same ref is why a whole-call failure is not retried: the batch was marked on the way out. The
+  //    error is shown once and later pages still get their turn.
+  //  - `loadingFields` serialises the calls, so a window whose pages keep arriving queues its batches
+  //    behind each other instead of firing several at once, and each stays under the route's ceiling.
+  useEffect(() => {
+    if (loadingFields) return;
+    // One route page at a time — the route refuses more than 100 keys, and it is DynamoDB's BatchGetItem
+    // limit, so a full page is one round trip.
+    const batch = unloadedKeys
+      .filter((k) => !requestedKeys.current.has(k))
+      .slice(0, 100);
+    if (batch.length === 0) return;
+    void loadFields(batch);
+    // `fieldsRetry` only ever moves on an Apply click, so it widens the loop by exactly one pass per
+    // gesture and cannot itself drive one.
+  }, [unloadedKeys, loadingFields, loadFields, fieldsRetry]);
 
   // Rebuilt only when an extraction actually arrives, so the identity is stable — `DataTable` re-reads
   // its stored layout whenever its column set changes, and this set runs to dozens of columns.
@@ -717,32 +1166,34 @@ export default function IdpDocumentsPage() {
         sortValue: (d) => basename(d.ObjectKey).toLowerCase(),
       },
       {
-        id: "status",
-        header: "Status",
-        cell: (d) => <DocStatus status={d.ObjectStatus} />,
-        sortValue: (d) => d.ObjectStatus ?? null,
-      },
-      {
         id: "started",
         header: "Started",
         cell: (d) => (
-          <span className="rc-mono text-[12px] text-[var(--rc-ink-faint)]">
-            {localTime(d.InitialEventTime)}
-          </span>
+          <StartedTime
+            iso={d.InitialEventTime}
+            approximate={d.idp_started_at_approximate === true}
+          />
         ),
         // Sorted on the raw timestamp, not the formatted string, so ordering does not depend on locale.
+        // A derived timestamp sorts alongside the real ones -- there is nowhere honest to put it
+        // instead -- which is why every one of them carries a visible marker in the cell.
         sortValue: (d) => d.InitialEventTime ?? null,
       },
       {
         id: "config_version",
         header: "Config version",
-        cell: (d) => (
-          <span className="rc-mono text-[12px] text-[var(--rc-ink)]">
-            {d.ConfigVersion ?? "—"}
-          </span>
-        ),
+        cell: (d) => <ConfigVersionCell version={d.ConfigVersion} />,
+        // Null sorts as null, as everywhere else in this table: the rows recon has no version for group
+        // together rather than sorting under whatever placeholder the cell happens to draw.
         sortValue: (d) => d.ConfigVersion ?? null,
       },
+      // ⚠️ There is no `ObjectStatus` column, and that is deliberate rather than an omission. Recon still
+      // RECORDS it — it is on the wire contract and in `idp_tracking` — but the hook fires while the
+      // pipeline is still evaluating, so every row in the live table reads `EVALUATING` and always will.
+      // A column with one value on every row tells a reader nothing, and sitting beside two TERMINAL
+      // statuses (this one, `SUCCEEDED`, and Eval's `COMPLETED`) it read as three columns contradicting
+      // each other on every row. Do not add it back: the fix for wanting a live status is a later read of
+      // the pipeline, not displaying a snapshot taken before it finished.
       {
         id: "workflow_status",
         header: "Workflow",
@@ -774,11 +1225,16 @@ export default function IdpDocumentsPage() {
       },
       {
         id: "alerts",
-        header: "Alerts",
+        // A node so the caveat can be a tooltip: the header is one narrow word and the caveat is a
+        // sentence — this counts only attributes the extractor READ A VALUE FOR, which is why it can be
+        // smaller than the list of flags in the detail panel. Same trade as the Eval column: the Columns
+        // picker falls back to the column id for a non-string header, so it reads as "alerts" there.
+        header: <span title={EXTRACTED_ALERTS_TITLE}>Alerts</span>,
         defaultHidden: true,
         cell: (d) => (
           <span
             className="rc-mono text-[12px]"
+            title={EXTRACTED_ALERTS_TITLE}
             style={{
               color: d.ConfidenceAlertCount
                 ? "var(--rc-amber)"
@@ -792,58 +1248,26 @@ export default function IdpDocumentsPage() {
       },
       {
         id: "evaluation",
-        header: "Eval",
+        // A node so the caveat can be a tooltip on the label: this is the pipeline's status at the
+        // moment recon's hook ran, and the hook runs while the pipeline is still evaluating. The cost
+        // of a non-string header is that the Columns picker falls back to the column id for its
+        // label — see `labelFor` in `DataTable` — which reads as "evaluation" and is close enough.
+        // No `≈` here: that marker means "derived timestamp" in the Started column and overloading it
+        // with a second meaning would cost it the first one.
+        header: <span title={EVALUATION_SNAPSHOT_TITLE}>Eval</span>,
         defaultHidden: true,
-        cell: (d) => <DocStatus status={d.EvaluationStatus} />,
+        cell: (d) => (
+          <span title={EVALUATION_SNAPSHOT_TITLE}>
+            <DocStatus status={d.EvaluationStatus} />
+          </span>
+        ),
         sortValue: (d) => d.EvaluationStatus ?? null,
-      },
-      {
-        id: "hitl_status",
-        header: "Review",
-        defaultHidden: true,
-        cell: (d) => <DocStatus status={d.HITLStatus} />,
-        sortValue: (d) => d.HITLStatus ?? null,
-      },
-      {
-        id: "hitl_triggered",
-        header: "Review asked",
-        defaultHidden: true,
-        cell: (d) => (
-          <span className="rc-mono text-[12px] text-[var(--rc-ink-faint)]">
-            {d.HITLTriggered === null ? "—" : d.HITLTriggered ? "yes" : "no"}
-          </span>
-        ),
-        sortValue: (d) =>
-          d.HITLTriggered === null ? null : String(d.HITLTriggered),
-      },
-      {
-        id: "hitl_completed",
-        header: "Review done",
-        defaultHidden: true,
-        cell: (d) => (
-          <span className="rc-mono text-[12px] text-[var(--rc-ink-faint)]">
-            {d.HITLCompleted === null ? "—" : d.HITLCompleted ? "yes" : "no"}
-          </span>
-        ),
-        sortValue: (d) =>
-          d.HITLCompleted === null ? null : String(d.HITLCompleted),
-      },
-      {
-        id: "reviewer",
-        header: "Reviewer",
-        defaultHidden: true,
-        cell: (d) => (
-          <span className="rc-mono text-[12px] text-[var(--rc-ink-faint)]">
-            {d.HITLReviewedBy ?? d.HITLReviewOwner ?? "—"}
-          </span>
-        ),
-        sortValue: (d) => d.HITLReviewedBy ?? d.HITLReviewOwner ?? null,
       },
       // --- What the extractor read out of each document ---
       // One column per (class, field) pair among the extractions loaded so far, all hidden by default:
-      // a single notice class runs to seventeen fields and a mixed window to several times that. Empty
-      // until somebody presses "Load extracted fields", because the values are not in the rows this
-      // table already has — they are one call per document against the pipeline's API.
+      // a single notice class runs to seventeen fields and a mixed window to several times that. They
+      // appear as the reads land — the values are not in the rows this table already has, they are a
+      // separate read of each document's notice row, so the set grows page by page.
       ...fieldColumns.map((f) => ({
         id: f.id,
         header: f.header,
@@ -941,7 +1365,7 @@ export default function IdpDocumentsPage() {
       <header>
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
-            <Eyebrow>Read from the document pipeline</Eyebrow>
+            <Eyebrow>Read from recon&rsquo;s notice store</Eyebrow>
             <h1 className="rc-display mt-2 text-[34px] font-black leading-none text-[var(--rc-ink)]">
               Documents
             </h1>
@@ -961,14 +1385,13 @@ export default function IdpDocumentsPage() {
             </button>
           )}
         </div>
+        {/* Four words, at the user's request. The legend this paragraph used to carry for the `≈` and
+            `?` markers is NOT lost: each marker carries the same sentence as its own `title`, on the
+            glyph itself — see `APPROXIMATE_START_TITLE` and `UNKNOWN_CONFIG_TITLE`. Those tooltips are
+            now the only explanation either marker has, so do not remove one on the grounds that it
+            duplicates the header. */}
         <p className="rc-mono mt-3 max-w-3xl text-[12px] leading-relaxed text-[var(--rc-ink-faint)]">
-          What the extraction pipeline processed against the configuration
-          versions this deployment pins, newest window first. That pipeline is
-          shared, so anything queued against another configuration is left out —
-          the <span className="text-[var(--rc-ink)]">Config version</span>{" "}
-          column shows which pin each row ran under. If a version you expected
-          is missing entirely, the pin on the Config tab is spelled differently
-          from what the pipeline was given.
+          record of extraction pipeline
         </p>
       </header>
 
@@ -998,49 +1421,52 @@ export default function IdpDocumentsPage() {
             disabled={loading}
             onClick={() => {
               setNextToken(null);
+              // A new window is the one time a continuation token may legitimately be handed out again.
+              requestedTokens.current.clear();
+              // And the one way to ask for a read that failed WHOLESALE to be tried again — the effects
+              // never retry on their own, by design. Keys that failed on their own terms are still in
+              // `extractionsFailed`, which keeps them out of the unloaded set, so this retries only the
+              // batches that never got an answer at all.
+              requestedKeys.current.clear();
+              setFieldsError(null);
+              setFieldsRetry((n) => n + 1);
               void load(null);
             }}
           >
             {loading ? "Loading…" : "Apply"}
           </button>
           <label className="ml-auto block min-w-[220px] flex-1">
-            <span className="rc-eyebrow">Filter loaded rows</span>
+            {/* The label says CLEAR, because clearing is the gesture that needs advertising: the box
+                arrives holding this deployment's pinned configuration versions, and emptying it is how an
+                operator sees the rows those versions were keeping off the table. */}
+            <span className="rc-eyebrow">
+              Filter loaded rows — clear to see all
+            </span>
             <input
               className={`${INPUT} mt-1`}
-              placeholder="file name, config version, status"
+              placeholder="file name, config version, workflow status"
               value={filter}
-              onChange={(e) => setFilter(e.target.value)}
+              // Every keystroke marks the box touched, INCLUDING the one that empties it, which is what
+              // stops the pin seed re-applying itself over a deliberate clear.
+              onChange={(e) => {
+                filterTouched.current = true;
+                setFilter(e.target.value);
+              }}
             />
           </label>
         </div>
-        <p className="rc-mono mt-3 text-[11px] leading-relaxed text-[var(--rc-ink-dim)]">
-          The filter searches the {ours.length} rows loaded so far, not the
-          whole window — the pipeline&rsquo;s API has no search. Widen the dates
-          or load more pages if what you want is missing.
-        </p>
-        {/* The pins, spelled out. This is the only place an operator can see WHY a document they know was
-            processed is not on this page, and the answer is almost always that its configuration is not
-            one of these. */}
-        {workflowTypesError ? (
+        {/* The one thing left under the filter row, and only when it goes wrong: with the pins unreadable
+            nothing seeds the box, so the table silently shows every loaded row — including other
+            deployments' configurations — and this is the ONLY signal of that anywhere in the app. */}
+        {workflowTypesError && (
           <p
-            className="rc-mono mt-2 text-[11px] leading-relaxed"
+            className="rc-mono mt-3 text-[11px] leading-relaxed"
             style={{ color: "var(--rc-amber)" }}
           >
             Could not read the configured workflow types — {workflowTypesError}.
-            Every row the pipeline returned is shown, including other
-            deployments&rsquo; configurations.
-          </p>
-        ) : workflowTypes === null ? (
-          <p className="rc-mono mt-2 text-[11px] text-[var(--rc-ink-dim)]">
-            ◆ reading the configured versions…
-          </p>
-        ) : (
-          <p className="rc-mono mt-2 text-[11px] leading-relaxed text-[var(--rc-ink-dim)]">
-            {pinnedVersions.length === 0
-              ? "No workflow type pins a configuration version, so no row can be recognised as this deployment's. Pin one on the Config tab."
-              : `Showing only these configuration versions, pinned by the workflow types on the Config tab: ${pinnedVersions.join(", ")}.`}
-            {hiddenByConfig > 0 &&
-              ` ${hiddenByConfig} loaded ${hiddenByConfig === 1 ? "row belongs" : "rows belong"} to another configuration and ${hiddenByConfig === 1 ? "is" : "are"} hidden.`}
+            The filter could not be seeded with this deployment&rsquo;s pinned
+            configuration versions, so every loaded row is shown, including
+            other deployments&rsquo; configurations.
           </p>
         )}
       </Panel>
@@ -1059,9 +1485,10 @@ export default function IdpDocumentsPage() {
             <Placeholder kind="empty">
               {rows.length === 0
                 ? "◇ no documents processed in this window"
-                : ours.length === 0
-                  ? `◇ ${rows.length} documents loaded, none of them against a configuration version this deployment pins`
-                  : "◇ no loaded rows match this filter"}
+                : // The escape hatch is named, because the filter arrives with a value in it that the
+                  // operator did not type: "nothing matches" without "and here is how to see the rest"
+                  // is the state this whole change exists to remove.
+                  `◇ none of the ${rows.length} loaded rows match the filter — clear it to see every one of them`}
             </Placeholder>
           ) : (
             <DataTable
@@ -1089,53 +1516,17 @@ export default function IdpDocumentsPage() {
               paginated
             />
           )}
-          {/* Outside the branch above, deliberately. A page of the pipeline's rows can be entirely other
-              deployments' configurations while the next page holds ours, and hiding Load more on an empty
-              table would leave the operator with nothing to press. */}
-          <div className="flex items-center gap-3">
-            {/* An explicit button, not infinite scroll: each press is one signed request to somebody
-                else's API, and an operator scrolling a long window should not fire ten of them. */}
-            <button
-              type="button"
-              className={BUTTON}
-              disabled={loading || !nextToken}
-              onClick={() => void load(nextToken)}
-            >
-              {loading
-                ? "Loading…"
-                : nextToken
-                  ? "Load more"
-                  : "All rows loaded"}
-            </button>
-            {/* Also an explicit button, and for a heavier reason than Load more: each press is one
-                request per shown document plus one per section of each. The extracted values are not in
-                the rows this table already has, so there is nothing to show until somebody asks. */}
-            <button
-              type="button"
-              className={BUTTON}
-              disabled={loadingFields || unloadedKeys.length === 0}
-              onClick={() => void loadFields()}
-            >
-              {loadingFields
-                ? "Reading fields…"
-                : unloadedKeys.length === 0
-                  ? "Extracted fields loaded"
-                  : `Load extracted fields (${unloadedKeys.length})`}
-            </button>
-            <span className="rc-mono text-[11px] text-[var(--rc-ink-dim)]">
-              {rows.length} loaded
-              {hiddenByConfig > 0
-                ? ` · ${ours.length} on a pinned configuration`
-                : ""}
-              {filter.trim() ? ` · ${shown.length} shown` : ""}
-              {fieldColumns.length > 0
-                ? ` · ${fieldColumns.length} extracted-field column${fieldColumns.length === 1 ? "" : "s"} available under Columns`
-                : ""}
-            </span>
-          </div>
-          {/* The whole call failed — a signing problem or the pipeline's API being unreachable. A key
-              that failed on its own is reported below instead, because those are two different
-              conversations. */}
+          {/* ⚠️ There is no strip of buttons here any more, and it is not an omission. "Load more", "Load
+              extracted fields" and the count line beside them are gone, and their WORK is not: the
+              pagination effect walks the continuation tokens to the end of the window on its own, and the
+              auto-load effect reads each page's extracted fields as the rows arrive. Do not put a button
+              back to restore a capability that is already running — see the bounds documented on both
+              effects before touching either. What is left below are the two error surfaces, which were
+              never part of the strip.
+
+              The whole call failed — a misconfigured table name, or credentials this deployment does not
+              have. A key that failed on its own is reported below instead, because those are two
+              different conversations. */}
           {fieldsError && (
             <p
               className="rc-mono text-[11px] leading-relaxed"
@@ -1144,18 +1535,27 @@ export default function IdpDocumentsPage() {
               Could not read extracted fields — {fieldsError}
             </p>
           )}
-          {/* Named, not silently missing. A document whose result JSON has aged out of the pipeline's
-              storage shows middle dots in every field column, and without this line that is
-              indistinguishable from a button that did nothing. */}
-          {Object.keys(extractionsFailed).length > 0 && (
+          {/* Named, not silently missing. A document recon holds no notice for — most often another
+              deployment's — shows middle dots in every field column, and without this line that is
+              indistinguishable from a read that has not happened yet. The reasons here are ordinary
+              answers, so the block is a closed details element rather than a banner.
+              ⚠️ `unexplainedFailures`, not `extractionsFailed`: a tracking-only row is left out
+              entirely, because its reason is already on its own detail panel and it explains an outcome
+              rather than a failure. Rendered only when something is left — an empty `<details>` reads as
+              a warning with the detail withheld. */}
+          {unexplainedFailures.length > 0 && (
             <details className="rc-mono text-[11px] text-[var(--rc-ink-dim)]">
+              {/* "with no extracted fields to show" rather than "whose fields could not be read":
+                  reading is only one of the reasons listed underneath. A row dropped to fit the item
+                  limit was read and then trimmed. The count comes off the same list the entries do, so
+                  the summary cannot promise more than it lists. */}
               <summary className="cursor-pointer">
-                {Object.keys(extractionsFailed).length} document
-                {Object.keys(extractionsFailed).length === 1 ? "" : "s"} whose
-                extracted fields could not be read
+                {unexplainedFailures.length} document
+                {unexplainedFailures.length === 1 ? "" : "s"} with no extracted
+                fields to show
               </summary>
               <div className="mt-2 space-y-1">
-                {Object.entries(extractionsFailed).map(([key, reason]) => (
+                {unexplainedFailures.map(([key, reason]) => (
                   <p key={key} style={{ color: "var(--rc-amber)" }}>
                     {basename(key)} — {reason}
                   </p>

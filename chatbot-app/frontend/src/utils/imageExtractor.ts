@@ -21,7 +21,7 @@ export function extractBlobImages(msg: any, toolUseId: string): ImageData[] {
       data: blobImage.data
     })
   } else if (msg._blobImage && msg._blobImage.format && msg._blobImage.data) {
-    // Backward compatibility: single blob image per message
+    // The alternate stored shape: one blob image on the message rather than a map keyed by toolUseId
     images.push({
       format: msg._blobImage.format,
       data: msg._blobImage.data

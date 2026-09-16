@@ -1,12 +1,12 @@
 output "distribution_domain" {
-  description = "Public entry-point host: the CloudFront domain in public mode, or the internal ALB DNS in private mode (no CloudFront). Feed into Cognito/OIDC callback/logout URLs."
+  description = "Public entry-point host: the CloudFront domain in public mode, or the internal ALB DNS in private mode (no CloudFront). Feed into the OIDC app's callback/logout URLs."
   value       = var.private_vpc ? aws_lb.this.dns_name : aws_cloudfront_distribution.this[0].domain_name
 }
 
-# Live-QA P0-1: the redirect URI has to be registered on the Okta app by an org admin, and that is
-# an out-of-band step Terraform cannot perform (unlike the Cognito callbacks, which
-# null_resource.cognito_callbacks patches via the AWS API). So compute the exact string to register
-# and surface it, rather than leaving the operator to reconstruct it from the distribution domain.
+# The redirect URI has to be registered on the Okta app by an org admin — an out-of-band step
+# Terraform cannot perform, because the IdP is not an AWS resource. So compute the exact string to
+# register and surface it, rather than leaving the operator to reconstruct it from the distribution
+# domain.
 output "okta_redirect_uri_to_register" {
   description = "Exact URL to add to the Okta OIDC app's Sign-in redirect URIs. When okta_redirect_uri is pinned this is that value; otherwise it is what the browser will derive from this deployment's public host — and it will change if the distribution is recreated. Empty when auth_provider != okta."
   value = var.auth_provider != "okta" ? "" : (

@@ -238,18 +238,3 @@ def test_microsoft_graph_send_mail_with_confirmation():
     args["confirmationToken"] = CONFIRM_TOKEN
     out = _call("microsoft-graph___sendSharedMailboxMail", args)
     assert not out.get("isError"), _text(out)
-
-
-def test_document_extraction_get_results_connectivity():
-    """Target `document-extraction` (external IDP MCP): connectivity + auth are OURS to
-    guarantee; the current upstream contract requires `batch_id` (IDP-side change,
-    2026-07-26). A structured IDP ValidationException therefore PROVES the full recon-side
-    chain works; anything transport/auth-shaped fails the test."""
-    try:
-        out = _call("document-extraction___IDPTools___get_results", {"documentId": "qa-live-probe"})
-        # If IDP restores documentId-based lookup this may simply succeed.
-        assert not out.get("isError") or "batch_id" in _text(out)
-    except RuntimeError as exc:
-        msg = str(exc)
-        # Reached the IDP tool (its validator answered) == connectivity OK.
-        assert "batch_id" in msg or "ValidationException" in msg, msg

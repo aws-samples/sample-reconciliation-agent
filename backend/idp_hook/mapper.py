@@ -26,30 +26,45 @@ snake_case equivalent, which is what the unit fixtures are written in.
 """
 
 import logging
-from decimal import Decimal, InvalidOperation
-from typing import Optional
+from decimal import Decimal
+from typing import Any, Optional
 
 from backend.recon_core.notice_derive import (
     PARSE_METHOD_IDP,
     SOURCE_SYSTEM_OTHER,
-    derive_amount_type,
 )
 from backend.recon_core.notices import Notice
 
 logger = logging.getLogger(__name__)
 
 
-def _decimalize(obj):
-    """Recursively convert floats → Decimal so nested IDP data is DynamoDB-safe (boto3 rejects
-    Python floats). Walks dicts/lists in place; leaves existing Decimals untouched (the IDP
-    output reader already decimalizes its result, so we must not choke on Decimals here).
+def decimalize(obj: Any) -> Any:
+    """Recursively convert floats to :class:`Decimal` so nested IDP data is DynamoDB-safe (boto3
+    rejects Python floats outright). Walks dicts/lists in place; leaves existing Decimals
+    untouched (the IDP output reader already decimalizes its result, so this must not choke on
+    Decimals here).
+
+    Public, like :func:`split_s3_uri` above, for the same reason: this is now the THIRD would-be
+    home for "convert a float to Decimal" in this package -- ``tracking.py`` had a byte-identical
+    private copy (now deleted; it imports this instead) and ``idp_output.py`` line ~113 reaches the
+    same result through ``json.loads(json.dumps(...), parse_float=Decimal)``. Consolidating here
+    stops a fourth copy from appearing and a future bug fix from having to land in three places.
+
+    NOT interchangeable with ``idp_output.py``'s ``parse_float=Decimal`` trick: that one operates on
+    a JSON string round-trip (it also happens to convert ints that arrived as JSON floats), while
+    this one walks a live Python structure in place. Do not "unify" them into one call site --
+    they take different inputs and are used where each module already has the matching one in hand.
+
+    :param obj: any JSON-shaped value (dict, list, float, or scalar).
+    :returns: the same structure with every float replaced by a ``Decimal`` built via ``str()``
+        (to avoid binary-float imprecision); non-float values are returned unchanged.
     """
     if isinstance(obj, float):
         return Decimal(str(obj))  # via str() to avoid binary-float imprecision
     if isinstance(obj, dict):
-        return {k: _decimalize(v) for k, v in obj.items()}
+        return {k: decimalize(v) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_decimalize(v) for v in obj]
+        return [decimalize(v) for v in obj]
     return obj
 
 
@@ -142,7 +157,7 @@ def _read_sections(
             # list of id strings rather than records — see `IdpOutputReader.resolve_document`. If one
             # reaches here the pointer was never followed, so say that: the alternative is
             # `AttributeError: 'str' object has no attribute 'get'` three frames deep, which reads
-            # like a mapper bug rather than an unresolved event (cost us a live debug on 2026-09-02).
+            # like a mapper bug rather than an unresolved event and misdirects the whole diagnosis.
             if not isinstance(s, dict):
                 raise ValueError(
                     f"IDP section {s!r} is not a record — this looks like an unresolved compressed "
@@ -167,44 +182,12 @@ def _read_sections(
     return enriched_sections, pages, page_count
 
 
-def _opt(fields: dict, key: str) -> str | None:
-    """Read an extracted field, preserving the absent/blank distinction.
-
-    :param fields: the section's extracted field values.
-    :param key: the field name.
-    :returns: the string value, ``""`` when extracted but blank, or None when this document's class
-        never extracted it at all.
-    """
-    if key not in fields:
-        return None
-    return str(fields[key])
-
-
-def _opt_decimal(fields: dict, key: str) -> Decimal | None:
-    """Read an extracted numeric field as a Decimal, preserving absence.
-
-    Decimal rather than float because boto3's DynamoDB resource rejects floats outright.
-
-    :param fields: the section's extracted field values.
-    :param key: the field name.
-    :returns: the Decimal value, or None when absent or blank.
-    :raises ValueError: when the field is present and non-blank but will not parse as a number —
-        a silently dropped amount would make an unmatchable notice look merely unmatched.
-    """
-    raw = fields.get(key)
-    if raw in (None, ""):
-        return None
-    try:
-        return Decimal(str(raw))
-    except InvalidOperation as exc:
-        raise ValueError(f"extracted {key} is not a number: {raw!r}") from exc
-
-
 def idp_event_to_notice(
     document: dict,
     *,
     output_reader: Optional[object] = None,
     execution_arn: str | None = None,
+    idp_tracking: dict | None = None,
 ) -> Notice:
     """Map an IDP completion event to a Notice — the ACTUAL side of the reconciliation.
 
@@ -216,6 +199,11 @@ def idp_event_to_notice(
     :param output_reader: an IdpOutputReader (or compatible) used to read section results and page
         images from IDP output S3. When None, only the event's own high-level data is captured.
     :param execution_arn: the IDP Step-Function run id, stored for the audit trail.
+    :param idp_tracking: the IDP pipeline's own tracking snapshot for this document (see
+        ``backend/idp_hook/tracking.build_tracking_snapshot``), stored on the returned notice so
+        the Documents tab can render pipeline progress without a live AppSync call. Carried
+        through as-is except for ``page_count`` -- see the comment where it is folded in below.
+        ``None`` when the caller has none to attach (e.g. a caller that predates this parameter).
     :returns: the mapped notice.
     :raises ValueError: if the document has no identifiable ObjectKey, no extractable notice date,
         or an amount that will not parse.
@@ -224,21 +212,17 @@ def idp_event_to_notice(
     if not object_key:
         raise ValueError(f"IDP document missing ObjectKey/id: keys={list(document)}")
 
-    sections, pages, _page_count = _read_sections(
+    sections, pages, page_count = _read_sections(
         document, output_reader=output_reader, out_bucket=out_bucket, out_prefix=out_prefix
     )
+    # `page_count` used to be thrown away here as `_page_count`. `tracking.build_tracking_snapshot`
+    # computes its OWN page_count from the raw event/document alone, so it cannot see the actual
+    # page images `_read_sections` just read from IDP output S3 -- the one place this mapper knows
+    # more than that snapshot does. Fold it in (mapper's value wins when both are known -- it is the
+    # more complete source) rather than let it fall on the floor a second time.
+    if idp_tracking is not None and page_count is not None:
+        idp_tracking = {**idp_tracking, "page_count": page_count}
     first = sections[0] if sections else {}
-    fields = first.get("fields", {}) or {}
-
-    # notice_date is the range key of the notices table's counterparty-index, so a blank one would
-    # be both rejected by the model and dropped from the index — the notice would exist but the
-    # agent's primary query could never return it. Raise instead: the hook re-raises, and IDP's
-    # retry/DLQ gets a second chance at the extraction.
-    notice_date = str(fields.get("notice_date") or fields.get("value_date") or "")
-    if not notice_date:
-        raise ValueError(
-            f"IDP document {object_key} extracted no notice_date/value_date: fields={list(fields)}"
-        )
 
     # None when the per-section counts could not be read AND IDP's own field is NULL. Propagated as
     # None on purpose: the interceptor refuses a write it cannot evaluate, and a defaulted number
@@ -258,7 +242,7 @@ def idp_event_to_notice(
     # `mean_confidence`/`alert_count` are carried PER SECTION and are not the notice-level
     # `extraction_confidence`/`confidence_alert_count` below: those are the first section's score and
     # the sum across sections respectively, which is what the interceptor and the prompt read.
-    idp_sections = _decimalize(
+    idp_sections = decimalize(
         [
             {
                 "section_id": s.get("section_id"),
@@ -273,50 +257,18 @@ def idp_event_to_notice(
         ]
     )
 
-    # Parsed before the constructor call because `amount_type` is derived FROM them. Deriving it from
-    # the raw `fields` dict instead would re-parse, and the two parses could disagree on a blank.
-    amount = _opt_decimal(fields, "amount")
-    global_amount = _opt_decimal(fields, "global_amount")
-    fee_amount = _opt_decimal(fields, "fee_amount")
-
     return Notice(
         notice_id=f"idp-{object_key}",
         notice_class=first.get("classification") or "unclassified",
         # A GSI hash key cannot be blank. "unknown" keeps an unattributable notice retrievable by
         # notice_id and by reference-index rather than failing the whole extraction over a name.
-        counterparty=str(fields.get("counterparty") or fields.get("borrower") or "unknown"),
-        notice_date=notice_date,
-        fund=_opt(fields, "fund"),
-        facility=_opt(fields, "facility"),
-        reference=_opt(fields, "reference"),
-        amount=amount,
-        currency=_opt(fields, "currency"),
-        # The business activity, in the source's vocabulary. Separate from `notice_class` above, which
-        # is the pipeline's classification of the DOCUMENT — see the Notice model.
-        activity_type=_opt(fields, "activity_type"),
-        # The facility-wide total, kept apart from `amount` so a global figure can never stand in for
-        # this fund's share. `amount_type` records which of the two this notice actually supports.
-        global_amount=global_amount,
-        fee_amount=fee_amount,
-        fee_percentage=_opt_decimal(fields, "fee_percentage"),
-        amount_type=derive_amount_type(
-            amount=amount, global_amount=global_amount, fee_amount=fee_amount
-        ),
-        # Verbatim, and never reconciled against loanx_id — see the Notice model's comment.
-        facility_id_source_raw=_opt(fields, "facility_id_source_raw"),
-        loanx_id=_opt(fields, "loanx_id"),
-        cusip=_opt(fields, "cusip"),
-        isin=_opt(fields, "isin"),
-        agent_bank=_opt(fields, "agent_bank"),
-        agent_contact_name=_opt(fields, "agent_contact_name"),
-        agent_email=_opt(fields, "agent_email"),
-        agent_telephone=_opt(fields, "agent_telephone"),
-        contract_id=_opt(fields, "contract_id"),
-        new_contract_id=_opt(fields, "new_contract_id"),
-        notice_comment=_opt(fields, "notice_comment"),
-        # The date as printed, beside the ISO value above. A conversion with no record of its input
-        # cannot be audited, and manual extracts have been seen carrying Excel serials.
-        notice_date_source_raw=_opt(fields, "notice_date_source_raw"),
+        # ⚠️ THIS MAPPER READS NO EXTRACTED FIELD BY NAME, and must not start. `notice_class` above is
+        # the pipeline's own classification of the document, not extracted content. Everything the
+        # extractor read goes into `idp_sections` verbatim, and `search_notices` resolves filters against
+        # it -- so a field the pipeline adds or renames needs no change here. A name added back is one
+        # recon must keep in step with a configuration in another repository, and when it drifts the value
+        # lands under a key nothing reads while extraction still scores well.
+        #
         # Derived from THIS writer's own context, never extracted and never caller-supplied. Constant
         # on the document path: the source is not the structured feed, and extraction did the parse.
         source_system=SOURCE_SYSTEM_OTHER,
@@ -331,6 +283,7 @@ def idp_event_to_notice(
         confidence_alert_count=alert_total,
         source_document=object_key,
         idp_execution_arn=execution_arn or document.get("workflow_execution_arn") or "",
-        idp_pages=_decimalize(pages),
+        idp_pages=decimalize(pages),
         idp_sections=idp_sections,
+        idp_tracking=idp_tracking,
     )

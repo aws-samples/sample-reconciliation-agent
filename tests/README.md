@@ -15,8 +15,11 @@ python3 -m ruff check backend/ tests/          # lint
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `input_corpus/`        | that `data/input/`'s committed PDFs still match `scripts/generate_input_notices.py`, and that the extraction-requirements doc and the hook's mapper agree **in both directions** |
 | `kb_seed/`             | the knowledge-base corpus: metadata sidecar shape, break-class coverage, and that the committed PDF/XLSX attachments parse and match their generator                             |
+| `data_corpus/`         | everything under `data/` the two sweeps above do not reach — same property, that every address sits in a domain which cannot receive mail                                        |
 | `skills/`              | the SKILL.md catalog — that declared evidence steps are consistent, and the six-required-step ceiling                                                                            |
+| `recon_agent/`         | the container backend in `agent-blueprint/recon-agent/`, which is not a `backend/` package                                                                                       |
 | `infra/`               | pure-Python logic that ships inside Terraform modules, e.g. the seed-push decision table                                                                                         |
+| `scripts/`             | the repo-level tooling in `scripts/`, e.g. the `idp-document-index` backfill                                                                                                     |
 | `e2e/`, `integration/` | multi-component paths that still run offline against fakes                                                                                                                       |
 
 ## What the tests here are for

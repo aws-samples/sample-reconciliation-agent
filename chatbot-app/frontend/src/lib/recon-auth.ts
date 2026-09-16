@@ -16,7 +16,7 @@ export { authHeaders, idToken as reconIdToken } from "@/lib/auth/client-token";
  * `fetch` for the recon BFF, with the Authorization header attached.
  *
  * Every `/api/recon/*` call goes through this ONE wrapper (see reconApi.ts) precisely so that no
- * future call site can forget the header and reintroduce P0-2 from the client side.
+ * call site can forget the header and hit the gated BFF unauthenticated.
  *
  * A 401 starts a re-authentication redirect. Under `/api/recon/*` a 401 can only mean the token
  * was missing, malformed or rejected — `authorizeRequest` has no authorization tier that could

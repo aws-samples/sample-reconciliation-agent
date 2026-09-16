@@ -6,14 +6,12 @@
 # placeholder entry (never a real credential) here in the same change.
 region                 = "us-east-1"
 name_prefix            = "recon-dev"
-hosted_ui_prefix       = "recon-dev-login-CHANGEME" # must be globally unique
-idp_gateway_target_url = ""                         # set to the deployed IDP endpoint to enable the IDP tool
-# recon_domain         = "cash"                     # domain the IDP hook stamps on ingested items
-# The console's Documents tab. Both come from the document pipeline's own stack outputs; leave them
-# empty and the tab renders a "not configured" message instead of a list. Neither is a secret -- the
-# endpoint is unauthenticated to reach and refuses every unsigned request.
-idp_appsync_endpoint = "" # GraphQLAPIURL output, e.g. https://EXAMPLE.appsync-api.us-east-1.amazonaws.com/graphql
-idp_appsync_api_arn  = "" # arn:aws:appsync:us-east-1:ACCOUNT_ID:apis/API_ID
+# The console's Documents tab needs NO variable to list documents: it reads recon's own notices table,
+# which this environment creates, so the table and its GSI are wired straight from the module output.
+# The two bucket variables below are still needed, and only for the bytes -- raw documents are
+# deliberately not duplicated into recon storage, so an upload is put into the pipeline's input bucket
+# and the source-document preview streams back out of it.
+#
 # Where an extraction-routed upload is put. Empty leaves the upload route reporting it has nowhere to
 # put an extraction file, which is what you want: a put into a guessed bucket is read by nothing and
 # still records UPLOADED.
@@ -44,25 +42,10 @@ seed_extraction_config_version = "" # the pipeline's real configuration version,
 # will stop and name this variable rather than build a bad ARN.
 otel_layer_account = "<12-digit-account-id>"
 
-# IDP MCP client-credentials, JSON: {token_url, client_id, client_secret, scope, issuer}.
-# Values come from the IDP team. Empty disables the document-extraction target.
-#
-# ⚠️ `issuer` must be Cognito's REAL issuer — https://cognito-idp.<region>.amazonaws.com/<userPoolId>
-# — and NOT the hosted-UI domain in token_url. They are different hosts. AgentCore validates a minted
-# token's `iss` claim against it, so a wrong value creates a healthy-looking provider that fails at
-# token validation. Read it from the `iss` claim of a token minted against token_url:
-#
-#   curl -sf -X POST "$TOKEN_URL" -H 'Content-Type: application/x-www-form-urlencoded' \
-#     -d "grant_type=client_credentials&client_id=$ID&client_secret=$SECRET&scope=$SCOPE" \
-#     | jq -r .access_token | cut -d. -f2 | base64 -d 2>/dev/null | jq -r .iss
-#
-# (The deploy used to run that itself, which is why it needed curl, jq, base64 and cut on the
-# machine running Terraform. It is static deployment config, so it lives here instead.)
-# idp_mcp_secret_json = "{\"token_url\":\"\",\"client_id\":\"\",\"client_secret\":\"\",\"scope\":\"\",\"issuer\":\"\"}"
-
 # Microsoft Graph gateway target ("microsoft-graph") — app-only (client_credentials).
-# The recon gateway's inbound auth is Cognito JWT, so OBO (delegated, 3LO) cannot work —
-# main.tf pins auth_mode = "client_credentials" for this env. Requires an Entra app
+# The recon gateway's inbound auth is AWS_IAM (SigV4), not Entra, so OBO (delegated, 3LO) cannot
+# work — it has no Entra-issued user token to exchange. main.tf pins
+# auth_mode = "client_credentials" for this env. Requires an Entra app
 # registration granted APPLICATION permissions (Mail.Read, Mail.Send, User.Read.All,
 # Sites.Read.All) with admin consent, and a current (non-expired) client secret — Entra
 # app registration/consent is a manual step outside Terraform/AWS.
@@ -88,7 +71,7 @@ otel_layer_account = "<12-digit-account-id>"
 
 # WHO MAY CHANGE CONFIGURATION — the auto-resolve threshold, the agent backend, the Tier-1 switch and
 # the list of addresses the platform may email. Nothing here creates the group: this deployment has no
-# Cognito user pool, so membership arrives as a claim from Okta or Entra and an operator maintains it
+# AWS identity provider, so membership arrives as a claim from Okta or Entra and an operator maintains it
 # there. Empty (the default) means NOBODY: every configuration route answers 403. That is a visible,
 # one-variable-fixable state rather than a silently open one, so leave it empty until the group exists.
 # recon_admin_group = "recon-admins"
@@ -172,13 +155,12 @@ graph_mailbox = "shared@<your-tenant>.onmicrosoft.com"
 # one persisted on the case) and EVIDENCE QUALITY (the write is refused unless the recorded verdict
 # reads CLEAN). Plus the case-transition guard.
 #
-# "enforce" is now the variable's DEFAULT (it used to be "log", which NEVER BLOCKS — a deployment that
-# inherited that default had one gate where it used to have several, since the model's self-reported
-# classification floor was deleted on 2026-09-04 and the computed evidence score plus the Cedar policy
-# are the only thresholds left; security audit 2026-09-04, finding M1). It is spelled out here anyway,
-# because the one thing a reader must not have to infer is whether the trust boundary blocks.
+# "enforce" is the variable's DEFAULT. The alternative, "log", NEVER BLOCKS, and the only other
+# thresholds in the system are the computed evidence score and the Cedar policy — so a deployment left
+# in "log" has one gate where it should have several. It is spelled out here anyway, because the one
+# thing a reader must not have to infer is whether the trust boundary blocks.
 #
-# The log -> enforce rollout is still the right sequence for a NEW environment: set "log" EXPLICITLY,
+# The log -> enforce rollout is the right sequence for a NEW environment: set "log" EXPLICITLY,
 # deploy once, verify the e2e matrix in the interceptor's CloudWatch logs, then delete the override. It
 # is a Lambda env-only change, so the flip is cheap and there is no reason to linger in "log". A local
 # value is not evidence of what is live — read it off the function:
@@ -207,10 +189,7 @@ interceptor_mode = "enforce"
 # Fargate with no public IP, NO CloudFront, plus the interface VPC endpoints. It does NOT
 # remove the NAT gateway (that stays a manual follow-up edit to infra/modules/network).
 # private_ingress_cidrs is your VPN/corporate range; empty allows the VPC CIDR only.
-# See the README "Private VPC deployment" section before enabling.
+# Read assets/private-vpc-deployment.md before enabling.
 # private_vpc           = true
 # private_ingress_cidrs = ["10.0.0.0/8"]
 
-# Deprecated, retained for compatibility only — Graph mail now goes through the
-# microsoft-graph gateway target, which owns its own Entra credentials.
-# graph_secret_json = ""

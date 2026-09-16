@@ -93,12 +93,11 @@ def coerce_email_draft(raw: object) -> dict | None:
 
     Neither backend gets its ``email_draft`` from a schema-validated source. The harness does not
     enforce the inline-function argument schema (the same gap ``intake._coerce_evidence`` exists to
-    close), and the runtime parses the model's final message as free JSON. Observed live on the
-    harness backend (2026-08-09): the model emitted the nested object as a STRING —
-    ``'{"recipient_hint": "...", "subject": "...", "body": "..."}'`` — so the ``isinstance(_, dict)``
-    guard dropped every draft and the harness never produced one while the runtime did.
-    ``email_draft`` is the first nested-object property in ``SUBMIT_PROPOSAL_SCHEMA``, which is why
-    no earlier field surfaced this.
+    close), and the runtime parses the model's final message as free JSON. The model does emit this
+    nested object as a STRING — ``'{"recipient_hint": "...", "subject": "...", "body": "..."}'`` —
+    and a bare ``isinstance(_, dict)`` guard drops every such draft, so the harness produces none
+    while the runtime does. ``email_draft`` is the first nested-object property in
+    ``SUBMIT_PROPOSAL_SCHEMA``, so it is the first field where the shape can diverge at all.
 
     Decoding is deliberately narrow: only a string that is already framed as a JSON object is
     parsed. Anything else stays ``None`` so the caller reports it, because a draft this function

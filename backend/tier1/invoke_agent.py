@@ -6,8 +6,6 @@ runtime, which means the stream consumer never holds its shard open for the minu
 takes. Nothing here reads a response, because the agent persists its own result.
 """
 
-import hashlib
-import re
 import json
 import os
 
@@ -15,22 +13,20 @@ import boto3
 
 from backend.recon_core.cases import CaseStore
 from backend.recon_core.schema import ReconItem
+from backend.recon_core.session import session_id_for
 from backend.recon_core.status import CaseStatus
 
 
 def _session_id(item_id: str) -> str:
-    """Derive a stable AgentCore runtime session id from the item id, at least 33 characters long.
+    """Derive a stable AgentCore runtime session id from the item id.
 
-    AgentCore requires session ids to match ``[a-zA-Z0-9][a-zA-Z0-9-_]*``, and real item ids do not:
-    they carry filename characters like dots and ``#``. So the item-id portion is sanitised down to
-    that alphabet, and uniqueness comes from the sha256 suffix, which is hex and therefore always
-    safe. Deriving it rather than generating one keeps a redelivered item on the same session.
+    Kept as a thin alias so the existing callers and their tests are unchanged; the derivation itself
+    moved to ``recon_core.session`` because the map run's collect step needs the identical answer.
 
     :param item_id: the recon item id, which may contain arbitrary filename characters.
-    :returns: a deterministic session id that satisfies the pattern.
+    :returns: a deterministic session id that satisfies AgentCore's pattern.
     """
-    safe = re.sub(r"[^a-zA-Z0-9_-]", "-", item_id)
-    return f"recon-{safe}-{hashlib.sha256(item_id.encode()).hexdigest()}"[:64]
+    return session_id_for(item_id)
 
 
 def _dispatch(agent_arn: str, payload: dict) -> None:

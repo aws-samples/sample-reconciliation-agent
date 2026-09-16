@@ -8,6 +8,11 @@ output "evaluator_id" {
   value       = aws_bedrockagentcore_evaluator.agreement.evaluator_id
 }
 
+output "evaluator_lambda_arn" {
+  description = "ARN of the evaluator Lambda. Needed by the BFF task role: StartBatchEvaluation invokes it under a FAS derived from that role, so the grant has to be identity-based."
+  value       = aws_lambda_function.evaluator.arn
+}
+
 output "online_eval_config_names" {
   description = "Names of the online evaluation configs, keyed by backend id (one config per backend)."
   value       = { for k, cfg in aws_bedrockagentcore_online_evaluation_config.this : k => cfg.online_evaluation_config_name }

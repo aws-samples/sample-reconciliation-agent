@@ -48,20 +48,18 @@ def _resolve_backend() -> str:
     to this package's fail-loudly rule: an unreadable toggle should not stop items from being
     investigated at all. The read failure is logged so it does not pass unnoticed.
 
+    The resolution itself lives in ``recon_core.model_select`` because the map run's collect step
+    needs the same answer, and two copies of a resolver that silently degrades is how the two of them
+    would come to disagree about which backend a run used.
+
     :returns: either "runtime" or "harness".
     """
-    param = os.environ.get("AGENT_BACKEND_PARAM", "")
-    env_default = os.environ.get("AGENT_BACKEND", "runtime").lower()
-    if param:
-        try:
-            val = (
-                boto3.client("ssm").get_parameter(Name=param)["Parameter"]["Value"].strip().lower()
-            )
-            if val in ("runtime", "harness"):
-                return val
-        except Exception as exc:  # noqa: BLE001 - see the docstring: degrade to the env default.
-            logger.warning("agent-backend SSM read failed (%s); using env default: %s", param, exc)
-    return env_default
+    from backend.recon_core.model_select import get_agent_backend
+
+    return get_agent_backend(
+        os.environ.get("AGENT_BACKEND_PARAM", ""),
+        default=os.environ.get("AGENT_BACKEND", "runtime").lower(),
+    )
 
 
 # Seconds held back from the Lambda's remaining budget so a timeout surfaces as our own error, with
@@ -199,8 +197,8 @@ def handle(event, _context):
 
     All the real work happens in ``_dispatch``; this wrapper exists to make a dead run visible.
     Only the agent writes the PROPOSED row, so any non-timeout exception escaping dispatch means no
-    result is ever coming. Before this wrapper existed, such an item sat in IN_PROGRESS forever and
-    an analyst had no way to tell "still thinking" from "died forty minutes ago".
+    result is ever coming. Without this wrapper such an item sits in IN_PROGRESS forever and an
+    analyst cannot tell "still thinking" from "died forty minutes ago".
 
     Timeouts are exempt, and that exemption matters more than the guard itself. A timeout means the
     investigation is still executing server-side and will persist its own outcome, so FAILED would
@@ -304,12 +302,12 @@ def _dispatch(event, _context):
             if _is_timeout(exc):
                 # A timeout is not a delivery failure. The gateway forwarded the request and the
                 # agent is still investigating, so falling back here starts a second full
-                # investigation of the same item. That is not hypothetical: it happened on
-                # 2026-09-02, when every run timed out against a too-short deadline, fell back, and
-                # the duplicates plus Lambda's own async retries stacked up to seven concurrent
-                # investigations of one item. Re-raising instead leaves the outcome to the run
-                # already in flight, which writes its own case row, and keeps the timeout visible
-                # rather than papered over by a duplicate that looks like a recovery.
+                # investigation of the same item. That is not hypothetical: with a deadline short
+                # enough that every run times out, the fallbacks plus Lambda's own async retries
+                # stack up to seven concurrent investigations of one item. Re-raising instead leaves
+                # the outcome to the run already in flight, which writes its own case row, and keeps
+                # the timeout visible rather than papered over by a duplicate that looks like a
+                # recovery.
                 logger.error(
                     "ingress-gateway invoke timed out after %.0fs (%s); the runtime invocation is "
                     "still in flight and will persist its own result — NOT falling back, a fallback "

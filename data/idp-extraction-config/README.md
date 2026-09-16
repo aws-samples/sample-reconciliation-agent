@@ -8,21 +8,20 @@ contract; this is one configuration that satisfies it.
 
 ## Why it is in the repo
 
-It used to live **only** in the pipeline deployment's DynamoDB configuration table. Nothing here
-described it, so it could not be reviewed, diffed or rebuilt — and it drifted.
+Its other home is the pipeline deployment's DynamoDB configuration table. Live there alone, with
+nothing in the repo describing it, it cannot be reviewed, diffed or rebuilt — so it drifts.
 
-The drifted configuration classified a paydown notice as `LoanPrincipalPaymentNotice` and emitted
-`NoticeDate` (in US month-first order), `EffectiveDate`, `RecipientShareAmount` and
-`Borrower.BorrowerName`. It never extracted `reference` or `fund` at all. Meanwhile the contract, the
-mapper and every test in this repo agreed with each other and passed. The hook reads by **literal key
-name**, so extraction found the right values, emitted them under names nothing read, and every field
-arrived as `fields_unavailable` — which the agent reads as "this notice class does not carry that
-field", not as a fault. The two evidence steps that came back empty were the two whose inputs were
-never extracted.
+Drift looks like this. A configuration classifies a paydown notice as `LoanPrincipalPaymentNotice`
+and emits `NoticeDate` (in US month-first order), `EffectiveDate`, `RecipientShareAmount` and
+`Borrower.BorrowerName`, and never extracts `reference` or `fund` at all. Meanwhile the contract, the
+mapper and every test in this repo agree with each other and pass. The hook reads by **literal key
+name**, so extraction finds the right values, emits them under names nothing reads, and every field
+arrives as `fields_unavailable` — which the agent reads as "this notice class does not carry that
+field", not as a fault. The evidence steps that come back empty are the ones whose inputs were never
+extracted, and nothing fails anywhere, because there is nothing to compare against.
 
-Nothing failed anywhere, because there was nothing to compare. That is what this file fixes:
-`tests/input_corpus/test_extraction_config.py` holds it against the contract and against the corpus
-ground truth, in both directions.
+That is what tracking the file here buys: `tests/input_corpus/test_extraction_config.py` holds it
+against the contract and against the corpus ground truth, in both directions.
 
 ## What it does NOT cover
 
@@ -44,6 +43,23 @@ python3 scripts/push_idp_extraction_config.py --table idp-configuration-table-XX
 
 The script backs the previous configuration up to `Config#<name>-prepush-<UTC>` (marked inactive)
 before writing, and prints the change per class and per field key.
+
+## Checking it
+
+`--check` writes nothing and **exits non-zero** when the deployed classes are not this artifact:
+
+```bash
+python3 scripts/push_idp_extraction_config.py --table idp-configuration-table-XXXXXXXX \
+    --config-name Recon-IDP --profile <profile> --region us-east-1 --check
+```
+
+Safe to run against a live deployment and suitable for CI — it reuses the same diff a push would apply,
+so the gate cannot disagree with the thing it guards.
+
+This is the only check that can see the drift this file exists to prevent.
+`tests/input_corpus/test_extraction_config.py` holds the **artifact** against the contract and the corpus,
+which is a different question: it passes whether or not the artifact is what is actually deployed. Until
+`--check` runs somewhere automatic, the two can be far apart with everything green.
 
 ⚠️ **A push does not re-extract anything.** Documents already processed keep the fields they were
 extracted with, so a notice that failed to ingest before a push still has no usable date after one.

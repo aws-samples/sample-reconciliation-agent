@@ -77,12 +77,8 @@ async function getMemoryStrategies(memoryId: string): Promise<StrategyInfo[]> {
     }
   }
 
-  // Strategy names are deterministic based on CDK deployment
-  // Pattern: {strategy_name}-{random_suffix}
-  // We need to list memory records to discover actual strategy IDs
-
-  // For now, use the known strategy ID patterns from the deployed memory
-  // These are discovered at runtime by listing records
+  // Strategy ids carry a per-deployment suffix: {strategy_name}-{random_suffix}. Start from the
+  // names the stack declares, then resolve each to the id actually present by listing records below.
   const strategies: StrategyInfo[] = [
     { type: 'USER_PREFERENCE', id: 'user_preference_extraction' },
     { type: 'SEMANTIC', id: 'semantic_fact_extraction' },

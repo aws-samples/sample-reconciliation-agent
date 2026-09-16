@@ -6,7 +6,7 @@ Registered as the ``set-draw-status`` tool on the AgentCore Gateway. The authori
 per reference) so the autonomous-execution and human-approve paths can overlap safely.
 
 Every caller reaches this Lambda THROUGH the AgentCore Gateway — there is no direct-invoke
-path — and the gateway is the trust boundary (verified live in ENFORCE mode, 2026-07-26):
+path — and the gateway is the trust boundary, enforced by two independent gates there:
   * **AgentCore Policy (Cedar)**: ``recon_write_gate`` permits agent/worker writes only when
     ``context.input.confidence >= threshold``; ``recon_write_human`` permits the BFF
     principal (a human decision is the authorization — no confidence argument).

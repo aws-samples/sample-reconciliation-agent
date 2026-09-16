@@ -84,10 +84,10 @@ def test_empty_prescribed_raises() -> None:
 def test_an_undeclared_step_id_is_ignored_and_reported_not_raised() -> None:
     """A model that invents a step id must not destroy the investigation that produced it.
 
-    Raising here costs a whole run, as it did live on 2026-09-02: the agent reported
-    ``account_name_match`` for a skill declaring ``expected_entry_match``, ``score_proposal``
-    propagated the ValueError out of the handler, and ~7 minutes plus several hundred tool calls were
-    discarded — the case sat in IN_PROGRESS with no proposal and nothing to tell the analyst why.
+    Raising here costs a whole run, and it does happen live: the agent reports ``account_name_match``
+    for a skill declaring ``expected_entry_match``, ``score_proposal`` propagates the ValueError out of
+    the handler, and minutes of work plus several hundred tool calls are discarded — the case sits in
+    IN_PROGRESS with no proposal and nothing to tell the analyst why.
 
     The invented id is not scoreable (it names no prescribed step), so it is dropped from the
     arithmetic and listed in ``undeclared_step_ids``. The prescribed step it was probably meant to
@@ -158,8 +158,8 @@ def test_the_last_report_for_a_step_wins() -> None:
 def test_trace_entries_that_are_not_evidence_steps_are_ignored() -> None:
     """skill_load/tool_call/propose entries carry no step_id and must not raise or count.
 
-    These entries also set no ``confidence`` at all — the scorer never looked at it, and after
-    2026-09-04 nothing writes it, so there is no self-reported number here to outrank the evidence.
+    These entries also set no ``confidence`` at all — the scorer does not read it and nothing writes
+    it, so there is no self-reported number here to outrank the evidence.
     """
     prescribed = _prescribed(("a", True))
     steps = [

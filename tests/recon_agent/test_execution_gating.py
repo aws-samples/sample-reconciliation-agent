@@ -86,8 +86,8 @@ def test_write_failure_escalates_with_failed_outcome():
 
 
 # A transport that DEGRADES a failure into a returned {"error": ...} dict instead of raising must
-# not be read as a completed write. gateway_mcp did exactly that for anyio-wrapped denials until
-# 2026-08-09, so "the invoker didn't raise" was never proof the ledger changed.
+# not be read as a completed write. An anyio-wrapped denial is exactly the shape that arrives that
+# way, so "the invoker didn't raise" is no proof the ledger changed.
 
 
 def test_returned_error_dict_is_a_failure_not_an_execution():

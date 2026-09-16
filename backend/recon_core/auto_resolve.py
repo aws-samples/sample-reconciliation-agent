@@ -53,14 +53,14 @@ def autonomous_execute(
     # already checked the threshold; the policy is the independent hard guardrail (defense in depth).
     # NOTE: must be a FLOAT so JSON carries a decimal point ("100.0") — the gateway types
     # context.input.confidence as a Cedar decimal and rejects bare integers ("Parameter format
-    # error: numeric parameters must include a decimal point"). Verified live 2026-07-25.
+    # error: numeric parameters must include a decimal point").
     invocation = {**action, "confidence": float(int(round(float(proposal.confidence) * 100)))}
     try:
         result = invoker(invocation)
-        # "The invoker did not raise" is NOT proof the ledger was written. A transport that
-        # degrades a failure into a returned {"error": ...} dict (gateway_mcp did exactly that for
-        # anyio-wrapped denials) would otherwise be read as a successful write and auto-resolve the
-        # case with nothing behind it. Treat a result carrying an error as the failure it is.
+        # "The invoker did not raise" is NOT proof the ledger was written. A transport that degrades
+        # a failure into a returned {"error": ...} dict — which is what an anyio-wrapped denial looks
+        # like coming out of gateway_mcp — would otherwise read as a successful write and auto-resolve
+        # the case with nothing behind it. Treat a result carrying an error as the failure it is.
         if isinstance(result, dict) and result.get("error"):
             if result.get("denied"):
                 raise ToolDenied(str(result["error"]))

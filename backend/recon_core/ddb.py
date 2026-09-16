@@ -41,34 +41,3 @@ class ItemStore:
         if "Item" not in resp:
             raise KeyError(f"item {item_id} not found")
         return ReconItem.model_validate(resp["Item"])
-
-    def put_and_detect_reprocess(self, item: ReconItem) -> str:
-        """Write an item, distinguishing first-ingest / reprocess / duplicate.
-
-        Used by the IDP hook, where ``item_id`` is filename-derived so a genuine reprocess (a
-        NEW IDP run of the same document) collides with the original ingest. The run identity
-        lives in ``attributes.idp_execution_arn``:
-
-        - no existing row                         -> write, return ``"created"``
-        - existing row, DIFFERENT execution arn   -> overwrite, return ``"reprocessed"``
-        - existing row, SAME execution arn         -> no write, return ``"duplicate"``
-          (a re-delivered completion event — preserves the original idempotency guard)
-
-        An existing row with an empty stored arn is treated as reprocess when the incoming arn
-        is non-empty, so pre-existing items (written before this field existed) re-drive once.
-
-        :param item: the freshly mapped ReconItem (its attributes carry idp_execution_arn).
-        :returns: one of ``"created"``, ``"reprocessed"``, ``"duplicate"``.
-        """
-        incoming_arn = str(item.attributes.get("idp_execution_arn") or "")
-        resp = self._table.get_item(Key={"item_id": item.item_id})
-        existing = resp.get("Item")
-        if existing is None:
-            self._table.put_item(Item=item.model_dump())
-            return "created"
-        existing_arn = str((existing.get("attributes") or {}).get("idp_execution_arn") or "")
-        if incoming_arn and incoming_arn == existing_arn:
-            return "duplicate"
-        # Different (or newly-known) run id -> genuine reprocess: refresh the item in place.
-        self._table.put_item(Item=item.model_dump())
-        return "reprocessed"

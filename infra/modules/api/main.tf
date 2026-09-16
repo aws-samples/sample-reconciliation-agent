@@ -1,9 +1,10 @@
 ####################################################################################
 # BFF module: skills-catalog Lambda on a JWT-protected route of the shared HTTP API.
 #
-# The former cases BFF Lambda (queue/approve/reject over JWT) was removed: the deployed UI's
-# decisions run in the frontend's same-origin BFF routes, which act through the egress
-# gateway's platform tools (recon_update_status, set_draw_status) — one HITL code path.
+# The skills catalog is deliberately the WHOLE of this API's surface. Case decisions
+# (queue/approve/reject) do not belong here: they run in the frontend's same-origin BFF routes,
+# which act through the egress gateway's platform tools (recon_update_status, set_draw_status), so
+# there is exactly one HITL code path. Adding a decision route here would create a second.
 ####################################################################################
 
 # The Lambda deployment zip is built once by the shared lambda-package module (root contains
@@ -45,9 +46,10 @@ resource "aws_iam_role_policy" "skills" {
         # the subnet and the security group it attaches, so IAM evaluates it against those ARNs
         # too. Narrowing this to `network-interface/*` makes Lambda's CreateFunction pre-flight
         # check fail with "The provided execution role does not have permissions to call
-        # CreateNetworkInterface on EC2" — a from-scratch-only failure, since an existing
-        # function is never re-validated (observed live on the 2026-08-08 rebuild). Matches the
-        # scoping used by the sibling gl-mock/idp-hook/recon-agent modules.
+        # CreateNetworkInterface on EC2". That failure only appears when the function is created
+        # from scratch — an existing function is never re-validated — so it is easy to introduce
+        # and not notice. Matches the scoping used by the sibling gl-mock/idp-hook/recon-agent
+        # modules.
         Effect   = "Allow"
         Action   = ["ec2:CreateNetworkInterface", "ec2:DeleteNetworkInterface"]
         Resource = "arn:aws:ec2:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:*"

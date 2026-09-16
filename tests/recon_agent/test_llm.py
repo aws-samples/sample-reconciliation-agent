@@ -2,14 +2,18 @@
 and classify_with_consistency (self-consistency majority vote).
 
 The Strands call is replaced by the ``caller`` seam — ``callable(*, model_id, system, prompt,
-max_tokens, temperature) -> (text, stop_reason)`` — so the prompt assembly, the retries and the
+max_tokens, temperature) -> (text, stop_reason, usage)`` — so the prompt assembly, the retries and the
 vote are exercised without a live Bedrock model.
+
+Token usage flowing through that seam has its own file (``test_runtime_token_usage.py``); the fake
+here returns an empty usage dict, which is what a reply carrying no metrics reports.
 """
 
 import json
 
 import pytest
 
+import llm
 from backend.recon_core.schema import ReconItem
 from llm import _result_text, classify_with_consistency, extract_json, strands_json
 
@@ -31,7 +35,7 @@ class _FakeCaller:
         self._reject_temperature = reject_temperature
 
     def __call__(self, *, model_id, system, prompt, max_tokens, temperature):
-        """Record the attempt and return the next canned ``(text, stop_reason)``."""
+        """Record the attempt and return the next canned ``(text, stop_reason, usage)``."""
         self.caps.append(max_tokens)
         self.temps.append(temperature)
         if self._reject_temperature and temperature is not None:
@@ -40,9 +44,11 @@ class _FakeCaller:
             )
         self.prompts.append(prompt)
         nxt = self._replies.pop(0)
+        # A two-element canned reply is a raw/truncated (text, stop_reason) pair; this file asserts
+        # nothing about cost, so it reports no usage counts at all rather than inventing zeros.
         if isinstance(nxt, tuple):
-            return nxt
-        return json.dumps(nxt), "end_turn"
+            return (*nxt, {})
+        return json.dumps(nxt), "end_turn", {}
 
 
 ITEM = ReconItem(
@@ -141,19 +147,82 @@ def test_strands_json_fails_loudly_when_the_retry_is_also_truncated():
     assert len(fc.caps) == 2  # exactly one retry, not a loop
 
 
-def test_strands_json_drops_temperature_when_model_rejects_it():
-    # Sonnet 5 deprecated `temperature`; strands_json must retry WITHOUT it rather than 500.
+@pytest.fixture(autouse=True)
+def _forget_learned_temperature_rejections():
+    """`_NO_TEMPERATURE` is module state; a learned entry would leak between tests."""
+    llm._NO_TEMPERATURE.clear()
+    yield
+    llm._NO_TEMPERATURE.clear()
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "us.anthropic.claude-sonnet-5",
+        "global.anthropic.claude-sonnet-5",
+        "us.anthropic.claude-opus-5",
+        "us.anthropic.claude-fable-5-1",
+        "us.anthropic.claude-opus-4-8",
+        "US.ANTHROPIC.CLAUDE-SONNET-5",  # id casing must not decide this
+    ],
+)
+def test_temperature_is_never_sent_to_a_model_that_removed_it(model_id):
+    """The point of the change: ONE call, not a doomed probe plus a retry.
+
+    Every id this platform can be configured with is in this generation, so learning the fact per
+    container meant a guaranteed ValidationException on every cold start — and the retry it forced is
+    what a real case died on when that retry hit a transient ServiceUnavailableException.
+    """
     fc = _FakeCaller([{"ok": 1}], reject_temperature=True)
-    out = strands_json(
-        model_id="us.anthropic.claude-sonnet-5-reject-temp",
-        system="s",
-        prompt="p",
-        temperature=0.7,
-        caller=fc,
-    )
+
+    out = strands_json(model_id=model_id, system="s", prompt="p", temperature=0.7, caller=fc)
+
     assert out == {"ok": 1}
-    # First attempt sent temperature (rejected); the retry omitted it.
+    assert fc.temps == [None], "sent temperature to a model known to reject it"
+    assert len(fc.caps) == 1, "made a wasted probe call"
+
+
+def test_temperature_is_sent_to_a_model_that_accepts_it():
+    """Omission is the default, not the only behaviour — sampling diversity still works elsewhere."""
+    fc = _FakeCaller([{"ok": 1}])
+
+    strands_json(
+        model_id="amazon.nova-pro-v1:0", system="s", prompt="p", temperature=0.7, caller=fc
+    )
+
+    assert fc.temps == [0.7]
+
+
+def test_an_unknown_model_that_rejects_temperature_is_still_learned():
+    """The runtime fallback is retained for an id the markers do not cover (a future model)."""
+    fc = _FakeCaller([{"ok": 1}], reject_temperature=True)
+
+    out = strands_json(
+        model_id="vendor.some-future-model-v9", system="s", prompt="p", temperature=0.7, caller=fc
+    )
+
+    assert out == {"ok": 1}
+    # Probed once, rejected, retried without it — and remembered.
     assert fc.temps == [0.7, None]
+    assert "vendor.some-future-model-v9" in llm._NO_TEMPERATURE
+
+
+def test_a_learned_rejection_suppresses_temperature_on_the_next_call():
+    """Learning must actually save the second container-local call, not just record a fact."""
+    llm._NO_TEMPERATURE.add("vendor.some-future-model-v9")
+    fc = _FakeCaller([{"ok": 1}], reject_temperature=True)
+
+    strands_json(
+        model_id="vendor.some-future-model-v9", system="s", prompt="p", temperature=0.7, caller=fc
+    )
+
+    assert fc.temps == [None]
+
+
+def test_accepts_temperature_is_decided_without_a_call():
+    assert llm._accepts_temperature("us.anthropic.claude-sonnet-5") is False
+    assert llm._accepts_temperature("us.anthropic.claude-sonnet-4-5") is True
+    assert llm._accepts_temperature("amazon.nova-pro-v1:0") is True
 
 
 def test_classify_with_consistency_majority_vote_and_prompt():
@@ -166,11 +235,11 @@ def test_classify_with_consistency_majority_vote_and_prompt():
             {"name": "unknown", "reasoning": "unsure"},
         ]
     )
-    name, reasoning = classify_with_consistency(
+    vote = classify_with_consistency(
         model_id="m", system="s", item=ITEM, catalog=CATALOG, caller=fc
     )
-    assert name == "timing"
-    assert reasoning in ("value date off", "again")
+    assert vote.name == "timing"
+    assert vote.reasoning in ("value date off", "again")
     # The prompt carries the catalog AND the item's IDP-extracted data.
     assert "timing breaks" in fc.prompts[0]
     assert "26-Dec-2026" in fc.prompts[0]
@@ -179,12 +248,12 @@ def test_classify_with_consistency_majority_vote_and_prompt():
 
 
 def test_the_classifier_prompt_asks_for_no_confidence():
-    """The k-sample vote stays; the two numbers it produced are gone.
+    """The k-sample vote yields a class and its reasoning, and no number.
 
-    Neither was read: the agreement fraction was already computed and discarded at the call site, and
-    the verbalized mean fed a floor whose only production effect was a mass false-negative. A prompt
-    that still asks for a number nobody reads invites a future reader to start reading it — and the
-    parse would ``KeyError`` the moment a model omitted the key it was no longer relied on for.
+    Neither candidate number would be read: an agreement fraction is discarded at the call site, and a
+    self-reported mean feeding a floor only ever produces mass false negatives. A prompt that asks for
+    a number nobody reads invites a future reader to start reading it — and the parse would
+    ``KeyError`` the moment a model omitted a key nothing depends on.
     """
     fc = _FakeCaller([{"name": "timing", "reasoning": "r"}] * 3)
     classify_with_consistency(model_id="m", system="s", item=ITEM, catalog=CATALOG, caller=fc)

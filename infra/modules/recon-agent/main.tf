@@ -1,8 +1,16 @@
 ####################################################################################
 # Recon-agent module: the single Tier-2 agent, batteries included.
-# Ships with AgentCore Gateway (Cognito JWT inbound + inference/LLM + IDP targets),
+# Ships with the AgentCore egress Gateway (SigV4 inbound, plus the tool targets),
 # a fully-managed Bedrock Knowledge Base, and AgentCore Memory. The arm64 container image
 # is built by CodeBuild (Terraform is the deploy driver; the AgentCore CLI is NOT used).
+#
+# ⚠️ The AGENT has NO coupling surface to the document pipeline at all — no MCP target, no bucket
+# or table ARNs, no secret. Everything it needs about an extracted document is already on recon's
+# own notice row: the ingest hook records the per-section classification and the extracted field
+# values there, so the agent reads them through `notices___search_notices` like any other evidence.
+# That rule is about the agent, not about the whole deployment: the console's Documents tab still
+# reaches into the pipeline for the raw document BYTES (read-only S3 on the input bucket, see
+# modules/frontend-ecs), because documents are deliberately not duplicated into recon storage.
 ####################################################################################
 
 data "aws_caller_identity" "current" {}
@@ -10,34 +18,6 @@ data "aws_caller_identity" "current" {}
 locals {
   account_id = data.aws_caller_identity.current.account_id
   image_uri  = "${aws_ecr_repository.agent.repository_url}:latest"
-
-  # IDP MCP client-credentials config (token_url/client_id/client_secret/scope), decoded once
-  # here to build the outbound OAuth2 credential provider the gateway target needs to
-  # authenticate to IDP's MCP server. The same raw JSON is also stored verbatim in Secrets
-  # Manager below for the agent's own direct idp_client.py calls — two independent consumers
-  # of one secret.
-  idp_mcp_cfg       = var.idp_mcp_secret_json != "" ? jsondecode(var.idp_mcp_secret_json) : null
-  idp_provider_name = "${var.name_prefix}-idp-mcp-provider"
-  idp_target_name   = "document-extraction"
-  idp_auth_endpoint = local.idp_mcp_cfg != null ? replace(local.idp_mcp_cfg.token_url, "/oauth2/token", "/oauth2/authorize") : ""
-
-  # ⚠️ The issuer is NOT derivable from anything else here, and getting it wrong fails at token
-  # validation rather than at apply.
-  #
-  # AgentCore validates a minted token's `iss` claim against the issuer declared on the provider.
-  # Cognito's issuer is the cognito-idp form (https://cognito-idp.<region>.amazonaws.com/<poolId>),
-  # which is a DIFFERENT HOST from the hosted-UI domain that serves the token endpoint — in this
-  # deployment, pool us-east-1_GJxZkE3aX versus domain idp-unified-oji4rxy7. Neither the pool id nor
-  # that host appears in token_url or in the gateway URL, so it cannot be computed.
-  #
-  # The retired shim discovered it at apply time by POSTing for a token with curl and base64-decoding
-  # the JWT payload — four host tools (curl, jq, base64, cut) for one static string. It is deployment
-  # config, so it now travels with the rest of the IDP config in idp_mcp_secret_json.
-  idp_issuer = local.idp_mcp_cfg != null ? try(local.idp_mcp_cfg.issuer, "") : ""
-
-  # The client secret is addressed inside the existing Secrets Manager document by key, so the
-  # CloudFormation template references it instead of embedding the plaintext.
-  idp_client_secret_json_key = "client_secret"
 }
 
 # ---------------------------------------------------------------------------------
@@ -256,6 +236,24 @@ resource "aws_iam_role_policy" "agent" {
         Resource = [var.cases_table_arn, "${var.cases_table_arn}/index/*", var.audit_table_arn]
       },
       {
+        # Signal completion of a backgrounded investigation to the Step Functions execution that is
+        # paused on its task token. Resource "*" is not laxity: a task token is an opaque, short-lived
+        # credential and is not addressable by ARN, so these three actions cannot be scoped further.
+        # What bounds them is that a token is single-use and only ever handed to the container that
+        # was asked to do the work.
+        #
+        # The PLATFORM calls these, never the model — they are not gateway tools. Cedar denies the
+        # agent role the status-transition tool for the same reason: a run must not be able to declare
+        # its own outcome.
+        Effect = "Allow"
+        Action = [
+          "states:SendTaskSuccess",
+          "states:SendTaskFailure",
+          "states:SendTaskHeartbeat",
+        ]
+        Resource = "*"
+      },
+      {
         Effect   = "Allow"
         Action   = ["bedrock:Retrieve", "bedrock:RetrieveAndGenerate"]
         Resource = "*"
@@ -315,13 +313,6 @@ resource "aws_iam_role_policy" "agent" {
         Condition = { StringLike = { "s3:prefix" = ["skills/*"] } }
       },
       {
-        # Read the IDP MCP client-credentials secret to mint the pull-path bearer token.
-        # Guarded resource so the policy is valid when the secret is absent.
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = var.idp_mcp_secret_json != "" ? aws_secretsmanager_secret.idp_mcp[0].arn : "arn:aws:secretsmanager:*:*:secret:${var.name_prefix}-idp-mcp-*"
-      },
-      {
         Effect   = "Allow"
         Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
         Resource = "arn:aws:logs:${var.region}:${local.account_id}:log-group:*"
@@ -333,13 +324,14 @@ resource "aws_iam_role_policy" "agent" {
         #
         # Without it, an agent on the unified destination loses its spans ENTIRELY rather than
         # falling back: AgentCore still creates the `spans` log stream (so the destination looks
-        # configured), X-Ray cannot write to it, and because the agent is no longer on `aws/spans`
-        # nothing lands there either except the platform's own `AgentCore.Runtime.Invoke` span.
-        # Observed live 2026-09-07: a full 200-second investigation produced exactly ONE span, the
-        # platform's, while the agent's `spans` stream sat at 0 bytes having never received an event.
-        # Every other signal looked healthy -- the evaluation config ACTIVE at 100% sampling, ADOT
-        # 0.19.0 installed, Transaction Search ACTIVE -- and the only visible symptom was cases
-        # reporting "No evaluation recorded", because online evaluation cannot score one span.
+        # configured), X-Ray cannot write to it, and an agent on the unified destination does not
+        # write to `aws/spans`, so nothing lands there either except the platform's own
+        # `AgentCore.Runtime.Invoke` span. A
+        # multi-minute investigation then produces exactly ONE span, the platform's, while the
+        # agent's `spans` stream sits at 0 bytes having never received an event. Every other signal
+        # looks healthy -- evaluation config ACTIVE at 100% sampling, ADOT installed, Transaction
+        # Search ACTIVE -- and the only visible symptom is cases reporting "No evaluation recorded",
+        # because online evaluation cannot score one span.
         #
         # Scoped to this agent's log groups rather than "*": the delivery target is the agent's own
         # group, so a wildcard would grant the ability to rewrite resource policies on unrelated log
@@ -394,12 +386,16 @@ resource "aws_iam_role_policy" "agent" {
 #
 # CUSTOM rather than the built-in SEMANTIC type because the built-in extraction prompt is written for
 # a general-purpose personal assistant — "extract meaningful information about the users". Fed a
-# reconciliation decision it produced records like "The user made an analyst decision for
-# reconciliation item manual-scenario1-1-jahqpu with a bulk status of CLOSED_NO_ACTION on
-# 2026-09-08": an audit-trail entry the DynamoDB ledger already holds, which generalizes to nothing
-# and displaces the records that would inform a future item. The module explains why only
-# EXTRACTION is overridden and that `append_to_prompt` REPLACES the default instructions despite its
-# name, which is why the prompt below is a complete instruction set.
+# reconciliation decision it produces records of the form "The user made an analyst decision for
+# reconciliation item <item_id> with a bulk status of CLOSED_NO_ACTION on <date>": an audit-trail
+# entry the DynamoDB ledger already holds, which generalizes to nothing
+# and displaces the records that would inform a future item.
+#
+# Only EXTRACTION is overridden. Consolidation's Add/Update/Skip behaviour is already what we want,
+# and AWS is explicit that editing that prompt (e.g. renaming AddMemory) breaks the pipeline. When
+# extraction returns an empty list, nothing reaches consolidation, so this is sufficient. The module
+# also documents that `append_to_prompt` REPLACES the default instructions despite its name, which is
+# why the prompt it receives is a complete instruction set.
 module "memory" {
   source = "../agentcore-memory"
 
@@ -531,20 +527,19 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     AUDIT_TABLE = var.audit_table
     SKILLS_DIR  = "/app/skills"
     # Promote the worker's W3C baggage onto this runtime's spans (same allow-list as the Lambda and
-    # the harness). Verified 2026-08-04: the baggage header propagates and the trace links either
-    # way, but without this the recon.* keys are absent from the container's spans.
+    # the harness). The baggage header propagates and the trace links either way without it, but the
+    # recon.* keys are then absent from the container's spans, so they cannot be filtered on.
     OTEL_BAGGAGE_SPAN_ATTRIBUTE_KEYS = var.otel_baggage_span_attribute_keys
     # Deliver spans to THIS agent's own log group (the `spans` log stream in
     # /aws/bedrock-agentcore/runtimes/<agent_id>-<endpoint>) rather than the shared `aws/spans`.
     #
-    # Set explicitly rather than left to the platform default. Agents created on or after
-    # 2026-07-20 in a supported Region default to the unified destination, and this one does -- but
-    # the default alone is not observable from Terraform, and relying on it left the destination
-    # ambiguous while spans were going nowhere. Stating it makes the intent reviewable and survives
-    # the agent being recreated in a Region whose support post-dates it.
+    # Set explicitly rather than left to the platform default. New agents in a supported Region
+    # default to the unified destination anyway, but the default is not observable from Terraform:
+    # leaning on it leaves the destination ambiguous exactly when spans are going nowhere. Stating
+    # it makes the intent reviewable and survives the agent being recreated in another Region.
     #
     # Requires all three of: Transaction Search enabled with segments to CloudWatch Logs, ADOT
-    # >= 0.18.0 in the image (requirements.txt pins 0.19.0), and logs:PutResourcePolicy on this
+    # >= 0.18.0 in the image (pinned in requirements.txt), and logs:PutResourcePolicy on this
     # role -- see the IAM statement above for what happens when that last one is missing.
     UNIFIED_TRACES_DESTINATION_ENABLED = "true"
     # ⚠️ Sample EVERY trace. Without this the ADOT distro uses the X-Ray CENTRALIZED sampler, which
@@ -552,13 +547,12 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     # with a reservoir of 1, so ~95% of this agent's traces are marked not-sampled and never
     # exported.
     #
-    # The failure that produced is worth knowing, because it looks like anything except sampling:
-    # spans ARE created (log records carry a real trace context) but nothing reaches the span
-    # destination, so a trace shows exactly ONE span -- the platform's own AgentCore.Runtime.Invoke,
-    # which the platform samples itself -- with 0 tokens and no gen-ai spans. Whether a given session
-    # survived was pure dice: long investigations create many traces and usually got a few through,
-    # short ones usually got none, which reads convincingly as "short sessions lose their spans" and
-    # is not that at all.
+    # That failure looks like anything except sampling: spans ARE created (log records carry a real
+    # trace context) but nothing reaches the span destination, so a trace shows exactly ONE span --
+    # the platform's own AgentCore.Runtime.Invoke, which the platform samples itself -- with 0 tokens
+    # and no gen-ai spans. Which sessions survive is pure dice: long investigations create many
+    # traces and usually get a few through, short ones usually get none, which reads convincingly as
+    # "short sessions lose their spans" and is not that at all.
     #
     # Sampling is the wrong tool here regardless of the rate. These traces feed ONLINE EVALUATION,
     # which can only score a session whose spans it can see, so a 5% sample silently discards 95% of
@@ -569,8 +563,6 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     # model never reads env — its counterparty-email tool call carries no token and is blocked
     # by the interceptor. Only platform code (notify.py) injects it from here.
     EMAIL_CONFIRMATION_TOKEN = var.email_confirmation_token
-    IDP_MCP_SECRET_ARN       = var.idp_mcp_secret_json != "" ? aws_secretsmanager_secret.idp_mcp[0].arn : ""
-    IDP_MCP_ENDPOINT         = var.idp_gateway_target_url # the IDP MCP URL for pull_idp_results
     # Live S3 skills + system prompt (editable via the UI, ~60s TTL) and the model the
     # classify/investigate loop calls via the converse API.
     ASSETS_BUCKET     = var.assets_bucket
@@ -582,7 +574,7 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     AGENT_MODEL_PARAM = var.agent_model_id_param
     # Straight-through processing: the computed evidence-completeness score (satisfied / prescribed
     # required steps for the classified skill) >= this SSM threshold -> auto-resolve. There is no
-    # composite: every model-reported confidence number was deleted on 2026-09-04.
+    # composite, and deliberately no model-reported confidence number anywhere in the decision.
     AUTO_RESOLVE_PARAM = var.auto_resolve_param
     LESSONS_TABLE      = var.lessons_table
     # Auto-resolve notification recipient, as a contact ID plus the table to resolve it in. The mail
@@ -610,7 +602,7 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
 }
 
 # ---------------------------------------------------------------------------------
-# AgentCore Gateway (Cognito JWT inbound)
+# AgentCore egress Gateway (AWS_IAM / SigV4 inbound)
 # ---------------------------------------------------------------------------------
 
 resource "aws_iam_role" "gateway" {
@@ -628,8 +620,8 @@ resource "aws_bedrockagentcore_gateway" "this" {
   name     = "${var.name_prefix}-gateway"
   role_arn = aws_iam_role.gateway.arn
   # EGRESS tools gateway: inbound is AWS_IAM (SigV4). Only the recon Agent Runtime calls it,
-  # signing with its execution role — no Cognito client/secret to mint. (Was CUSTOM_JWT; the
-  # audit found no live JWT caller of the tools gateway.)
+  # signing with its execution role — there is no JWT caller, and so no OAuth client/secret to
+  # mint or rotate for it.
   authorizer_type = "AWS_IAM"
 
   # DEBUG surfaces the real downstream error in tool responses (dev) — the default sanitizes
@@ -659,7 +651,7 @@ resource "aws_bedrockagentcore_gateway" "this" {
     }
   }
 
-  # Cedar Policy engine attached natively (was a null_resource + update-gateway CLI step).
+  # Cedar Policy engine, attached at create time rather than by a follow-up update-gateway call.
   policy_engine_configuration {
     arn  = aws_bedrockagentcore_policy_engine.this.policy_engine_arn
     mode = var.policy_enforcement_mode
@@ -750,9 +742,9 @@ resource "aws_lambda_function" "gateway_interceptor" {
     variables = {
       # The evidence guard reads the VERDICT off this row, which the provenance check already
       # fetches — so the whole guard costs no additional read. The notices table is deliberately NOT
-      # here any more: the interceptor used to look up the cited notice and read its extraction alert
-      # count, which only covered one of the two routes a document can take. The verdict is decided
-      # at proposal time instead, over whatever the investigation actually cited.
+      # here: looking up the cited notice to read its extraction alert count would cover only one of
+      # the two routes a document can take. The verdict is decided at proposal time instead, over
+      # whatever the investigation actually cited.
       CASES_TABLE      = var.cases_table
       INTERCEPTOR_MODE = var.interceptor_mode
       # Email human-confirmation gate: the interceptor allows sendSharedMailboxMail only when the
@@ -788,175 +780,9 @@ resource "aws_iam_role_policy" "gateway_interceptor_invoke" {
   })
 }
 
-# IDP (document-extraction) Gateway target — only when an endpoint is provided. Described by
-# function; the endpoint is a per-deployment variable so no vendor specifics are baked in.
-# IDP MCP client-credentials config, stored for the agent to mint its bearer token. Guarded so it's a
-# no-op when unset.
-#
-# This is the entire coupling surface the AGENT has to the document pipeline: one MCP target, no bucket
-# or table ARNs. That rule is about the agent, not about the whole deployment. The console's Documents
-# tab reads that pipeline's GraphQL API directly, server-side, on a signed-in human's click -- see the
-# field-scoped appsync:GraphQL grant in modules/frontend-ecs. Two named read fields on a human-triggered
-# path is a narrower dependency than mirroring every document event into a recon-owned table would be,
-# and it cannot act on its own the way an agent tool can.
-resource "aws_secretsmanager_secret" "idp_mcp" {
-  #checkov:skip=CKV_AWS_149:Encrypted at rest with the AWS-managed Secrets Manager key; a customer-managed CMK adds key-management overhead not warranted for a demo integration config.
-  #checkov:skip=CKV2_AWS_57:Automatic rotation is not applicable — this holds static IDP client-credentials config, not a rotatable database/service credential.
-  count = var.idp_mcp_secret_json != "" ? 1 : 0
-  name  = "${var.name_prefix}-idp-mcp"
-}
-
-resource "aws_secretsmanager_secret_version" "idp_mcp" {
-  count         = var.idp_mcp_secret_json != "" ? 1 : 0
-  secret_id     = aws_secretsmanager_secret.idp_mcp[0].id
-  secret_string = var.idp_mcp_secret_json
-}
-
 # ---------------------------------------------------------------------------------
-# IDP document-extraction MCP target, and the OAuth2 credential provider it authenticates with.
-#
-# ⚠️ mcpServer targets support OAuth-CC/none outbound auth ONLY (never IAM), and creating one
-# triggers an implicit synchronization (tools/list) that fails immediately without working
-# credentials — so the target must be created WITH its credential config in the same call. That is
-# why these two are a pair and not independent resources.
-#
-# The TARGET is native: aws 6.62.0 models `mcp { mcp_server { endpoint } }` alongside
-# `credential_provider_configuration { oauth { ... } }`.
-#
-# The CREDENTIAL PROVIDER is CloudFormation, for the same reason as microsoft-graph-obo: the
-# provider resource models no way to declare the authorization-server metadata this needs together
-# with an externally-held client secret. AWS::BedrockAgentCore::OAuth2CredentialProvider does.
-#
-# Both used to be null_resource + AWS CLI, with a `data "external"` reading the provider ARN back at
-# PLAN time. Between them they needed aws, jq, curl, base64 and cut on the machine running
-# Terraform.
-# ---------------------------------------------------------------------------------
-
-resource "aws_cloudformation_stack" "idp_oauth_provider" {
-  count = var.idp_gateway_target_url != "" && var.idp_mcp_secret_json != "" ? 1 : 0
-  name  = "${var.name_prefix}-idp-oauth-provider"
-
-  lifecycle {
-    precondition {
-      # Fail here, at plan, rather than letting AgentCore create a provider whose declared issuer is
-      # the empty string. That provider reaches READY and only fails later, when a minted token's
-      # `iss` claim is validated against it — surfacing as an opaque IDP tool failure at agent
-      # runtime, a long way from its cause.
-      condition     = local.idp_issuer != ""
-      error_message = "idp_mcp_secret_json is missing the \"issuer\" key. It must be Cognito's real issuer (https://cognito-idp.<region>.amazonaws.com/<userPoolId>) — NOT the hosted-UI domain in token_url. Read it from the `iss` claim of a token minted against token_url, or from the IDP stack's user-pool id."
-    }
-  }
-
-  template_body = jsonencode({
-    AWSTemplateFormatVersion = "2010-09-09"
-    Description              = "OAuth2 credential provider for the IDP document-extraction MCP target (managed by Terraform; see infra/modules/recon-agent)."
-
-    Resources = {
-      Provider = {
-        Type = "AWS::BedrockAgentCore::OAuth2CredentialProvider"
-        Properties = {
-          Name                     = local.idp_provider_name
-          CredentialProviderVendor = "CustomOauth2"
-          Oauth2ProviderConfigInput = {
-            CustomOauth2ProviderConfig = {
-              ClientId = local.idp_mcp_cfg.client_id
-              # Referenced, not embedded: the same secret the agent's own idp_client.py reads, so
-              # there is one copy of the credential and the template holds none of it.
-              ClientSecretSource = "EXTERNAL"
-              ClientSecretConfig = {
-                SecretId = aws_secretsmanager_secret.idp_mcp[0].arn
-                JsonKey  = local.idp_client_secret_json_key
-              }
-              OauthDiscovery = {
-                # authorizationServerMetadata rather than a discovery URL: the endpoints live on the
-                # hosted-UI domain while the issuer does not, so no single well-known document
-                # describes both.
-                AuthorizationServerMetadata = {
-                  Issuer                = local.idp_issuer
-                  AuthorizationEndpoint = local.idp_auth_endpoint
-                  TokenEndpoint         = local.idp_mcp_cfg.token_url
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-
-    Outputs = {
-      CredentialProviderArn = {
-        Description = "Provider ARN, referenced by the document-extraction target's oauth config."
-        Value       = { "Fn::GetAtt" = ["Provider", "CredentialProviderArn"] }
-      }
-    }
-  })
-
-  depends_on = [aws_secretsmanager_secret_version.idp_mcp]
-}
-
-resource "aws_bedrockagentcore_gateway_target" "idp" {
-  count = var.idp_gateway_target_url != "" && var.idp_mcp_secret_json != "" ? 1 : 0
-
-  gateway_identifier = aws_bedrockagentcore_gateway.this.gateway_id
-  name               = local.idp_target_name
-  description        = "IDP document-extraction get_results(documentId) via MCP"
-
-  target_configuration {
-    mcp {
-      mcp_server {
-        endpoint = var.idp_gateway_target_url
-      }
-    }
-  }
-
-  credential_provider_configuration {
-    oauth {
-      provider_arn = aws_cloudformation_stack.idp_oauth_provider[0].outputs["CredentialProviderArn"]
-      scopes       = [local.idp_mcp_cfg.scope]
-      grant_type   = "CLIENT_CREDENTIALS"
-    }
-  }
-
-  lifecycle {
-    # Service-managed and undeclarable — see the general_ledger target for the full note.
-    ignore_changes = [metadata_configuration]
-  }
-}
-
-# Drop the retired CLI shims from state without running their destroy provisioners, which would
-# delete the very provider and target being adopted.
-#
-# ⚠️ ONE-TIME MANUAL STEP before the first apply in an environment that already has this provider.
-# `Name` is create-only on the CFN type, so the existing provider cannot be adopted and
-# CreateOauth2CredentialProvider collides on the name:
-#
-#   aws bedrock-agentcore-control delete-oauth2-credential-provider \
-#     --name recon-dev-idp-mcp-provider --region <region>
-#
-# The provider ARN is derived from the name, so the recreated provider gets the same ARN and the
-# imported target below keeps resolving. IDP tool calls fail between the delete and the apply.
-removed {
-  from = null_resource.idp_oauth_provider
-
-  lifecycle {
-    destroy = false
-  }
-}
-
-removed {
-  from = null_resource.idp_gateway_target
-
-  lifecycle {
-    destroy = false
-  }
-}
-
-# ---------------------------------------------------------------------------------
-# Knowledge Base service role.
-#
-# Shared by design: this one role backs the MANAGED knowledge base defined below. It used to back
-# a second, CUSTOMER-managed KB (type = "VECTOR") over an S3 Vectors index, which Phase 3 deleted
-# along with the Lambda tool that read it -- hence the policy below is now S3-read + nothing else.
+# Knowledge Base service role for the MANAGED knowledge base defined below. Its whole policy is
+# one S3 read grant, for the reason spelled out above aws_iam_role_policy.kb.
 # ---------------------------------------------------------------------------------
 
 resource "aws_iam_role" "kb" {
@@ -979,10 +805,10 @@ data "aws_iam_policy_document" "kb_assume" {
 # does that work under its own identity, not this role's. The only thing this role needs is read
 # access to the data-source bucket -- and it needs it BEFORE CreateKnowledgeBase, which probes it.
 #
-# The deleted grants belonged to the customer-managed KB: `s3vectors:QueryVectors` et al. over
-# `${var.name_prefix}-kb-vectors` / `-kb-index`, and InvokeModel on amazon.titan-embed-text-v2:0
-# for the 1024-dimension cosine index it embedded with. If you ever reintroduce a customer-managed
-# KB, note that CreateKnowledgeBase 403s on a missing s3vectors:QueryVectors.
+# Those grants belong to a CUSTOMER-managed KB, which this platform does not have. If one is ever
+# introduced, it needs `s3vectors:QueryVectors` et al. over its own vector bucket/index plus
+# InvokeModel on the embedding model -- and note that CreateKnowledgeBase 403s on a missing
+# s3vectors:QueryVectors rather than reporting the grant by name.
 resource "aws_iam_role_policy" "kb" {
   name = "${var.name_prefix}-kb-policy"
   role = aws_iam_role.kb.id
@@ -1001,16 +827,14 @@ resource "aws_iam_role_policy" "kb" {
 # ---------------------------------------------------------------------------------
 # Bedrock-MANAGED Knowledge Base + connector data source
 #
-# This is the ONLY knowledge base in the platform. It is MANAGED for a hard reason: the AgentCore
-# Gateway `bedrock-knowledge-bases` connector target accepts nothing else -- a customer-managed KB
-# (type = "VECTOR") makes CreateGatewayTarget fail. That constraint is what drove the whole
-# migration.
+# This is the ONLY knowledge base in the platform, and it is MANAGED for a hard reason: the
+# AgentCore Gateway `bedrock-knowledge-bases` connector target accepts nothing else -- a
+# customer-managed KB (type = "VECTOR") makes CreateGatewayTarget fail.
 #
-# It ingests the assets bucket's knowledge-base/ prefix. A second, customer-managed KB over an S3
-# Vectors index used to ingest the same prefix during the coexistence window; Phase 3 deleted it.
-# It could not hold this corpus anyway -- S3 Vectors ignores sidecar metadata FILES over 1024 bytes
-# outright and hard-fails filterable metadata over 2048 bytes, so it indexed 3 of 15 documents. See
-# the note above local.kb_ingest_targets in infra/environments/recon/main.tf.
+# It ingests the assets bucket's knowledge-base/ prefix. An S3 Vectors index could not hold this
+# corpus in any case: it ignores sidecar metadata FILES over 1024 bytes outright and hard-fails
+# filterable metadata over 2048 bytes, which drops most of the documents. See the note above
+# local.kb_ingest_targets in infra/environments/recon/main.tf.
 # ---------------------------------------------------------------------------------
 
 resource "aws_bedrockagent_knowledge_base" "managed" {
@@ -1036,42 +860,33 @@ resource "aws_bedrockagent_knowledge_base" "managed" {
 
 # ⚠️ A MANAGED knowledge base does NOT take an `S3` data source. `CreateDataSource` with
 # type = "S3" fails with `ValidationException: Unsupported data source type for MANAGED knowledge
-# base type` (observed live 2026-08-26). Managed KBs reach S3 through the CONNECTOR data-source
-# type, whose S3 details live in a free-form `connectorParameters` document — and note it wants a
-# bucket NAME, not the bucket ARN that s3_configuration takes.
+# base type`. Managed KBs reach S3 through the CONNECTOR data-source type, whose S3 details live in
+# a free-form `connectorParameters` document — and note it wants a bucket NAME, not the bucket ARN
+# that s3_configuration takes.
 #
 # The provider types `connector_parameters` as a plain string, so it is jsonencode'd here. That
 # means Terraform cannot validate its contents: a typo inside this document is a runtime
 # ValidationException, not a plan error.
 #
-# The service supplies three values of its own for this data source, and all three are DECLARED below
-# so the plan converges. They are, exactly (captured live 2026-09-02):
+# ⚠️ The service supplies three values of its own for this data source, and all three are DECLARED
+# below so the plan converges:
 #
 #     connectorParameters.aclEnabled                          = false
 #     connectorParameters.filterConfiguration.maxFileSizeInMegaBytes = "500"
 #     mediaExtractionConfiguration.imageExtractionConfiguration.imageExtractionStatus = "ENABLED"
 #
-# Until 2026-09-02 none of them were declared, so every plan proposed REMOVING all three, the apply
-# succeeded, and the service put them straight back — a permanently non-empty plan that trained
-# reviewers to skim it.
+# Leaving any of them undeclared does not settle down: the plan proposes REMOVING it, the apply
+# succeeds, the service puts it straight back, and the result is a permanently non-empty plan that
+# teaches reviewers to skim. Declaring them converges — the provider renders `connector_parameters`
+# as a normalized JSON object diff, so ordering and whitespace are not in play, and
+# `media_extraction_configuration` is a fully typed block under
+# `data_source_configuration.managed_knowledge_base_connector_configuration` (NOT under
+# `vector_ingestion_configuration`, where it is easy to look for it).
 #
-# Two earlier notes here were wrong, and correcting them is what made the fix possible:
-#
-#   1. `media_extraction_configuration` is NOT under `vector_ingestion_configuration`. The provider
-#      schema (aws 6.56.0) puts it under
-#      `data_source_configuration.managed_knowledge_base_connector_configuration`. It is a fully typed
-#      block, so it can simply be declared.
-#   2. Declaring the values DOES converge. The old note said `connector_parameters` was "one opaque
-#      string" whose contents Terraform could not tell apart from drift. The provider in fact renders
-#      it as a NORMALIZED JSON object diff (verified in a real plan: it listed exactly the two added
-#      keys), so ordering and whitespace are not in play. What the old note did correctly establish is
-#      that applying the REMOVAL never converges — the service re-adds its defaults. That was never a
-#      test of declaring them.
-#
-# ⚠️ These three values are now OURS, not the service's. If AWS changes a default, this resource shows
-# a diff again — and that is the CORRECT outcome, a service changing behaviour under a deployed system.
-# Do NOT read a future diff here as "the known perpetual no-op": that reading no longer applies, and it
-# is now the only thing standing between a service-side change and a reviewer noticing it.
+# Because these three values are now OURS rather than the service's, a diff appearing here means AWS
+# changed a default — which is the CORRECT outcome, a service changing behaviour under a deployed
+# system. Do NOT dismiss a future diff here as a known perpetual no-op; it is the only thing standing
+# between a service-side change and a reviewer noticing it.
 resource "aws_bedrockagent_data_source" "managed" {
   name              = "${var.name_prefix}-kb-managed-seed"
   knowledge_base_id = aws_bedrockagent_knowledge_base.managed.id
@@ -1130,18 +945,9 @@ resource "aws_bedrockagent_data_source" "managed" {
 # invocation's input — that routes the real dependency edge through the output, so the
 # environment's ingestion job cannot start until this poll has returned.
 #
-# Was a local-exec poll driving the AWS CLI; now the deploy-actions Lambda does the polling in the
-# account. `aws_lambda_invocation` is synchronous and fails the apply on a function error, so the
-# gate behaves exactly as before without needing a CLI on the machine running Terraform.
-# Forget the retired CLI poll (no destroy provisioner; `destroy = false` keeps a no-op out of the
-# plan's DELETE list, which the CI destroy guard matches exactly).
-removed {
-  from = null_resource.managed_kb_data_source_available
-
-  lifecycle {
-    destroy = false
-  }
-}
+# The polling runs in the account, in the deploy-actions Lambda. `aws_lambda_invocation` is
+# synchronous and fails the apply on a function error, so it gates just as a local poll would
+# without needing a CLI on the machine running Terraform.
 
 resource "aws_lambda_invocation" "managed_kb_data_source_available" {
   function_name = var.deploy_actions_function_name
@@ -1158,13 +964,11 @@ resource "aws_lambda_invocation" "managed_kb_data_source_available" {
 }
 
 # ---------------------------------------------------------------------------------
-# There is deliberately NO knowledge-base Lambda here any more. The agent's only
-# knowledge-base read is the `managed-kb` connector target (kb-connector-target.tf), which the
-# Gateway calls with its OWN role -- see the KbConnectorRetrieve grant in `gateway_tools` below.
-# The retired path was a `recon-dev-kb-search` Lambda wrapping bedrock:Retrieve against the
-# customer-managed KB, exposed as the `knowledge-base` target with a flat
-# search_guidance(query, top_k) schema. It could not express a metadata filter, which is the
-# whole reason for the connector target.
+# There is deliberately NO knowledge-base Lambda here. The agent's only knowledge-base read is the
+# `managed-kb` connector target (kb-connector-target.tf), which the Gateway calls with its OWN role
+# -- see the KbConnectorRetrieve grant in `gateway_tools` below. A Lambda wrapping bedrock:Retrieve
+# behind a flat search_guidance(query, top_k) schema cannot express a metadata filter, and that
+# filter is the whole reason for the connector target.
 # ---------------------------------------------------------------------------------
 # email tools are NOT purpose-built Lambdas: the agent sends mail + reads the shared mailbox
 # THROUGH the existing microsoft-graph OpenAPI gateway target (module.microsoft_graph). No
@@ -1213,8 +1017,8 @@ resource "aws_iam_role_policy" "gateway_tools" {
         # gateway exchanges its workload identity for the target's client-credentials token
         # from the Identity token vault. Without these the target fails every call with
         # "Failed to fetch outbound oauth token ... not authorized to perform
-        # bedrock-agentcore:GetWorkloadAccessToken" (observed live 2026-07-26 via
-        # exception_level=DEBUG — the default error is a sanitized "internal error").
+        # bedrock-agentcore:GetWorkloadAccessToken" — and only under exception_level=DEBUG, since the
+        # default sanitizes it to "internal error".
         Effect = "Allow"
         Action = [
           "bedrock-agentcore:GetWorkloadAccessToken",
@@ -1235,8 +1039,8 @@ resource "aws_iam_role_policy" "gateway_tools" {
         # ⚠️ The second entry is the CUSTOMER-managed secret, and it is not redundant. A credential
         # provider created with an explicit `ClientSecretConfig.SecretId` keeps pointing at that
         # secret rather than copying it under the service prefix, so the gateway reads the caller's
-        # own secret when minting the token. `modules/microsoft-graph-obo` does exactly that, and
-        # without this entry every `search_correspondence` call failed with
+        # own secret when minting the token. `modules/microsoft-graph-obo` does exactly that, so
+        # without this entry every `search_correspondence` call fails with
         # `ToolDenied: ... Failed to fetch outbound oauth token. Access denied when retrieving the
         # provided secret ... assumed-role/<prefix>-gateway ... is not authorized to perform:
         # secretsmanager:GetSecretValue`. That failure is nearly invisible: the tool returns an error
@@ -1265,11 +1069,11 @@ resource "aws_iam_role_policy" "gateway_tools" {
 # lambda:InvokeFunction to concrete target ARNs, one of which is the correspondence_search
 # Lambda, whose env needs `gateway_url` — so gateway_tools transitively DEPENDS ON the gateway
 # and is necessarily created after it. Terraform sees no cycle (the gateway never references
-# gateway_tools), so it legitimately ordered gateway-before-policy and CreateGateway failed with
-# "Access denied while calling GetPolicyEngine on Policy Engine ... with Gateway role" — a
-# from-scratch-only failure, invisible on incremental applies where the policy already exists
-# (observed live on the 2026-08-08 rebuild). This split holds no resource references at all, so
-# the gateway can depends_on it without forming a cycle.
+# gateway_tools), so it would legitimately order gateway-before-policy and CreateGateway would fail
+# with "Access denied while calling GetPolicyEngine on Policy Engine ... with Gateway role". That is
+# a from-scratch-only failure, invisible on incremental applies where the policy already exists.
+# This split holds no resource references at all, so the gateway can depends_on it without forming
+# a cycle.
 resource "aws_iam_role_policy" "gateway_policy_engine" {
   name = "${var.name_prefix}-gateway-policy-engine"
   role = aws_iam_role.gateway.id
@@ -1395,10 +1199,9 @@ resource "aws_bedrockagentcore_gateway_target" "general_ledger" {
     # `terraform apply -replace=<target address>`, then `terraform untaint` the recreated target per
     # the CREATE note above. Adding a tool argument therefore briefly removes the tool.
     #
-    # This is the canonical copy of the note; the other targets below point here. (It used to live
-    # on the `knowledge-base` target, which Phase 3 deleted.) The `managed-kb` connector target is
-    # the one target that needs NO such ignore — aws_cloudformation_stack diffs on template_body
-    # and parameters only, so a service-injected property cannot show up as drift.
+    # This is the canonical copy of the note; the other targets below point here. The `managed-kb`
+    # connector target is the one target that needs NO such ignore — aws_cloudformation_stack diffs
+    # on template_body and parameters only, so a service-injected property cannot show up as drift.
     ignore_changes = [metadata_configuration]
   }
 }
@@ -1529,6 +1332,11 @@ resource "aws_bedrockagentcore_gateway_target" "notices" {
                 name        = "activity_type"
                 type        = "string"
                 description = "What the notice REPORTS: Interest, Rateset, Rollover, Commitment Fee, Paydown. A different axis from notice_class. A notice carrying none is still returned, with activity_type in fields_unavailable."
+              }
+              property {
+                name        = "require"
+                type        = "string"
+                description = "Comma-separated field names to match EXACTLY, e.g. \"reference\". A notice not carrying a required field is EXCLUDED. Omit it for corroboration: by default a notice whose class never extracts the field is returned with that field named in fields_unavailable, which is NOT a non-match. Use it for identity lookups (a wire reference, a CUSIP), where returning every notice that merely lacks the field would bury the one that matched."
               }
               property {
                 name        = "limit"
@@ -1943,8 +1751,7 @@ resource "aws_bedrockagentcore_gateway_target" "correspondence_search" {
 # ---------------------------------------------------------------------------------
 # AgentCore Policy: Cedar-based confidence gate on the egress gateway. The set_draw_status write
 # is permitted ONLY when context.input.confidence >= the configured threshold — a hard
-# guardrail the agent cannot cross, enforced by the gateway, not app code. Provider does not
-# model Policy, so this uses null_resource + the AWS CLI (like microsoft-graph-obo).
+# guardrail the agent cannot cross, enforced by the gateway, not app code.
 # ---------------------------------------------------------------------------------
 
 locals {
@@ -1959,24 +1766,22 @@ locals {
   # Reads are permitted unconditionally. The Microsoft Graph email ops (sendSharedMailboxMail +
   # listSharedMailboxMessages) are BOTH unconditional: the OpenAPI send op carries no confidence
   # parameter, so it cannot be confidence-gated — the write gate applies only to set_draw_status.
-  # The IDP MCP target nests its tools under the server group `IDPTools`, so the Cedar action is
-  # `document-extraction___IDPTools___get_results` (NOT `___get_results`). Lambda/OpenAPI targets
-  # use the flat `target___tool` form.
+  # Every action here uses the flat `target___tool` form, which is what Lambda, OpenAPI and
+  # connector targets advertise. (An MCP target that nests its tools under a server group would
+  # need the three-segment `target___group___tool` form instead — this gateway has no such target.)
   # `correspondence-search___search_correspondence` is the sanitized wrapper the model calls; the
   # wrapper Lambda then calls `microsoft-graph___listSharedMailboxMessages` itself, so BOTH
   # actions must be permitted — the second call arrives as the wrapper's own role, not the agent's.
-  # `managed-kb___Retrieve` is the connector target (see kb-connector-target.tf) and is now the ONLY
-  # knowledge-base read any agent path takes — the Phase 2 cutover completed and was verified live on
-  # both backends 2026-08-27 (L29 + L30).
-  # The retired Lambda-backed `knowledge-base___search_guidance` action was dropped from this permit
-  # one apply AFTER its target was deleted — see the depends_on note below for why that order is
-  # mandatory, before adding or removing any action here.
+  # `managed-kb___Retrieve` is the connector target (see kb-connector-target.tf) and is the ONLY
+  # knowledge-base read any agent path takes, on either backend.
+  # ⚠️ Read the depends_on note below before adding OR removing any action in this list: both
+  # directions race the gateway's tool surface, and removal takes two applies.
   # `contacts___list_contacts` and `templates___list_templates` are TWO actions from two targets in
   # front of one Lambda. Cedar validates the literal action string against the gateway's live tool
   # surface, so `contacts___list_templates` — the name a single combined target would have produced —
   # is not an abbreviation of the second entry; it is an unrecognized action that would put this
   # whole policy in UPDATE_FAILED and cost the agent every read.
-  cedar_reads = "permit(principal, action in [AgentCore::Action::\"general-ledger___search_ledger\", AgentCore::Action::\"notices___search_notices\", AgentCore::Action::\"managed-kb___Retrieve\", AgentCore::Action::\"document-extraction___IDPTools___get_results\", AgentCore::Action::\"correspondence-search___search_correspondence\", AgentCore::Action::\"contacts___list_contacts\", AgentCore::Action::\"templates___list_templates\", AgentCore::Action::\"microsoft-graph___listSharedMailboxMessages\", AgentCore::Action::\"microsoft-graph___sendSharedMailboxMail\"], resource == AgentCore::Gateway::\"${local.gw_arn}\");"
+  cedar_reads = "permit(principal, action in [AgentCore::Action::\"general-ledger___search_ledger\", AgentCore::Action::\"notices___search_notices\", AgentCore::Action::\"managed-kb___Retrieve\", AgentCore::Action::\"correspondence-search___search_correspondence\", AgentCore::Action::\"contacts___list_contacts\", AgentCore::Action::\"templates___list_templates\", AgentCore::Action::\"microsoft-graph___listSharedMailboxMessages\", AgentCore::Action::\"microsoft-graph___sendSharedMailboxMail\"], resource == AgentCore::Gateway::\"${local.gw_arn}\");"
   # The gateway types `context.input.confidence` as a Cedar DECIMAL (the tool schema declares it a
   # number), so compare via the decimal extension — a bare `>= <Long>` fails validation. Guard the
   # optional attribute with `has` first. The agent passes confidence as an integer percent [0..100];
@@ -1990,17 +1795,17 @@ locals {
   status_action = "AgentCore::Action::\"recon-status___recon_update_status\""
   # Three disjuncts per role: STS assumed-role session ARN, bare IAM role ARN, and a
   # shape-agnostic containing match (\"*<role>*\") — still scoped to the exact role name, and
-  # tolerant of principal.id shapes the service may emit that differ from the first two
-  # (observed live: an ECS task-role caller was denied although the assumed-role pattern
-  # matched other principals of the same shape).
+  # tolerant of principal.id shapes the service emits that match neither of the first two. The
+  # third disjunct is not belt-and-braces: an ECS task-role caller can be denied while the
+  # assumed-role pattern matches other principals of the very same shape.
   principal_match = { for r in distinct(concat(var.platform_role_names, var.agent_role_names, [aws_iam_role.agent.name])) :
     r => "principal.id like \"arn:aws:sts::${local.account_id}:assumed-role/${r}/*\" || principal.id == \"arn:aws:iam::${local.account_id}:role/${r}\" || principal.id like \"*${r}*\""
   }
   platform_clause = length(var.platform_role_names) > 0 ? join(" || ", [for r in var.platform_role_names : local.principal_match[r]]) : "false"
-  # NOTE: an explicit forbid for agent-side principals was rejected by AgentCore Policy's
-  # automated-reasoning validation ("Overly Restrictive" for forbid + like-pattern conditions).
-  # Platform-only access is guaranteed WITHOUT it: the policy engine is default-deny and the
-  # only permit for recon_update_status is the principal-scoped platform permit above.
+  # NOTE: deliberately NO explicit forbid for agent-side principals. AgentCore Policy's
+  # automated-reasoning validation rejects forbid + like-pattern conditions as "Overly Restrictive",
+  # and the forbid buys nothing: the policy engine is default-deny and the only permit for
+  # recon_update_status is the principal-scoped platform permit above.
 
   cedar_status_platform = "permit(principal is AgentCore::IamEntity, action == ${local.status_action}, resource == AgentCore::Gateway::\"${local.gw_arn}\") when { ${local.platform_clause} };"
 
@@ -2013,9 +1818,9 @@ locals {
 
 }
 
-# Native Terraform Policy management (migrated from the former null_resource + CLI pattern).
-# MIGRATION NOTE (one-time, live env): import the existing engine + policies before the first
-# apply, or accept a brief fail-closed window while they are recreated:
+# ⚠️ If an engine or policy of these names already exists in the account outside this state, import
+# it rather than letting Terraform create it — Cedar fails closed, so recreating a live policy opens
+# a window in which the agent has NO tool access at all:
 #   terraform import 'module.recon_agent.aws_bedrockagentcore_policy_engine.this' <engine-id>
 #   terraform import 'module.recon_agent.aws_bedrockagentcore_policy.<name>' <engine-id>/<policy-id>
 resource "aws_bedrockagentcore_policy_engine" "this" {
@@ -2033,10 +1838,10 @@ resource "aws_bedrockagentcore_policy" "reads" {
 
   # Cedar VALIDATES every action name against the gateway's live tool surface: naming a tool whose
   # target does not exist yet fails with `unrecognized action` and leaves the policy in
-  # UPDATE_FAILED (observed live 2026-08-08 — the correspondence-search action was added in the
-  # same apply that created its target, and Terraform, seeing no dependency, updated the policy
-  # 4 minutes BEFORE the target existed). Nothing in the arguments creates that edge, so every
-  # target named in `local.cedar_reads` that lives in THIS module is listed here explicitly.
+  # UPDATE_FAILED. Adding an action in the same apply that creates its target is enough to hit
+  # that — Terraform, seeing no dependency, is free to update the policy minutes before the target
+  # exists. Nothing in the arguments creates that edge, so every target named in
+  # `local.cedar_reads` that lives in THIS module is listed here explicitly.
   # The microsoft-graph target is created by the sibling module.microsoft_graph and cannot be
   # referenced from here; it is ordered only by the environment's module graph, so a from-scratch
   # deploy could still race on the two Graph actions.
@@ -2048,14 +1853,24 @@ resource "aws_bedrockagentcore_policy" "reads" {
   # closed. Split every target retirement the same way: the first apply deletes the target while
   # leaving this statement byte-identical (no UpdatePolicy planned => no revalidation), the second
   # drops the now-dangling action from `local.cedar_reads` once the target is already gone.
+  #
+  # When both halves land in ONE commit (as this repo's most recent target retirement did), split the same
+  # retirement at APPLY time instead, in the opposite order — which is safe for a different reason:
+  #   1. terraform apply -target=module.recon_agent.aws_bedrockagentcore_policy.reads
+  #      UpdatePolicy runs while every target still exists, and the shrunken statement names only
+  #      live tools, so it validates. The retired tool stays advertised but unpermitted (Cedar is
+  #      default-deny), which is the intended end state anyway.
+  #   2. terraform apply
+  #      Deletes the target. This statement is already applied, so no UpdatePolicy is planned and
+  #      nothing is revalidated.
+  # Preferred over the code-ordered split above when it is available: it never leaves the policy
+  # naming a dead action, so no unrelated UpdatePolicy in the window between applies can fail.
   depends_on = [
+    # general_ledger and notices are count-gated, so reference the whole list rather than [0] — an
+    # indexed reference to an absent resource fails to resolve instead of simply contributing no edge.
     aws_bedrockagentcore_gateway_target.general_ledger,
     aws_bedrockagentcore_gateway_target.notices,
     aws_bedrockagentcore_gateway_target.correspondence_search,
-    # All three are count-gated, so reference the whole list rather than [0] — an indexed reference
-    # to an absent resource fails to resolve instead of simply contributing no edge. The IDP target
-    # is absent when idp_gateway_target_url/idp_mcp_secret_json are unset.
-    aws_bedrockagentcore_gateway_target.idp,
     # Named individually, not as one group: an empty list is a SATISFIED dependency, so with
     # contact_tool_enabled = false the two actions above would be validated against a gateway that
     # advertises neither tool. That combination is a misconfiguration, not a supported mode —
@@ -2148,15 +1963,12 @@ resource "aws_bedrockagentcore_gateway" "ingress" {
 # The ingress gateway's http/agentcoreRuntime target: what actually routes an InvokeGateway call
 # through to the Tier-2 runtime.
 #
-# ⚠️ This was a null_resource + AWS CLI shim until 2026-09-02, and the reason it moved is not
-# tidiness. `targetConfiguration.http` is a NEWER member than `mcp`, so the shim's payload was
-# correct while the *tool* was stale: any runner whose AWS CLI bundles an older botocore fails with
-# `Unknown parameter in targetConfiguration: "http"`. That is unfixable from inside Terraform —
-# there is no CLI version to pin on a build image you do not own. The provider models it natively
-# as of aws 6.62.0, so the version floor in providers.tf is load-bearing; do not relax it.
-#
-# Built by the CodeBuild project rather than by a local docker run, so `terraform apply` needs no
-# container toolchain.
+# ⚠️ Declared natively rather than through a CLI call, and that is not tidiness.
+# `targetConfiguration.http` is a NEWER member than `mcp`, so a correct CLI payload still fails on
+# any runner whose AWS CLI bundles an older botocore: `Unknown parameter in targetConfiguration:
+# "http"`. That is unfixable from inside Terraform — there is no CLI version to pin on a build image
+# you do not own. Native support arrived in aws 6.62.0, so the version floor in providers.tf is
+# load-bearing; do not relax it.
 resource "aws_bedrockagentcore_gateway_target" "ingress_agent" {
   gateway_identifier = aws_bedrockagentcore_gateway.ingress.gateway_id
   name               = "recon-agent"
@@ -2169,9 +1981,9 @@ resource "aws_bedrockagentcore_gateway_target" "ingress_agent" {
   target_configuration {
     http {
       agentcore_runtime {
-        # No `qualifier`: the shim pointed at the unqualified runtime ARN, so the target follows
-        # whatever the runtime's DEFAULT endpoint serves. Setting one here would pin the ingress
-        # path to a single runtime version and silently strand it on the next image deploy.
+        # No `qualifier` on purpose: the unqualified ARN follows whatever the runtime's DEFAULT
+        # endpoint serves. Setting one would pin the ingress path to a single runtime version and
+        # silently strand it on the next image deploy.
         arn = aws_bedrockagentcore_agent_runtime.this.agent_runtime_arn
       }
     }
@@ -2180,21 +1992,5 @@ resource "aws_bedrockagentcore_gateway_target" "ingress_agent" {
   lifecycle {
     # Service-managed and undeclarable — see the general_ledger target for the full note.
     ignore_changes = [metadata_configuration]
-  }
-}
-
-# Drop the shim from state WITHOUT running its destroy provisioner.
-#
-# ⚠️ `destroy = false` is the whole point. A plain deletion would run the `when = destroy`
-# provisioner above, which calls delete-gateway-target on the LIVE target — the same target the
-# import block in the environment root is adopting into the resource above. That would either
-# delete the adopted target out from under Terraform or, on a runner with no working AWS CLI,
-# fail silently under `on_failure = continue`. Forgetting the state entry is the only ordering
-# that is correct in both places.
-removed {
-  from = null_resource.ingress_agent_target
-
-  lifecycle {
-    destroy = false
   }
 }

@@ -6,9 +6,9 @@
  * problem — the Config tab could be hidden and the routes would still answer — so the check lives in the
  * route handlers, and the tab being hidden is only a courtesy on top of it.
  *
- * Membership is a group claim from the configured OIDC provider. The console has no Cognito user pool
- * (see `api-auth.ts`), so there is no `cognito:groups` to read and no Terraform resource that grants
- * this: an operator adds someone to the group in Okta or Entra, and the next token they get carries it.
+ * Membership is a group claim from the configured OIDC provider (see `api-auth.ts`). There is no AWS
+ * identity provider anywhere in this deployment and so no Terraform resource that grants this: an
+ * operator adds someone to the group in Okta or Entra, and the next token they get carries it.
  *
  * This is the ADMIN half of the recon app's access model. The ACCESS half — may this caller use the
  * app at all — is decided per request by the proxy from `RECON_ACCESS_GROUP` (see `lib/auth/apps.ts`),

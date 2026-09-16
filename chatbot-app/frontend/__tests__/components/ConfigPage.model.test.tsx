@@ -1,9 +1,9 @@
 /**
  * The Config tab's Tier-2 model row.
  *
- * The model id used to be deploy-time only, so switching model meant a merge and an apply while
- * switching the entire agent BACKEND was already one click on this same panel. Three things about the
- * control are load-bearing and are what this file pins:
+ * The model id is selectable here rather than deploy-time only, which is what makes it consistent with
+ * the agent BACKEND switch sitting one click away on the same panel. Three things about the control are
+ * load-bearing and are what this file pins:
  *
  *   1. the two selectors COMPOSE into one id, and that id is visible before anything is written —
  *      half the available pairs are a data-residency change, and a click-by-click save would write

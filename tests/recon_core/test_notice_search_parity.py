@@ -1,12 +1,11 @@
 """Both agent backends must persist the SAME ``notice_search`` for the same ``search_notices`` results.
 
-This file exists because the bug it guards against already shipped. MR !48 added ``notice_search`` so
-the Matched Notices panel could read the agent's own rows instead of the truncated trace summary, but
-it changed only the HARNESS backend. ``CaseStore.attach_proposal`` had ``notice_search: dict | None =
-None``, so the AgentCore Runtime backend — the one that actually investigated the cases — kept writing
-DynamoDB ``NULL``, and the panel kept reporting "the notices this case matched cannot be shown" on
-every case for a day. Nothing failed: an optional keyword argument with a ``None`` default is a silent
-fallback, which is exactly what the repo's conventions forbid.
+``notice_search`` exists so the Matched Notices panel can read the agent's own rows instead of the
+truncated trace summary, and there are TWO writers of it. Teaching only one — the harness, say — leaves
+``CaseStore.attach_proposal``'s ``notice_search: dict | None = None`` to take over on the other, so the
+AgentCore Runtime backend writes DynamoDB ``NULL`` and the panel reports "the notices this case matched
+cannot be shown" on every case it investigated. Nothing raises: an optional keyword argument with a
+``None`` default is a silent fallback, which is exactly what the repo's conventions forbid.
 
 The parity is asserted backend against backend rather than each backend against a hardcoded fixture,
 for the reason ``test_email_draft_parity`` gives: both can satisfy a fixture while disagreeing with

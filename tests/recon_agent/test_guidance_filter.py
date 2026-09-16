@@ -5,8 +5,8 @@
 The worst mistake this module can make is UNOBSERVABLE at runtime: Bedrock accepts the filter,
 matches nothing, and returns ``{"retrievalResults": []}`` with HTTP 200. Nothing raises, no log line
 appears, and the agent reads the empty list as "there is no guidance for this break" and improvises
-a resolution. The three traps, with what each actually does -- all verified live 2026-08-27 against
-``managed-kb___Retrieve``, because the difference decides how much this file has to carry:
+a resolution. The three traps, with what each actually does against ``managed-kb___Retrieve`` -- the
+difference decides how much this file has to carry:
 
 * a ``STRING_LIST`` attribute (``break_class``, ``skill``) filtered with ``equals`` -- **SILENT**.
   Zero results, HTTP 200, no error. It also excludes the two cross-cutting playbooks that carry all

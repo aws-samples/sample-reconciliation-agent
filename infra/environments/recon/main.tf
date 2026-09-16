@@ -33,6 +33,23 @@ data "aws_caller_identity" "current" {}
 module "lambda_package" {
   source      = "../../modules/lambda-package"
   backend_dir = "${path.root}/../../../backend"
+  # Every third-party wheel any Lambda this root deploys imports, because the root builds ONE zip
+  # and every Lambda runs from it. PyYAML: recon_core/skill_meta.py parses SKILL.md frontmatter as
+  # real YAML, for both apps. pydantic: recon_core/schema.py. extract-msg + reportlab:
+  # backend/email_preprocess reads Outlook .msg containers and renders bodies to PDF. tzdata:
+  # deal_pipeline resolves the desk time zone.
+  #
+  # red-black-tree-mod is listed although nothing imports it: extract-msg depends on it and it is
+  # published as a source distribution only, which the platform-pinned pip in stage.sh cannot
+  # install (--platform forces --only-binary=:all:). stage.sh builds a wheel for any LISTED
+  # requirement that lacks one and can only see what is listed, so a transitive sdist-only package
+  # has to be named here to be reachable. Pinned inside extract-msg 0.56.1's own >=1.20,<=1.23 range.
+  #
+  # ⚠️ This list is duplicated in .gitlab-ci.yml's pre-plan staging call, which passes it as
+  # arguments to stage.sh. The two MUST agree, and drift is silent: archive_file reads the staging
+  # directory at PLAN time, so whatever CI staged is what ships, and terraform_data.stage's hash
+  # already matches at apply time and will not re-stage to correct it. A dependency missing from the
+  # CI copy surfaces only as an ImportError at runtime.
   runtime_dependencies = [
     "pydantic==2.13.0",
     "PyYAML==6.0.3",
@@ -76,15 +93,15 @@ data "aws_vpc" "default" {
   default = true
 }
 
-# Private networking: subnets + NAT + S3/DynamoDB PrivateLink endpoints for all
-# VPC-attached compute (Lambdas + AgentCore Runtime).
 # Shared secret gating email sends at the gateway interceptor (human-confirmation safeguard).
-# keepers empty → generated once and stable across applies (rotate by tainting this resource).
+# No `keepers` → generated once and stable across applies; rotate by tainting this resource.
 resource "random_password" "email_confirmation" {
   length  = 40
   special = false
 }
 
+# Private networking: subnets + NAT + S3/DynamoDB PrivateLink endpoints for all VPC-attached
+# compute (Lambdas + AgentCore Runtime).
 module "network" {
   source = "../../modules/network"
 
@@ -100,12 +117,31 @@ locals {
   vpc_subnets = module.network.private_subnet_ids
   vpc_sgs     = [module.network.security_group_id]
 
+  # The OIDC issuer + audience the intake HTTP API's JWT authorizer validates. Derived from
+  # auth_provider here, in ONE place, and deliberately the same derivation
+  # chatbot-app/frontend/src/lib/api-auth.ts performs for the BFF: the API and the BFF must accept
+  # exactly the same tokens, and two independent derivations would eventually disagree.
+  #
+  # There is no Cognito fallback. This stack used to run a user pool that existed solely to be this
+  # issuer while the console signed in through Okta — one deployment, two identity providers, and the
+  # pool's own Hosted UI orphaned. An unset provider now fails the plan in modules/intake's variable
+  # validation rather than quietly authorizing against something nobody logs in to.
+  #
+  # Entra: the v2.0 issuer specifically. A v1 token (`sts.windows.net`) fails this check by design,
+  # matching api-auth.ts.
+  oidc_issuer = var.auth_provider == "okta" ? var.okta_issuer : (
+    var.entra_tenant_id != "" ? "https://login.microsoftonline.com/${var.entra_tenant_id}/v2.0" : ""
+  )
+  oidc_audience = var.auth_provider == "okta" ? var.okta_client_id : var.entra_client_id
+
   # ADOT Python layer for the agent-worker Lambda. var.otel_layer_account is AWS's public publisher
-  # for AWSOpenTelemetryDistroPython in every commercial region (a variable rather than a literal
-  # only because the pre-push guard rejects 12-digit runs — see variables.tf); the layer is
-  # arch-agnostic and covers python3.10-3.14. This is the distro layer AWS documents for
-  # Lambda-hosted agents — NOT the older aws-otel-python collector layer, which ADDS a collector
-  # (unsupported for agent observability) and ships an incompatible OTel version.
+  # for AWSOpenTelemetryDistroPython in every commercial region — a variable rather than a literal
+  # because the repo's pre-push secret guard rejects bare 12-digit numbers. The layer is
+  # arch-agnostic and covers python3.10-3.14.
+  #
+  # ⚠️ This is the DISTRO layer AWS documents for Lambda-hosted agents, not the aws-otel-python
+  # collector layer. The collector layer is unsupported for agent observability and ships an
+  # incompatible OTel version.
   otel_layer_arn = var.enable_worker_tracing ? "arn:aws:lambda:${var.region}:${var.otel_layer_account}:layer:AWSOpenTelemetryDistroPython:${var.otel_layer_version}" : ""
 
   # One definition shared by the worker Lambda (which SETS these baggage keys) and the harness
@@ -117,12 +153,7 @@ locals {
 module "foundation" {
   source = "../../modules/foundation"
 
-  name_prefix      = var.name_prefix
-  hosted_ui_prefix = var.hosted_ui_prefix
-  # Cognito client is created with placeholder callbacks (no frontend dependency, to avoid a
-  # foundation<->frontend cycle). The real CloudFront callback/logout URLs are patched in by
-  # aws_lambda_invocation.cognito_callbacks below, once the frontend distribution exists — same
-  # post-hoc pattern the reference repo uses for its OAuth callback registration. One apply.
+  name_prefix = var.name_prefix
 }
 
 # Console-wide settings: one SSM String parameter per setting under /<name_prefix>/console, seeded
@@ -158,10 +189,8 @@ module "frontend" {
   frontend_dir = "${path.root}/../../../chatbot-app/frontend"
   vpc_id       = data.aws_vpc.default.id
 
-  # Build-time NEXT_PUBLIC_* wiring (Cognito OAuth + recon BFF base).
-  recon_api_base    = module.intake.api_endpoint
-  cognito_hosted_ui = "${module.foundation.hosted_ui_domain}.auth.${var.region}.amazoncognito.com"
-  cognito_client_id = module.foundation.spa_client_id
+  # Build-time NEXT_PUBLIC_* wiring (recon BFF base; the IdP args follow).
+  recon_api_base = module.intake.api_endpoint
 
   # Identity provider selection (Okta OIDC vs Entra) — baked into the frontend build.
   auth_provider     = var.auth_provider
@@ -232,18 +261,20 @@ module "frontend" {
   # ingested as knowledge. Same posture as the two tables above -- the BFF is the only writer.
   workflow_types_table     = module.workflow_types.workflow_types_table_name
   workflow_types_table_arn = module.workflow_types.workflow_types_table_arn
-  # Documents tab -> the document pipeline's own API. A read path only, and one this deployment can
-  # add on its own: the grant is identity-side on recon's task role, so nothing in the pipeline's
-  # account or state changes.
-  idp_appsync_endpoint = var.idp_appsync_endpoint
-  idp_appsync_api_arn  = var.idp_appsync_api_arn
-  # The same tab's extracted fields. Recon's OWN table, so unlike the two above this needs no grant on
-  # anyone else's API and no variable in `terraform.tfvars` -- which also means CI cannot drift on it,
-  # the way a hand-copied `RECON_TFVARS` key can. The grant the module builds from this is read-only;
-  # the notices table is what the matcher and the interceptor read, and a display tab must not be able
-  # to change it.
-  notices_table     = module.notice_store.notices_table_name
-  notices_table_arn = module.notice_store.notices_table_arn
+  # Documents tab -> recon's OWN notices table. The whole tab now: the list, the detail and the
+  # extracted fields. So it needs no grant on anyone else's API and no variable in `terraform.tfvars`
+  # -- which also means CI cannot drift on it, the way a hand-copied `RECON_TFVARS` key can.
+  #
+  # The grant the module builds from these is READ-ONLY, and stays that way. The notices table is what
+  # the deterministic matcher and the gateway interceptor read, so a task that could write it could
+  # change what reconciliation concluded -- from a tab whose only job is to display.
+  #
+  # Both ARNs, because the list view is a Query on the `idp-document-index` GSI and IAM treats a GSI as
+  # a resource distinct from its table. The index ARN is composed by the notice-store module that owns
+  # the index name, not spelled out here.
+  notices_table           = module.notice_store.notices_table_name
+  notices_table_arn       = module.notice_store.notices_table_arn
+  notices_table_index_arn = module.notice_store.notices_table_index_arn
   # Documents tab -> Upload. The audit table is recon's own record of what it sent, and it is what the
   # tab reads back -- which is why nothing here grants a read on either destination bucket. The
   # PutObject into the pipeline's input bucket is identity-side too while both live in this account; a
@@ -286,13 +317,16 @@ module "frontend" {
   harness_service_name          = local.backend_service_names.harness
   # Batch route maps the UI's 'analyst_agreement' alias to the real evaluator id.
   analyst_agreement_evaluator_id = module.agent_evals.evaluator_id
+  # ...and the batch path invokes that evaluator's Lambda under a FAS from the task role, so the
+  # role needs the ARN to grant lambda:InvokeFunction on it.
+  analyst_agreement_lambda_arn = module.agent_evals.evaluator_lambda_arn
   # Backend-aware batch/re-score data sources (same maps the online eval configs use).
   backend_service_names    = local.backend_service_names
   backend_event_log_groups = local.backend_event_log_groups
 
   # Private-VPC deployment (ONE flag): no CloudFront, internal ALB on private subnets, Fargate
-  # with no public IP egressing via the network module's interface endpoints. Default false
-  # keeps the public CloudFront topology unchanged.
+  # with no public IP egressing via the network module's interface endpoints. False selects the
+  # public CloudFront topology instead.
   private_vpc                   = var.private_vpc
   private_subnet_ids            = module.network.private_subnet_ids
   ecs_private_security_group_id = module.network.security_group_id
@@ -306,10 +340,7 @@ module "frontend" {
 module "deploy_actions" {
   source = "../../modules/deploy-actions"
 
-  name_prefix = var.name_prefix
-  # Scoped to the one pool whose SPA client gets patched below. UpdateUserPoolClient REPLACES a
-  # client's configuration, so this grant is deliberately not broader.
-  user_pool_arn     = module.foundation.user_pool_arn
+  name_prefix       = var.name_prefix
   assets_bucket_arn = module.foundation.assets_bucket_arn
   # The pipeline's bucket too, when that app is deployed: its create-only seeds republish through
   # the same reconciliation (aws_lambda_invocation.pipeline_seed_push below). try() rather than a
@@ -318,49 +349,28 @@ module "deploy_actions" {
   additional_assets_bucket_arns = try([module.deal_pipeline[0].assets_bucket_arn], [])
 }
 
-# Patch the Cognito SPA client's OAuth callback/logout URLs to the CloudFront domain after the
-# frontend distribution is up. Breaks the foundation<->frontend cycle (depends only forward).
-#
-# Was a local-exec AWS CLI call. The argument list matters and is re-sent in full by the handler:
-# UpdateUserPoolClient REPLACES the client's configuration rather than merging, so dropping the auth
-# flows or supported providers would silently strip them from a working client.
-# Forget the retired CLI shim. It has no destroy provisioner, so nothing is torn down either way;
-# `destroy = false` keeps it out of the plan's DELETE list, which the CI destroy guard matches
-# exactly and would otherwise gate behind the manual allow-destroy job for a no-op.
-removed {
-  from = null_resource.cognito_callbacks
-
-  lifecycle {
-    destroy = false
-  }
-}
-
-resource "aws_lambda_invocation" "cognito_callbacks" {
-  function_name = module.deploy_actions.function_name
-
-  input = jsonencode({
-    action        = "patch_cognito_callbacks"
-    user_pool_id  = module.foundation.user_pool_id
-    client_id     = module.foundation.spa_client_id
-    callback_urls = ["https://${module.frontend.distribution_domain}/callback"]
-    logout_urls   = ["https://${module.frontend.distribution_domain}/"]
-    # Re-run when the actor's code changes, not only when the domain or client id does.
-    handler_version = module.deploy_actions.source_code_hash
-  })
-}
-
 module "intake" {
   source = "../../modules/intake"
 
-  name_prefix            = var.name_prefix
-  items_table            = module.foundation.items_table
-  items_table_arn        = module.foundation.items_table_arn
-  user_pool_endpoint     = module.foundation.user_pool_endpoint
-  spa_client_id          = module.foundation.spa_client_id
+  name_prefix     = var.name_prefix
+  items_table     = module.foundation.items_table
+  items_table_arn = module.foundation.items_table_arn
+  # The HTTP API's JWT authorizer validates the SAME issuer the console signs in against — see the
+  # oidc_* locals above. There is no user pool behind this any more.
+  jwt_issuer             = local.oidc_issuer
+  jwt_audience           = local.oidc_audience
   lambda_zip             = module.lambda_package.zip_path
   lambda_source_hash     = module.lambda_package.source_code_hash
   vpc_subnet_ids         = local.vpc_subnets
   vpc_security_group_ids = local.vpc_sgs
+
+  # An HTTP API cannot be made private, so private_vpc would otherwise leave the platform's only
+  # synchronous write endpoint internet-facing while everything else moved inside. This adds a PRIVATE
+  # REST API onto the same intake Lambda, locked to the execute-api interface endpoint and authorized
+  # with SigV4. The public HTTP API is left in place — the two doors share the handler, so neither can
+  # drift from the other.
+  private_api_enabled         = var.private_vpc
+  execute_api_vpc_endpoint_id = module.network.execute_api_endpoint_id
 }
 
 module "tier1" {
@@ -379,7 +389,7 @@ module "tier1" {
   audit_table_arn    = module.foundation.audit_table_arn
   agent_runtime_arn  = module.recon_agent.runtime_arn
 
-  # Invoke the agent THROUGH the ingress gateway (validated live) with a direct-invoke fallback.
+  # Invoke the agent THROUGH the ingress gateway, with a direct-invoke fallback.
   ingress_gateway_url = module.recon_agent.ingress_gateway_url
   ingress_gateway_arn = module.recon_agent.ingress_gateway_arn
   use_ingress_gateway = true
@@ -413,6 +423,17 @@ module "tier1" {
   agent_backend_param          = module.foundation.agent_backend_param
   agent_model_id_param         = module.foundation.agent_model_id_param
 
+  # Ceiling on simultaneous Tier-2 investigations — the Bedrock TPM budget as Lambda concurrency.
+  # Bounded on both sides (see the module variable): too high throttles the model, too low lets a
+  # burst outlive the async queue's retention.
+  max_concurrent_investigations = var.max_concurrent_investigations
+
+  # Nudge the Tier-2 runner as soon as an escalation is opened, so a submission is investigated in
+  # seconds rather than at the next scheduled tick. Composed by hand rather than referenced: the
+  # tier2_dispatch module already consumes module.tier1.worker_function_arn, so a real reference here
+  # would close a module cycle.
+  tier2_state_machine_arn = "arn:aws:states:${var.region}:${data.aws_caller_identity.current.account_id}:stateMachine:${var.name_prefix}-tier2"
+
   # Deterministic Tier-1 toggle read at runtime.
   tier1_enabled_param     = module.foundation.tier1_enabled_param
   tier1_enabled_param_arn = module.foundation.tier1_enabled_param_arn
@@ -435,8 +456,8 @@ module "tier1" {
 module "recon_agent" {
   source = "../../modules/recon-agent"
 
-  # Apply-time readiness waits (managed-KB data source, managed-kb connector target) run in the
-  # deploy-actions Lambda rather than a local-exec AWS CLI poll.
+  # Apply-time readiness waits (managed-KB data source, managed-kb connector target) run inside the
+  # deploy-actions Lambda, so nothing on the machine running Terraform is polled or required.
   deploy_actions_function_name    = module.deploy_actions.function_name
   deploy_actions_source_code_hash = module.deploy_actions.source_code_hash
 
@@ -448,10 +469,8 @@ module "recon_agent" {
   audit_table     = module.foundation.audit_table
   audit_table_arn = module.foundation.audit_table_arn
   # The interceptor's extraction-confidence guard resolves the notice a proposal cited.
-  assets_bucket          = module.foundation.assets_bucket
-  assets_bucket_arn      = module.foundation.assets_bucket_arn
-  idp_gateway_target_url = var.idp_gateway_target_url
-  idp_mcp_secret_json    = var.idp_mcp_secret_json
+  assets_bucket     = module.foundation.assets_bucket
+  assets_bucket_arn = module.foundation.assets_bucket_arn
 
   # Cedar principal gating for the platform-only recon_update_status tool. Role NAMES are
   # constructed by naming convention — referencing module outputs here would create a
@@ -464,9 +483,10 @@ module "recon_agent" {
   # Gateway REQUEST interceptor mode: log (observe only) or enforce (block on violation).
   interceptor_mode = var.interceptor_mode
 
-  # Counterparty-email recipient allowlist. This module is the ONLY consumer: the allowlist is a gate,
-  # and the gateway request interceptor is the gate. It is deliberately NOT passed to frontend-ecs --
-  # a BFF copy could only ever agree with this one or be wrong, and it read as a blocked save.
+  # Counterparty-email recipient allowlist. This module is the ONLY consumer, because the gateway
+  # request interceptor is the single enforcement point. Deliberately NOT passed to frontend-ecs: a
+  # BFF copy could only ever agree with this list or be wrong about it, and when it is wrong the
+  # operator sees an unexplained blocked save.
   counterparty_email_domains = var.counterparty_email_domains
 
   # Same baggage allow-list as the Lambda + harness, so the runtime backend's spans carry
@@ -515,8 +535,9 @@ module "recon_agent" {
   contacts_table_arn      = module.contact_store.contacts_table_arn
   notify_contact_id       = module.contact_store.notify_contact_id
 
-  # AgentCore Policy confidence gate: LOG_ONLY first, flip to ENFORCE (Task 9) after inspecting
-  # live Cedar decision logs from the harness runs.
+  # AgentCore Policy confidence gate. Run LOG_ONLY and read the live Cedar decision logs from real
+  # harness runs before flipping to ENFORCE — a policy that has never been observed deciding is a
+  # policy that has never been validated.
   policy_enforcement_mode = var.policy_enforcement_mode
 }
 
@@ -543,9 +564,8 @@ module "recon_agent_harness" {
   # Harness OTel configuration. The baggage allow-list MUST match the worker Lambda's (same local)
   # — the worker sets the keys, the harness promotes them to span attributes.
   otel_baggage_span_attribute_keys = local.otel_baggage_span_attribute_keys
-  # Deliberately NOT enabled here (unlike on the worker Lambda): the online evaluators score
-  # gen-ai CONTENT records read from this harness's log group, and both settings suppress content.
-  # Same baggage allow-list as the harness, so both backends' spans carry the same recon attributes.
+  # Deliberately left off here (unlike on the worker Lambda): the online evaluators score gen-ai
+  # CONTENT records read from this harness's log group, and both of these settings suppress content.
   otel_genai_content_extraction_opt_out = false
   otel_semconv_stability_opt_in         = ""
 
@@ -573,6 +593,9 @@ module "agent_evals" {
   # Each backend's runtime log group carries the gen-ai event records (conversation
   # content) the judges read; the eval service only queries configured log groups.
   event_log_groups = local.backend_event_log_groups
+  # Maintenance lever: false disables both configs, which releases the service-side lock on the
+  # custom evaluator so its description/Lambda config can be updated. See the module's evaluator.
+  online_evals_enabled = var.online_evals_enabled
 }
 
 # OTel service.name per agent backend: AgentCore emits "<runtimeName>.DEFAULT"; the managed
@@ -594,9 +617,9 @@ locals {
   # The UI-editable S3 seeds: bucket key => repo file that seeds it.
   #
   # ONE definition feeding two consumers — the `aws_s3_object` seeds below (first write only) and
-  # `aws_lambda_invocation.seed_push` (every apply, unless the live object was edited). Adding a skill file
-  # is now a single change; before this, a new skill could be seeded but never pushed, or pushed but
-  # never seeded, and neither shows up as an error.
+  # `aws_lambda_invocation.seed_push` (every apply, unless the live object was edited). Keep it that
+  # way: two lists would let a skill be seeded but never pushed, or pushed but never seeded, and
+  # neither half-wiring surfaces as an error anywhere.
   editable_seeds = merge(
     {
       "system-prompt.md"         = "${path.root}/../../../agent-blueprint/recon-agent/system-prompt.md"
@@ -635,8 +658,9 @@ moved {
   to   = module.harness_system_prompt_seed.aws_s3_object.create_only[0]
 }
 
-# Skills-catalog BFF only. The former JWT cases API was removed — the UI's decisions run in
-# the frontend's same-origin BFF via the gateway's platform tools (one HITL code path).
+# Skills-catalog BFF only — deliberately the whole of this API's surface. The UI's queue decisions
+# run in the frontend's same-origin BFF via the gateway's platform tools, so there is exactly one
+# human-in-the-loop code path and no JWT-fronted duplicate of it to keep in step.
 module "api" {
   source = "../../modules/api"
 
@@ -661,8 +685,68 @@ module "lambda_logs" {
     "${var.name_prefix}-tier1",
     "${var.name_prefix}-agent-worker",
     "${var.name_prefix}-recon-status",
+    module.tier2_dispatch.dispatch_function_name,
+    module.tier2_dispatch.collect_function_name,
+    module.tier2_dispatch.case_step_function_name,
     module.api.skills_function_name,
   ]
+}
+
+# Tier-2 async dispatch: the map run that decides WHEN and HOW MANY investigations happen.
+# The Tier-1 stream consumer only opens the case PENDING; this bounds the rest.
+module "tier2_dispatch" {
+  source = "../../modules/tier2-dispatch"
+
+  name_prefix        = var.name_prefix
+  lambda_zip         = module.lambda_package.zip_path
+  lambda_source_hash = module.lambda_package.source_code_hash
+
+  agent_runtime_arn         = module.recon_agent.runtime_arn
+  agent_worker_function_arn = module.tier1.worker_function_arn
+
+  cases_table     = module.foundation.cases_table
+  cases_table_arn = module.foundation.cases_table_arn
+  audit_table     = module.foundation.audit_table
+  audit_table_arn = module.foundation.audit_table_arn
+
+  # The run's collected PENDING list. Reuses the assets bucket rather than adding one: it is already
+  # the platform's own private object store, and these objects are transient run inputs.
+  runs_bucket     = module.foundation.assets_bucket
+  runs_bucket_arn = module.foundation.assets_bucket_arn
+
+  # Read ONCE per run by the collect step, so a run cannot straddle a mid-run backend switch.
+  agent_backend_param = module.foundation.agent_backend_param
+
+  # ⚠️ NOT through the ingress gateway, unlike the blocking worker. The gateway holds the connection
+  # until the runtime session finishes, so it never forwards the container's immediate
+  # {"status": "accepted"} -- the dispatcher would block, the Task would time out, and the case would
+  # be marked FAILED while the investigation it started went on to succeed. Measured 2026-09-11.
+  # The gateway remains the audited entry point for the SYNCHRONOUS retry path in the worker.
+  use_ingress_gateway = false
+
+  # THE concurrency bound for the runtime backend. Kept equal to the worker's reserved concurrency:
+  # same Bedrock quota, two mechanisms, and they must not disagree.
+  max_concurrent_investigations = var.max_concurrent_investigations
+
+  # The schedule is now a SAFETY NET, not the primary trigger: Tier-1 nudges the runner the moment it
+  # opens an escalated case, so the normal path is seconds. This catches what a nudge cannot -- a case
+  # whose nudge lost the single-flight race and arrived while a run was already draining, a nudge that
+  # failed, or a backlog over the per-run ceiling. 1 minute because the cost of a tick is one Lambda
+  # and a Choice when there is nothing to do. 5 minutes is the added latency that buys the concurrency bound.
+  #
+  # Overlap is expected and is handled INSIDE the run, not by the cadence: MaxConcurrency is enforced
+  # per Map Run, so the collect step refuses to collect while another execution is in flight. Without
+  # that guard a 5-minute schedule against longer runs would stack runs and multiply the token budget.
+  schedule_enabled    = true
+  schedule_expression = "rate(1 minute)"
+
+  # Client-side tracing on the dispatcher. It is the runtime backend's InvokeAgentRuntime caller now,
+  # so this is where the trace linking a map run to the agent's own spans gets its client end.
+  otel_layer_arn                   = local.otel_layer_arn
+  otel_baggage_span_attribute_keys = local.otel_baggage_span_attribute_keys
+
+  vpc_subnet_ids         = local.vpc_subnets
+  vpc_security_group_ids = local.vpc_sgs
 }
 
 # AgentCore runtime observability: OTEL application logs -> CloudWatch + traces -> X-Ray.
@@ -674,18 +758,18 @@ module "observability" {
   resource_name = "recon-agent-runtime"
   resource_arn  = module.recon_agent.runtime_arn
 
-  # Deliver runtime TRACES to CloudWatch so the online eval config can score
-  # runtime-backend sessions (account-level Transaction Search enabled 2026-07-27).
+  # Deliver runtime TRACES to CloudWatch so the online eval config can score runtime-backend
+  # sessions. Requires account-level CloudWatch Transaction Search to be enabled — that is an
+  # account setting, not something this stack owns.
   enable_xray_traces = true
 }
 
 # Upload the KB seed corpus to the assets bucket's knowledge-base/ prefix.
 #
-# The corpus is a directory tree, not two files: playbooks/ holds the reconciliation
+# The corpus is a directory TREE, not a flat pair of files: playbooks/ holds the reconciliation
 # methodology, retrieved_emails/ holds archived correspondence (HTML bodies plus PDF and
 # spreadsheet attachments), and every document has a sibling <name>.<ext>.metadata.json sidecar
-# carrying the attributes the agent filters on. 14 documents + 14 sidecars = 28 objects.
-# tests/kb_seed/ is the contract for that shape.
+# carrying the attributes the agent filters on. tests/kb_seed/ asserts that shape.
 locals {
   kb_seed_dir = "${path.root}/../../../data/kb-seed"
 
@@ -720,24 +804,24 @@ resource "aws_s3_object" "kb_seed" {
 
 # (knowledge base, data source) pairs the corpus is ingested into.
 #
-# ⚠️ ONLY a managed KB, and do not add an **S3 Vectors**-backed one beside it. This corpus violates
-# two of S3 Vectors' hard limits (verified live 2026-08-26, job CH0ZJE8F5D):
+# ⚠️ ONLY a managed KB. Do not add an **S3 Vectors**-backed one beside it: this corpus violates two
+# of S3 Vectors' hard limits, both confirmed against a live ingestion job.
 #
-#   1. sidecar FILE size limit of 1024 bytes -- "Ignored 8 files as the associated metadata was
-#      larger than service limit of MaximumFileSizeSupported: 1024 bytes". All 8
-#      retrieved_emails/*.metadata.json exceed it (1149-1217 bytes even minified: the
+#   1. Sidecar FILE size limit of 1024 bytes -- "Ignored 8 files as the associated metadata was
+#      larger than service limit of MaximumFileSizeSupported: 1024 bytes". Every
+#      retrieved_emails/*.metadata.json exceeds it (1149-1217 bytes even minified: the
 #      {"value":{"type":...},"includeForEmbedding":...} envelope costs ~70 bytes per attribute and
 #      an email carries 10). Those documents are ignored OUTRIGHT -- they never appear in
 #      ListKnowledgeBaseDocuments, not even as FAILED.
 #   2. "Filterable metadata must have at most 2048 bytes (Service: S3Vectors, Status Code: 400)" --
-#      4 of the 7 playbooks hard-FAIL. This one has no observable discriminator: two playbooks with
-#      IDENTICAL metadata land on opposite sides of it, and the failing set's sizes (522-575 bytes)
-#      overlap the passing set's exactly. Do not try to reason it out from sidecar size.
+#      4 of the 7 playbooks hard-FAIL. This limit has no observable discriminator: two playbooks
+#      with IDENTICAL metadata land on opposite sides of it, and the failing set's sizes (522-575
+#      bytes) overlap the passing set's exactly. Do not try to reason it out from sidecar size.
 #
 # The managed KB has neither limit -- it indexes every document in the corpus, sidecars of 1610-1660
 # bytes included. So the metadata design and an S3 Vectors index are mutually exclusive: supporting
-# one would mean gutting the attribute set corpus-wide, degrading the retrieval filtering that is
-# the whole point of the sidecars. Keep this note -- it is the reason not to try.
+# both would mean gutting the attribute set corpus-wide, degrading exactly the retrieval filtering
+# the sidecars exist to provide.
 locals {
   kb_ingest_targets = {
     managed = {
@@ -759,8 +843,9 @@ locals {
 # the filter parameters, and every retrieval returns an empty retrievalResults with no error
 # anywhere. The whole feature reads as "filters work — everything matches nothing".
 #
-# The for_each stays despite there being one target, because the state addresses are already keyed;
-# collapsing it to a bare resource would destroy and re-create the managed ingestion for nothing.
+# local.kb_ingest_targets holds a single entry, but the for_each stays: the state addresses are keyed
+# on it, so collapsing to a bare resource would destroy and re-create the managed ingestion for no
+# gain.
 resource "aws_lambda_invocation" "kb_ingestion" {
   for_each = local.kb_ingest_targets
 
@@ -780,9 +865,9 @@ resource "aws_lambda_invocation" "kb_ingestion" {
 
 # ⚠️ The document counts the handler returns are apply-time EVIDENCE that the corpus landed, and
 # they are not redundant with the job status: a job can report COMPLETE with a non-zero failed
-# count, and a managed-KB job has been observed dropping 5 documents while reporting 0 failed.
-# Surfaced as an output so they appear in the apply log the way the provisioner's echo used to.
-# If the numbers look wrong, go to ListKnowledgeBaseDocuments — a dropped document is simply ABSENT.
+# count, and a managed-KB job can drop documents while still reporting 0 failed. Exposed as an
+# output so the numbers appear in the apply log rather than only in the invocation result.
+# If they look wrong, go to ListKnowledgeBaseDocuments — a dropped document is simply ABSENT.
 
 output "kb_ingestion_counts" {
   description = "Per-KB ingestion job id and scanned/indexed/failed document counts from this apply."
@@ -892,12 +977,13 @@ removed {
 }
 
 # Push repo edits to the create-only seeds above, UNLESS the live object was edited in this
-# environment. The seeds are `ignore_changes`d because the UI rewrites them in place, which until now
-# meant a repo edit to a prompt or a skill never reached S3 through an apply at all: the apply was
-# green and the deployed agent kept the old instructions.
+# environment. This resource is load-bearing: the seeds carry `ignore_changes` so that UI edits
+# survive an apply, and without a push step that same ignore would mean a repo edit to a prompt or a
+# skill never reaches S3 at all — the apply goes green while the deployed agent runs the previously
+# seeded instructions.
 #
-# The decision (and every failure message) lives in the committed script, not here, because it has a
-# second caller: an operator reconciling a conflict runs the same script by hand.
+# The reconciliation logic (and every failure message) lives in the committed script rather than
+# here, because it has a second caller: an operator resolving a conflict runs the same script by hand.
 #
 # ⚠️ This resource can FAIL the apply, by design. If a repo file AND the live object have both changed
 # since the last push, no rule resolves that without a human, so it stops and names every stuck key
@@ -908,10 +994,10 @@ resource "aws_lambda_invocation" "seed_push" {
   input = jsonencode({
     action = "push_editable_seeds"
     bucket = module.foundation.assets_bucket
-    # ⚠️ The CONTENT travels in the payload, not a path: the actor has no repo checkout. That also
-    # makes the input change whenever a seed changes, which is what re-runs the reconciliation —
-    # the retired provisioner used a `filemd5` trigger for exactly that. `source` is carried only so
-    # a conflict message can name the repo file an operator has to reconcile.
+    # ⚠️ The CONTENT travels in the payload, not a path: the actor Lambda has no repo checkout.
+    # Inlining it also makes this invocation's input change whenever a seed changes, which is what
+    # re-runs the reconciliation. `source` is carried only so a conflict message can name the repo
+    # file an operator has to reconcile.
     #
     # ~40 KB across all seeds today, against Lambda's 6 MB synchronous payload limit. If the corpus
     # ever approaches that, stage the content in S3 and pass keys instead.
@@ -1051,14 +1137,15 @@ module "graph" {
   tenant_id     = var.entra_tenant_id
   client_id     = var.entra_client_id
   client_secret = var.entra_client_secret
-  # The recon gateway's INBOUND auth is Cognito JWT, not Entra — OBO's default token-exchange
-  # can't swap a token Entra didn't issue. App-only (client_credentials) is the only mode
-  # compatible with a non-Entra-fronted gateway.
+  # The recon gateway's INBOUND auth is AWS_IAM (SigV4), not Entra — OBO's token exchange needs an
+  # Entra-issued user token to swap, and there is none. App-only (client_credentials) is the only
+  # mode compatible with a non-Entra-fronted gateway.
   auth_mode = "client_credentials"
 }
 
-# IDP push entry point: hook Lambda that maps IDP-completed documents to ReconItems via the
-# normal intake path. IDP-side registration of its ARN is separate config (out of scope).
+# IDP push entry point: hook Lambda that maps IDP-completed documents to extracted notices. Set
+# idp_state_machine_arn below and this stack owns the EventBridge rule that invokes it; leave it
+# empty and the hook must instead be registered on the IDP side. Never both.
 module "idp_hook" {
   source = "../../modules/idp-hook"
 
@@ -1069,8 +1156,12 @@ module "idp_hook" {
   # items, cases or audit — an extracted document must not create a case.
   notices_table     = module.notice_store.notices_table_name
   notices_table_arn = module.notice_store.notices_table_arn
-  assets_bucket     = module.foundation.assets_bucket
-  assets_bucket_arn = module.foundation.assets_bucket_arn
+  # The inverted index over every extracted field, written from the same extraction in the same
+  # invocation. See the notice_search table in modules/notice-store for why it is a separate table.
+  notice_search_table     = module.notice_store.notice_search_table_name
+  notice_search_table_arn = module.notice_store.notice_search_table_arn
+  assets_bucket           = module.foundation.assets_bucket
+  assets_bucket_arn       = module.foundation.assets_bucket_arn
   # The completion event recon listens for. Empty by default, which creates no rule and leaves the
   # hook unreachable — so an environment with an IDP deployment MUST set this.
   idp_state_machine_arn  = var.idp_state_machine_arn
@@ -1114,9 +1205,9 @@ module "contact_store" {
   lambda_source_hash     = module.lambda_package.source_code_hash
   vpc_subnet_ids         = local.vpc_subnets
   vpc_security_group_ids = local.vpc_sgs
-  # The LAST place this variable is read. It seeds the first internal-notification contact at
-  # create time and nothing consumes it at runtime any more -- the senders get a contact ID and
-  # look the address up. See the variable's own description for why editing it later is a no-op.
+  # The ONLY place this variable is read. It seeds the first internal-notification contact at create
+  # time; nothing consumes it at runtime, because the senders receive a contact ID and resolve the
+  # address themselves. See the variable's own description for why editing it later is a no-op.
   notify_email = var.notify_email
 }
 
@@ -1140,17 +1231,17 @@ module "upload_audit" {
 
 # Starts a Bedrock ingestion job after a knowledge-base upload lands, and records whether the
 # document actually got indexed. Without it a KB-routed upload sits in the bucket forever and
-# consult-guidance never finds it, with no error anywhere -- the same failure the seed-corpus
-# ingestion note below warns about, arriving one upload at a time instead of once at deploy.
+# consult-guidance never finds it, with no error anywhere. Same failure mode as an un-ingested seed
+# corpus (see aws_lambda_invocation.kb_ingestion above), one upload at a time instead of all at once.
 module "kb_ingest_trigger" {
   source = "../../modules/kb-ingest-trigger"
 
   name_prefix       = var.name_prefix
   assets_bucket     = module.foundation.assets_bucket
   assets_bucket_arn = module.foundation.assets_bucket_arn
-  # The same managed KB the seed corpus is ingested into, from the one entry in
-  # local.kb_ingest_targets. Reading the module outputs directly rather than the local, because the
-  # local is keyed for the null_resource's state addresses and is not a lookup table.
+  # The same managed KB the seed corpus is ingested into. Reads the module outputs directly rather
+  # than local.kb_ingest_targets: that local exists to key the ingestion invocation's state
+  # addresses, not to serve as a lookup table.
   kb_id                   = module.recon_agent.managed_kb_id
   kb_data_source_id       = module.recon_agent.managed_kb_data_source_id
   uploads_table_name      = module.upload_audit.uploads_table_name
@@ -1163,7 +1254,9 @@ module "kb_ingest_trigger" {
 }
 
 # Mocked general ledger (S3 + Athena) backing the deterministic Tier-1 lookup and the
-# `general-ledger` Gateway tool.
+# `general-ledger` Gateway tool. Also owns the `set_draw_status` write Lambda, which performs the
+# write only — the confidence gate is Cedar's and the provenance gate is the interceptor's, each
+# enforced in exactly one place rather than copied here.
 module "gl_mock" {
   source = "../../modules/gl-mock"
 
@@ -1175,6 +1268,4 @@ module "gl_mock" {
   lambda_source_hash     = module.lambda_package.source_code_hash
   vpc_subnet_ids         = local.vpc_subnets
   vpc_security_group_ids = local.vpc_sgs
-
-  # set_draw_status server-side gates (provenance + threshold re-check) on the autonomous path.
 }

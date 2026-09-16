@@ -3,7 +3,7 @@
 Imported by BOTH the Terraform manage script (create/update-time) and the worker (invoke-time)
 so the two configs cannot drift. The harness calls everything as tools:
   * an ``agentcore_gateway`` tool (awsIam outbound) exposing the egress tools gateway — READS ONLY
-    on this backend (search_ledger, the managed KB's Retrieve, get_results, and the sanitized
+    on this backend (search_ledger, search_notices, the managed KB's Retrieve, and the sanitized
     mailbox read search_correspondence);
   * an ``inline_function`` ``submit_proposal`` the worker executes to turn the agent's structured
     output into a persisted proposal (the model never picks the ledger reference — the worker
@@ -25,7 +25,8 @@ GATEWAY_TOOLS = [
     "general-ledger___search_ledger",
     "notices___search_notices",  # the ACTUAL side, mirroring general-ledger (the expected side)
     "managed-kb___Retrieve",  # managed bedrock-knowledge-bases connector; NOT a Lambda target
-    "document-extraction___IDPTools___get_results",  # IDP MCP nests tools under the IDPTools group
+    # NOTE: there is no document-pipeline tool on this gateway. A document's extracted fields are
+    # already on recon's own notice row (`idp_sections`), returned by notices___search_notices above.
     # NOTE: set-draw-status___set_draw_status is deliberately ABSENT — the model is
     # propose-only on this backend; the WORKER executes the Policy-gated ledger write through
     # the gateway after intake.decide says "execute".
@@ -43,8 +44,8 @@ GATEWAY_TOOLS = [
     # The two reads that let the model cite a recipient and a wording BY ID instead of writing
     # either one. Note the different prefixes: the prefix is the gateway TARGET name, and there are
     # two targets in front of one Lambda precisely so these two names differ. Collapsing them onto
-    # one target (`contacts___list_templates`) would silently filter the second tool out — the
-    # allowlist below would no longer intersect the gateway's surface.
+    # one target (`contacts___list_templates`) would silently filter the second tool out, because the
+    # allowlist below would then not intersect the gateway's surface.
     "contacts___list_contacts",
     "templates___list_templates",
 ]
@@ -72,13 +73,13 @@ SUBMIT_PROPOSAL_SCHEMA = {
         },
         # Deliberately NO confidence property. The model is never asked for a number about itself:
         # the only score is computed outside it, from `evidence_steps` below, by
-        # `backend.recon_core.confidence.score_proposal`. Two such properties used to live here — a
-        # classification confidence, which was thresholded and on 2026-09-02 zeroed every harness
-        # case at once, and an overall resolution confidence, which nothing read but whose absence
-        # still failed the parse. A property here is an instruction, so re-adding one teaches the
-        # model that grading itself is part of the job and invites a reader to gate on it again.
-        # Both names are banned outright by tests/recon_core/test_single_confidence_signal.py, which
-        # is why this comment describes them rather than spelling them.
+        # `backend.recon_core.confidence.score_proposal`. Two such properties are specifically
+        # excluded: a classification confidence, which as a threshold zeroes every case whose class
+        # falls under it, and an overall resolution confidence, which no code reads but whose absence
+        # still fails the parse. A property here is an instruction, so adding one teaches the model
+        # that grading itself is part of the job and invites a reader to gate on it. Both names are
+        # banned outright by tests/recon_core/test_single_confidence_signal.py, which is why this
+        # comment describes them rather than spelling them.
         "resolution": {
             "type": "string",
             "description": (
@@ -127,10 +128,19 @@ SUBMIT_PROPOSAL_SCHEMA = {
                 "required": ["step_id", "satisfied"],
             },
         },
-        # Optional (absent from `required`). The model writes the message but neither sends it nor
-        # picks the address: an analyst reviews the text, supplies the recipient and approves the
-        # send. `recipient` is deliberately NOT a property here — items arrive from documents an
-        # outside party wrote, so a model-authored address is attacker-influenceable.
+        # Optional (absent from `required`). The model picks WHO and WHICH WORDING from the
+        # operator's own lists and fills the template's variables; it writes no prose. An analyst
+        # reviews the rendered result and approves it, and approving is what authorises the send.
+        # `recipient` is deliberately NOT a property here — items arrive from documents an outside
+        # party wrote, so a model-authored address is attacker-influenceable. The platform resolves
+        # the address from `recipient_contact_id` at send time, which is also what makes a contact
+        # deactivated after approval unreachable.
+        #
+        # No `subject` or `body` property either, and that is the same guarantee rather than a
+        # second one: `build_persisted_draft` renders the operator's templates and
+        # `draft_matches_message` compares the approved bytes to the outgoing bytes, so text the
+        # model wrote could never be stored, shown or sent. A prompt or skill that asks the model
+        # for a subject line is describing a field that does not exist.
         "email_draft": {
             "type": "object",
             "description": (
@@ -187,9 +197,9 @@ SUBMIT_PROPOSAL_SCHEMA = {
 # lifecycle keeps sessions short (escalations-only volume). Model is parameterized by Terraform.
 # allowedTools uses @server/tool patterns (harness-tools docs): gateway tools must be scoped
 # by the TOOL ENTRY name ("egress-tools"). Plain gateway names match NOTHING and silently
-# filter every gateway tool out of the model's toolset (observed live 2026-07-26).
+# filter every gateway tool out of the model's toolset.
 #
-# Graph ops on this list — verified against a live gateway tools/list on 2026-08-07:
+# Graph ops on this list, and why each is absent:
 #   * sendSharedMailboxMail: EXCLUDED, on purpose and not for a schema reason (it advertises only
 #     `mailboxAddress`/`saveToSentItems`/`message`, all pattern-compliant, so it would work if
 #     offered). The model writes the counterparty email into submit_proposal's `email_draft`
@@ -214,7 +224,6 @@ ALLOWED_TOOLS = [
     # see system-prompt.md, which is the only place the model learns that shape on this backend
     # (there is no Python wrapper here, unlike the container runtime).
     "@egress-tools/managed-kb___Retrieve",
-    "@egress-tools/document-extraction___IDPTools___get_results",
     "@egress-tools/correspondence-search___search_correspondence",
     # Neither read returns an address or a rendered message. `list_contacts` projects the `email`
     # attribute away before it answers, and `list_templates` returns the operator's wording with the
@@ -225,8 +234,8 @@ ALLOWED_TOOLS = [
     "@egress-tools/templates___list_templates",
     SUBMIT_PROPOSAL,
 ]
-# 20 (was 12): skill loads consume turns under the agent-skills feature — real items hit
-# the 12-cap mid-investigation (observed live 2026-07-26).
+# Generous on purpose: skill loads consume turns under the agent-skills feature, so a real item
+# spends several of these before it reaches its first tool call. A cap of 12 is hit mid-investigation.
 DEFAULT_MAX_ITERATIONS = 20
 DEFAULT_IDLE_SECONDS = 60
 DEFAULT_MAX_LIFETIME_SECONDS = 1800

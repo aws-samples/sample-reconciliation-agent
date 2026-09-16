@@ -2,6 +2,8 @@
 escalate→PROPOSED, failure→degraded, double-delivery no-op, write-denied→PROPOSED. Uses an
 injected invoke transport (harness stream) + injected write_transport (gateway write) + moto."""
 
+import time
+
 import boto3
 from moto import mock_aws
 
@@ -89,6 +91,11 @@ def _run(invoke, threshold=0.9, write_transport=None, write_calls=None):
     return worker.run_investigation(
         item=ITEM, invoke=invoke, cases=cases, catalog=CATALOG, threshold=threshold,
         write_transport=write_transport or _default_write,
+        # Required keyword (no default) — the worker labels the run's token usage with it. See
+        # tests/harness_agent/test_worker_token_usage.py for what that label has to be in production.
+        model_id="us.anthropic.claude-sonnet-5",
+        # Far enough out that the closing-turn floor never trips here; the floor has its own test.
+        deadline=time.monotonic() + 900.0,
     ), cases
 
 
@@ -206,10 +213,10 @@ def _submit_events_malformed():
 
 @mock_aws
 def test_malformed_proposal_preserves_the_classification():
-    """Regression (observed live 2026-07-27): a submit_proposal missing `resolution` collapsed the
-    case to unknown, discarding a correct classification. The degraded persist must keep the model's
-    class — it names the skill whose prescribed steps a re-run would be scored against, so throwing it
-    away costs the human reviewer the one piece of the proposal that was sound."""
+    """Regression: a submit_proposal missing `resolution` must not collapse the case to unknown and
+    discard a correct classification. The degraded persist keeps the model's class — it names the
+    skill whose prescribed steps a re-run would be scored against, so throwing it away costs the
+    human reviewer the one piece of the proposal that was sound."""
     ddb = _tables()
     outcome, _ = _run(lambda _m: _ledger_events() + _submit_events_malformed())
     assert outcome == "escalated"

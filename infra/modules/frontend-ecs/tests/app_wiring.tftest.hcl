@@ -64,16 +64,24 @@ variables {
   pipeline_access_group = "deal-desk"
   pipeline_admin_group  = "deal-desk-admins"
 
-  # GOLDEN. sha256 of the task-policy JSON and of the container-environment JSON this module rendered
-  # for exactly the inputs above BEFORE app_wiring existed (the pipeline_* inputs, pipeline_enabled =
-  # false). That is the recon-only console's policy and environment: every recon-only run below must
-  # hash to them, and so must the recon half of every enabled run. A change here is a change to what
-  # every deployed recon console runs, so make it on purpose and then regenerate both values from a
-  # plan of this module under these inputs:
-  #   sha256(aws_iam_role_policy.ecs_task.policy)
-  #   sha256(jsonencode(jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment))
-  golden_recon_policy_sha256      = "df19d6614e95f14fb2edd395915c4b386338dfcc742b46bc476ca186023fdcb7"
-  golden_recon_environment_sha256 = "0c35474a95073791d638a1b199fb925e0b230cb8173c58ec9f0772a34290e5e0"
+  # GOLDEN. sha256 of the task-policy JSON and of the container-environment JSON this module renders
+  # for exactly the inputs above with no app enabled. That is the recon-only console's policy and
+  # environment: every recon-only run below must hash to them, and so must the recon half of every
+  # enabled run, which is what proves `app_wiring` contributes nothing when no app is enabled.
+  #
+  # A change here is a change to what every deployed recon console runs, so make it on purpose. To
+  # regenerate, temporarily replace an assert's `error_message` with the value itself — the container
+  # environment carries a sensitive variable, so it needs unwrapping:
+  #   nonsensitive(sha256(aws_iam_role_policy.ecs_task.policy))
+  #   nonsensitive(sha256(jsonencode(jsondecode(nonsensitive(aws_ecs_task_definition.frontend.container_definitions))[0].environment)))
+  #
+  # Retaken 2026-09-16 when this branch merged origin/main: upstream removed Cognito, so
+  # COGNITO_HOSTED_UI and COGNITO_CLIENT_ID left the container environment and the OIDC issuer and
+  # audience the intake API shares with the BFF took their place. The previous pair
+  # (df19d661…/0c35474a…) belongs to the pre-merge rendering and would fail against any tree that
+  # has upstream's auth wiring.
+  golden_recon_policy_sha256      = "0aedcb7452916db802218a08411a258b17dd939e8802ad690aca3f690ed6ae2e"
+  golden_recon_environment_sha256 = "b5d8270dd48ec6c455ebe909723b1084a5c0446372c5cc231afea5e67f70bd34"
 
   # Synthetic apps. alpha and beta are enabled, gamma is not. The names are chosen so that a sort by
   # name WOULD interleave the two apps (ALPHA_BUCKET, BETA_QUEUE, ZULU_TABLE) and would move alpha's

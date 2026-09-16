@@ -119,10 +119,9 @@ describe("Documents Download API", () => {
 
     it("should use full UUID from JWT (not truncated sessionId prefix)", () => {
       /**
-       * This test verifies the fix for the NoSuchKey bug:
-       * - S3 files are stored with full UUID: documents/18c1e380-xxxx-xxxx-xxxx-xxxxxxxxxxxx/...
-       * - Old code used sessionId.split('_')[0] = '18c1e380' (8 chars) - WRONG
-       * - New code extracts full UUID from JWT - CORRECT
+       * S3 keys every object under the FULL UUID: documents/18c1e380-xxxx-xxxx-xxxx-xxxxxxxxxxxx/...
+       * `sessionId.split('_')[0]` yields only the first 8 characters ('18c1e380'), and GetObject then
+       * answers NoSuchKey. The full UUID has to come from the JWT.
        */
       const mockExtract = extractUserFromRequest as ReturnType<typeof vi.fn>;
       const fullUUID = "18c1e380-1234-5678-9abc-def012345678";

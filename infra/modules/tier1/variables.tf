@@ -71,7 +71,7 @@ variable "ingress_gateway_arn" {
 }
 
 variable "use_ingress_gateway" {
-  description = "Route agent invocations through the ingress gateway (true) or via direct InvokeAgentRuntime (false). The worker falls back to direct on any ingress failure regardless."
+  description = "Route agent invocations through the ingress gateway (true) or via direct InvokeAgentRuntime (false). Takes effect only alongside ingress_gateway_url: true with an empty URL falls straight through to the direct path. A failure proving the request never ran — a signing or URL error, or an HTTP status from the gateway — falls back to a direct invoke, so a misconfigured gateway or policy cannot strand escalated items. A timeout does NOT fall back: the request was delivered and the investigation is still executing, so the worker re-raises rather than starting a second multi-minute investigation of the same item."
   type        = bool
   default     = false
 }
@@ -279,6 +279,50 @@ variable "workflow_types_table" {
 
 variable "workflow_types_table_arn" {
   description = "ARN of the recon-workflow-types table, for the Scan grant. Empty when the lookup is disabled."
+  type        = string
+  default     = ""
+}
+
+variable "max_concurrent_investigations" {
+  description = <<-EOT
+    Reserved concurrency for the agent-worker: the ceiling on simultaneous Tier-2 investigations.
+    NOT a tuning knob, and bounded on BOTH sides.
+
+    Upper bound ~28 — the 6M tokens/min account quota for the Sonnet inference profile divided by one
+    run's token rate (~200k tokens over ~57s ≈ 214k tokens/min). Exceed it and every request throttles,
+    which is the failure this variable exists to prevent.
+
+    Lower bound 14 — capped invocations wait in the Lambda async queue, which discards at
+    maximum_event_age_in_seconds (6h service max). 5000 escalations at ~57s each need >= 14 slots to
+    drain inside 6h. Set it lower and the tail of a full burst expires with no case row and no
+    proposal: a throttling failure traded for a DATA-LOSS one.
+
+    Sits near the floor on purpose. The upper bound is only mean-derived, from five synthetic
+    same-minute QA cases — the sample that existed when this shipped. Re-derive from >= 30 real cases
+    at p95, not the mean: tokens arrive in bursts per Converse call and the context grows across turns,
+    so a mean under-counts synchronised peaks against a per-minute quota. Re-check whenever the quota,
+    the token profile, or the prompt-cache hit rate moves.
+  EOT
+  type        = number
+  default     = 14
+
+  validation {
+    # The floor is not advisory: below it the tail of a full burst outlives the async queue.
+    condition     = var.max_concurrent_investigations >= 14
+    error_message = "max_concurrent_investigations must be >= 14, or a 5000-escalation burst expires in the Lambda async queue before it drains."
+  }
+}
+
+variable "tier2_state_machine_arn" {
+  description = <<-EOT
+    Tier-2 map-run state machine, nudged once per batch when this consumer opens an escalated case, so a
+    submission is investigated in seconds rather than at the next scheduled tick.
+
+    Empty disables the nudge and leaves the schedule as the only trigger -- correct, but slow. This is
+    NOT a return to dispatching from the stream: what starts is the bounded runner, whose single-flight
+    guard makes every start beyond the first a no-op, and whose MaxConcurrency remains the only thing
+    deciding how many agents run at once.
+  EOT
   type        = string
   default     = ""
 }

@@ -1,7 +1,7 @@
 """Aggregation of IDP per-field confidences into the composite's classification signal.
 
 The fixture mirrors the real shape verified against
-``s3://idp-unified-output-oji4rxy7/*/sections/*/result.json``: ``explainability_info`` is a LIST of
+``s3://<idp-output-bucket>/*/sections/*/result.json``: ``explainability_info`` is a LIST of
 dicts, each field maps to ``{confidence, confidence_threshold, geometry}``, nested arrays of
 objects are scored per row, and per-field thresholds differ (0.8 and 0.9 both occur live).
 """

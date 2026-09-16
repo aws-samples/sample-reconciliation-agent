@@ -7,7 +7,12 @@ NAME, so the two drifting apart fails in a way nothing reports:
 * a key the mapper reads but the contract omits — nobody is asked to extract it, and the field arrives
   as ``fields_unavailable``, which the agent reads as "this notice class does not carry that field"
   rather than as a gap;
-* a key the contract demands but the mapper ignores — extraction work that no consumer reads.
+* a key the mapper PROMOTES that nothing pins — an attribute recon must keep in step with a
+  configuration in another repository, bought for no reason.
+
+Note which direction is NOT guarded: a contract key the mapper does not read is fine, because
+``idp_sections`` carries every extracted field verbatim and it still reaches its consumer. What needs
+guarding is GROWTH of the promoted set, not gaps in it.
 
 ⚠️ The mapper's key set is derived with ``ast``, deliberately NOT with a regex over ``_opt(fields, …)``.
 Four keys are read outside that call shape, and they are the load-bearing ones::
@@ -28,6 +33,8 @@ from pathlib import Path
 
 import pytest
 
+from backend.recon_core.notices import PROMOTED_EXTRACTED_FIELDS
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONTRACT = REPO_ROOT / "data" / "input" / "IDP-EXTRACTION-REQUIREMENTS.md"
 MAPPER = REPO_ROOT / "backend" / "idp_hook" / "mapper.py"
@@ -37,9 +44,6 @@ INPUT_DIR = REPO_ROOT / "data" / "input"
 # THIS local, which is what keeps it from also collecting unrelated dict lookups.
 FIELDS_LOCAL = "fields"
 
-# Keys whose absence breaks retrieval rather than degrading it, asserted as a floor so a refactor that
-# changes the read shape fails here instead of silently shrinking the collected set.
-LOAD_BEARING = frozenset({"notice_date", "value_date", "counterparty", "borrower"})
 
 # Section-level keys the contract is required to document. IDP's own envelope keys (`Id`, `PageIds`,
 # `OutputJSONUri`, …) are deliberately NOT here: they are transport, not extraction output, and
@@ -143,35 +147,36 @@ def _roadmap_keys() -> set[str]:
     return _first_column(text[start:])
 
 
-def test_the_mapper_reads_the_load_bearing_keys() -> None:
-    """The ast walk must find the four keys a regex over ``_opt`` would miss.
+def test_the_mapper_reads_no_extracted_field_by_name() -> None:
+    """The strongest form this guard can take, and the point of the whole de-promotion.
 
-    This is the guard on the guard: if a refactor changes how the mapper reads them, the collected set
-    shrinks and every parity assertion below gets weaker without failing.
+    The mapper reads NOTHING out of the extraction by literal key. Every extracted field is carried into
+    `idp_sections` verbatim and `search_notices` resolves filters against that map, so a field the
+    pipeline adds or renames needs no change anywhere in recon.
+
+    ⚠️ A single key appearing here is a regression, not a detail. A promoted name is one recon must keep
+    in step with a configuration in another repository, and when it drifts `_opt`-style reads return None,
+    the row stores the field as ABSENT, and the agent reads "this notice class does not carry that field"
+    -- extraction still scores well and nothing errors. That silent false negative is what this asserts
+    away. If a name genuinely must come back, it has to clear the bar in PROMOTED_EXTRACTED_FIELDS
+    (`backend/recon_core/notices.py`): something must be UNABLE to read a nested map. Nothing is, now that
+    the two GSIs keyed on extracted fields are gone.
     """
-    missing = LOAD_BEARING - _mapper_field_keys()
-    assert not missing, (
-        f"the ast walk no longer finds {sorted(missing)} — the mapper's read shape changed, so the "
-        "collected key set is incomplete and the parity test below is now weaker than it looks"
-    )
-
-
-def test_contract_and_mapper_agree_on_field_keys() -> None:
-    """Neither side may carry a field key the other does not know about."""
-    documented = _first_column(_section("2. Field keys"))
     read = _mapper_field_keys()
-    roadmap = _roadmap_keys()
-
-    undocumented = read - documented
-    assert not undocumented, (
-        f"the mapper reads {sorted(undocumented)}, which the contract does not ask anyone to "
-        "extract — the field will arrive as fields_unavailable and read as 'not carried by this class'"
+    assert read == set(), (
+        f"the mapper reads {sorted(read)} out of the extraction by literal key; extracted content is "
+        "carried in idp_sections and needs no promotion"
     )
 
-    unread = documented - read - roadmap
-    assert not unread, (
-        f"the contract requires {sorted(unread)}, which nothing reads — either the mapper is missing "
-        "it or it belongs under '## Roadmap'"
+
+def test_the_promoted_field_list_is_empty() -> None:
+    """Asserted separately from the mapper, because the two could drift apart in either direction.
+
+    A name in the tuple with no matching read is a stale claim; a read with no tuple entry is the
+    coupling itself. Both are caught by pinning the tuple at empty.
+    """
+    assert set(PROMOTED_EXTRACTED_FIELDS) == set(), (
+        f"PROMOTED_EXTRACTED_FIELDS is no longer empty: {sorted(PROMOTED_EXTRACTED_FIELDS)}"
     )
 
 

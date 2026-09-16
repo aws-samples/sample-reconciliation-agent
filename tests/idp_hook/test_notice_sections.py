@@ -1,9 +1,9 @@
 """Per-section extraction detail embedded on the notice row at ingest.
 
-The Documents drawer renders what the extractor read from the notice row itself. It used to ask
-IDP's GraphQL API for the same section results on every open, which needed a second field-scoped
-grant on somebody else's AppSync API and a TypeScript re-implementation of
-``backend/idp_hook/explainability.py``. Embedding at ingest removes both, on the same grounds as
+The Documents drawer renders what the extractor read from the notice row itself. The alternative —
+asking IDP's GraphQL API for the same section results on every open — needs a second field-scoped
+grant on somebody else's AppSync API plus a TypeScript re-implementation of
+``backend/idp_hook/explainability.py``. Embedding at ingest avoids both, on the same grounds as
 ``idp_pages``: the values are already in hand when the hook runs.
 
 Two things must hold for that to be safe, and they are what this module pins:
