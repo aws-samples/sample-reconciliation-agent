@@ -6,9 +6,10 @@ import { signOut } from "@/components/AuthWrapper";
 
 // Sign-out for the shell's two controls (the rail footer and the landing page's cards).
 //
-// The provider SDKs reject rather than redirect when they have nothing to sign out of — MSAL with an
-// unconfigured client id, OktaAuth with an empty issuer — and a `void signOut()` discards that
-// rejection, leaving a button that does nothing. Callers should not render the control at all when
+// Every provider rejects rather than redirects when it has nothing to sign out of — MSAL with an
+// unconfigured client id, OktaAuth with an empty issuer, and the Cognito path with no hosted UI
+// domain (`lib/auth/cognito-pkce.ts` throws for exactly this reason) — and a `void signOut()`
+// discards that rejection, leaving a button that does nothing. Callers should not render the control at all when
 // the viewer is anonymous (see `viewer.mode`); this hook is for everything else that can still go
 // wrong, so the user reads why instead of clicking again.
 

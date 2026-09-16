@@ -14,12 +14,15 @@ import { SignJWT, exportJWK, generateKeyPair, type JWK } from "jose";
 import {
   anonymousGroups,
   authorizeRequest,
+  cognitoIssuer,
+  groupsFrom,
   isAnonymousEnabled,
   oktaJwksUri,
   resolveApiAuth,
   type ApiAuthConfig,
 } from "@/lib/api-auth";
 
+import { scopedEnv } from "../helpers/env";
 import {
   clearAuthEnv,
   restoreAuthEnv,
@@ -30,6 +33,11 @@ import {
 const ISSUER = "https://integrator-1234567.okta.com/oauth2/default";
 const CLIENT_ID = "0oaTESTclientid";
 
+/** Fictional pool coordinates. Real ones belong in a task definition, never in a repository. */
+const POOL_ID = "us-east-1_TESTpool";
+const POOL_CLIENT_ID = "1example23clientid456";
+const POOL_ISSUER = `https://cognito-idp.us-east-1.amazonaws.com/${POOL_ID}`;
+
 /** The shell-wide switch first, then the two app-specific names it superseded. */
 const ANONYMOUS_SWITCH_NAMES = [
   "ALLOW_ANONYMOUS_API",
@@ -38,6 +46,97 @@ const ANONYMOUS_SWITCH_NAMES = [
 ] as const;
 
 describe("resolveApiAuth", () => {
+  it("resolves cognito to the pool's issuer, JWKS and app client id", () => {
+    const config = resolveApiAuth({
+      AUTH_PROVIDER: "cognito",
+      COGNITO_USER_POOL_ID: POOL_ID,
+      COGNITO_CLIENT_ID: POOL_CLIENT_ID,
+      AWS_REGION: "us-east-1",
+    });
+    expect(config).toEqual({
+      mode: "cognito",
+      issuer: POOL_ISSUER,
+      jwksUri: `${POOL_ISSUER}/.well-known/jwks.json`,
+      audience: POOL_CLIENT_ID,
+    });
+  });
+
+  it("builds the issuer from the region, not from the hosted UI domain", () => {
+    // The hosted UI domain is where the BROWSER signs in. A deployment that puts it in the pool-id
+    // variable fails every verification with an issuer mismatch, so the issuer is derived here.
+    expect(cognitoIssuer("eu-west-2", POOL_ID)).toBe(
+      `https://cognito-idp.eu-west-2.amazonaws.com/${POOL_ID}`,
+    );
+    const config = resolveApiAuth({
+      AUTH_PROVIDER: "cognito",
+      COGNITO_USER_POOL_ID: POOL_ID,
+      COGNITO_CLIENT_ID: POOL_CLIENT_ID,
+      AWS_REGION: "eu-west-2",
+    });
+    expect(config.issuer).toBe(
+      `https://cognito-idp.eu-west-2.amazonaws.com/${POOL_ID}`,
+    );
+  });
+
+  it("defaults the region the way the rest of the BFF does", () => {
+    const config = resolveApiAuth({
+      AUTH_PROVIDER: "cognito",
+      COGNITO_USER_POOL_ID: POOL_ID,
+      COGNITO_CLIENT_ID: POOL_CLIENT_ID,
+    });
+    expect(config.issuer).toBe(POOL_ISSUER);
+  });
+
+  it.each([
+    ["the pool id", { COGNITO_CLIENT_ID: POOL_CLIENT_ID }],
+    ["the client id", { COGNITO_USER_POOL_ID: POOL_ID }],
+    ["both", {}],
+  ])(
+    "is misconfigured (a 503, never an open door) when %s is missing",
+    (_label, partial) => {
+      const config = resolveApiAuth({ AUTH_PROVIDER: "cognito", ...partial });
+      expect(config.mode).toBe("misconfigured");
+      // Both names, like the okta and entra branches: the 503 body is where an operator finds out
+      // which variable the deploy dropped.
+      expect(config.reason).toContain("COGNITO_USER_POOL_ID");
+      expect(config.reason).toContain("COGNITO_CLIENT_ID");
+    },
+  );
+
+  it("treats a blank pool id or client id as unset", () => {
+    // A task definition that declares the variable with an empty value must not resolve to an
+    // issuer ending in a slash and then reject every token for an issuer mismatch.
+    expect(
+      resolveApiAuth({
+        AUTH_PROVIDER: "cognito",
+        COGNITO_USER_POOL_ID: "   ",
+        COGNITO_CLIENT_ID: POOL_CLIENT_ID,
+      }).mode,
+    ).toBe("misconfigured");
+  });
+
+  it("defaults an unset AUTH_PROVIDER to cognito", () => {
+    // The mirror of the browser's default in lib/auth/provider.ts. If these two disagreed, the app
+    // would sign in with one provider and have every call rejected by the other.
+    const config = resolveApiAuth({
+      COGNITO_USER_POOL_ID: POOL_ID,
+      COGNITO_CLIENT_ID: POOL_CLIENT_ID,
+    });
+    expect(config.mode).toBe("cognito");
+    expect(config.audience).toBe(POOL_CLIENT_ID);
+  });
+
+  it("says the provider was DEFAULTED, not named, when nothing at all is configured", () => {
+    // Same 503 either way; different next step. An operator who wrote AUTH_PROVIDER=cognito has a
+    // missing variable; a laptop that wrote nothing wants to hear about the anonymous switch.
+    const named = resolveApiAuth({ AUTH_PROVIDER: "cognito" }).reason ?? "";
+    const defaulted = resolveApiAuth({}).reason ?? "";
+    expect(named).toContain("AUTH_PROVIDER=cognito");
+    expect(named).not.toContain("ALLOW_ANONYMOUS_API");
+    expect(defaulted).toContain("AUTH_PROVIDER is unset");
+    expect(defaulted).toContain("ALLOW_ANONYMOUS_API=true");
+  });
+
   it("resolves okta from the runtime (non-NEXT_PUBLIC) env vars", () => {
     const config = resolveApiAuth({
       AUTH_PROVIDER: "okta",
@@ -129,6 +228,59 @@ describe("resolveApiAuth", () => {
       NEXT_PUBLIC_OKTA_CLIENT_ID: CLIENT_ID,
     });
     expect(config.mode).toBe("okta");
+  });
+
+  it("falls back to NEXT_PUBLIC_COGNITO_* for next dev too", () => {
+    // `next dev` loads .env.local into the SERVER process, so the browser's copies are all it has.
+    const config = resolveApiAuth({
+      NEXT_PUBLIC_AUTH_PROVIDER: "cognito",
+      NEXT_PUBLIC_COGNITO_USER_POOL_ID: POOL_ID,
+      NEXT_PUBLIC_COGNITO_CLIENT_ID: POOL_CLIENT_ID,
+      NEXT_PUBLIC_AWS_REGION: "us-east-1",
+    });
+    expect(config).toMatchObject({
+      mode: "cognito",
+      issuer: POOL_ISSUER,
+      audience: POOL_CLIENT_ID,
+    });
+  });
+});
+
+describe("groupsFrom", () => {
+  const payload = {
+    groups: ["okta-group"],
+    "cognito:groups": ["recon-admins"],
+    "custom:groups": ["federated-desk"],
+  };
+
+  it("reads `groups` when no mode is given", () => {
+    expect(groupsFrom(payload, {})).toEqual(["okta-group"]);
+  });
+
+  it.each(["okta", "entra"] as const)(
+    "still reads `groups` in %s mode",
+    (mode) => {
+      // The pre-Cognito behaviour, unchanged: these two deployments must see exactly what they saw.
+      expect(groupsFrom(payload, {}, mode)).toEqual(["okta-group"]);
+    },
+  );
+
+  it("reads `cognito:groups` in cognito mode", () => {
+    // A user pool emits the reserved claim and will not let you rename it, so the default follows
+    // the provider rather than making every Cognito deployment set a variable.
+    expect(groupsFrom(payload, {}, "cognito")).toEqual(["recon-admins"]);
+  });
+
+  it("lets an explicit AUTH_GROUPS_CLAIM win over the per-provider default", () => {
+    // The federated case: a pool can map an incoming SAML/OIDC group attribute to a custom claim
+    // rather than to the reserved one, and that deployment must be able to say so.
+    const env = { AUTH_GROUPS_CLAIM: "custom:groups" };
+    expect(groupsFrom(payload, env, "cognito")).toEqual(["federated-desk"]);
+    expect(groupsFrom(payload, env, "okta")).toEqual(["federated-desk"]);
+  });
+
+  it("reports no groups when the named claim is absent", () => {
+    expect(groupsFrom({ groups: ["x"] }, {}, "cognito")).toEqual([]);
   });
 });
 
@@ -408,6 +560,145 @@ describe("authorizeRequest", () => {
     } finally {
       globalThis.fetch = saved;
     }
+  });
+
+  // The Cognito path, which is the DEFAULT provider. Same verifier, one extra claim check, and a
+  // different default group claim.
+  describe("cognito mode", () => {
+    let cognitoConfig: ApiAuthConfig;
+    const env = scopedEnv(["AUTH_GROUPS_CLAIM"]);
+
+    beforeAll(() => {
+      cognitoConfig = resolveApiAuth({
+        AUTH_PROVIDER: "cognito",
+        COGNITO_USER_POOL_ID: POOL_ID,
+        COGNITO_CLIENT_ID: POOL_CLIENT_ID,
+        AWS_REGION: "us-east-1",
+      });
+    });
+
+    beforeEach(() => env.clear());
+    afterAll(() => env.restore());
+
+    /**
+     * Mint a token signed by the same test key but stamped as the user pool would stamp it.
+     *
+     * `token_use` defaults to "id" because that is what the app sends; the cases below override it to
+     * exercise the check that keeps an access token out.
+     */
+    async function poolToken(
+      claims: Record<string, unknown> = {},
+      audience: string | undefined = POOL_CLIENT_ID,
+    ): Promise<string> {
+      const jwt = new SignJWT({ token_use: "id", ...claims })
+        .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+        .setIssuer(POOL_ISSUER)
+        .setSubject((claims.sub as string) ?? "11111111-2222-3333-4444-555555555555")
+        .setIssuedAt()
+        .setExpirationTime("5m");
+      // An access token carries no `aud` at all, so the audience has to be omittable here.
+      if (audience !== undefined) jwt.setAudience(audience);
+      return jwt.sign(privateKey);
+    }
+
+    it("accepts a valid pool ID token and reports the subject", async () => {
+      const result = await authorizeRequest(
+        req(`Bearer ${await poolToken()}`),
+        cognitoConfig,
+      );
+      expect(result).toEqual({
+        ok: true,
+        mode: "cognito",
+        subject: "11111111-2222-3333-4444-555555555555",
+        groups: [],
+      });
+    });
+
+    it("reads group membership from cognito:groups by default", async () => {
+      const signed = await poolToken({
+        "cognito:groups": ["recon-admins", "deal-desk"],
+        // The claim the other two providers use is present and must be ignored: under Cognito it is
+        // not the reserved one, so it is not authoritative.
+        groups: ["not-this-one"],
+      });
+      expect(
+        await authorizeRequest(req(`Bearer ${signed}`), cognitoConfig),
+      ).toMatchObject({ ok: true, groups: ["recon-admins", "deal-desk"] });
+    });
+
+    it("lets AUTH_GROUPS_CLAIM override cognito:groups (the federated case)", async () => {
+      env.set({ AUTH_GROUPS_CLAIM: "custom:groups" });
+      const signed = await poolToken({
+        "custom:groups": ["federated-desk"],
+        "cognito:groups": ["recon-admins"],
+      });
+      expect(
+        await authorizeRequest(req(`Bearer ${signed}`), cognitoConfig),
+      ).toMatchObject({ ok: true, groups: ["federated-desk"] });
+    });
+
+    it("401s on an ACCESS token minted for the same pool", async () => {
+      // The shape that matters: a Cognito access token has NO `aud` (it carries `client_id`), is
+      // signed by the same key from the same issuer, and any signed-in user can obtain one.
+      const accessToken = await poolToken(
+        { token_use: "access", client_id: POOL_CLIENT_ID, scope: "openid" },
+        undefined,
+      );
+      expect(
+        await authorizeRequest(req(`Bearer ${accessToken}`), cognitoConfig),
+      ).toMatchObject({ ok: false, status: 401 });
+    });
+
+    it("401s on an access token even when it does carry the right aud", async () => {
+      // The audience check is what rejects the real shape above, so this case removes it: it proves
+      // the token_use assertion is load-bearing on its own, and would fail if someone later relaxed
+      // the audience rule (a second client id, a resource-server audience) without noticing.
+      const result = await authorizeRequest(
+        req(`Bearer ${await poolToken({ token_use: "access" })}`),
+        cognitoConfig,
+      );
+      expect(result).toMatchObject({ ok: false, status: 401 });
+      expect(result.ok === false && result.message).toContain("token_use");
+    });
+
+    it("401s when token_use is absent altogether", async () => {
+      const result = await authorizeRequest(
+        req(`Bearer ${await poolToken({ token_use: undefined })}`),
+        cognitoConfig,
+      );
+      expect(result).toMatchObject({ ok: false, status: 401 });
+    });
+
+    it("401s on an ID token minted for a different app client", async () => {
+      const other = await poolToken({}, "9other88clientid777");
+      expect(
+        await authorizeRequest(req(`Bearer ${other}`), cognitoConfig),
+      ).toMatchObject({ ok: false, status: 401 });
+    });
+
+    it("401s on an ID token from a different user pool", async () => {
+      const other = await new SignJWT({ token_use: "id" })
+        .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+        .setIssuer("https://cognito-idp.us-east-1.amazonaws.com/us-east-1_OTHERpool")
+        .setAudience(POOL_CLIENT_ID)
+        .setSubject("11111111-2222-3333-4444-555555555555")
+        .setIssuedAt()
+        .setExpirationTime("5m")
+        .sign(privateKey);
+      expect(
+        await authorizeRequest(req(`Bearer ${other}`), cognitoConfig),
+      ).toMatchObject({ ok: false, status: 401 });
+    });
+
+    it("503s (never 200) when the pool id or client id is missing", async () => {
+      // End to end from the environment: a deploy that lost a variable must break visibly.
+      const result = await authorizeRequest(
+        req(`Bearer ${await poolToken()}`),
+        resolveApiAuth({ AUTH_PROVIDER: "cognito", COGNITO_CLIENT_ID: POOL_CLIENT_ID }),
+      );
+      expect(result).toMatchObject({ ok: false, status: 503 });
+      expect(result.ok === false && result.message).toContain("COGNITO_USER_POOL_ID");
+    });
   });
 
   describe("anonymous mode", () => {

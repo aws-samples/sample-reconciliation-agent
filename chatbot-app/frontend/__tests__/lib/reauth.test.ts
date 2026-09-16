@@ -35,8 +35,17 @@ const msalConfigModule = {
   ENTRA_OBO_SCOPE: "",
 };
 
+const buildLoginUrl = vi.fn();
+const clearTokens = vi.fn();
+const cognitoPkceModule = {
+  HAS_COGNITO_CONFIG: true,
+  buildLoginUrl,
+  clearTokens,
+};
+
 vi.mock("@/lib/okta-config", () => oktaConfigModule);
 vi.mock("@/lib/msal-config", () => msalConfigModule);
+vi.mock("@/lib/auth/cognito-pkce", () => cognitoPkceModule);
 
 vi.mock("@okta/okta-auth-js", () => ({
   OktaAuth: class {
@@ -70,22 +79,49 @@ function installRealSessionStorage(): void {
   });
 }
 
-/** Load a fresh copy of reauth.ts bound to `provider`. */
-async function loadReauth(provider: "okta" | "entra") {
-  process.env.NEXT_PUBLIC_AUTH_PROVIDER = provider;
+/** Load a fresh copy of reauth.ts bound to `provider`; `undefined` exercises the default. */
+async function loadReauth(provider?: "cognito" | "okta" | "entra") {
+  if (provider === undefined) delete process.env.NEXT_PUBLIC_AUTH_PROVIDER;
+  else process.env.NEXT_PUBLIC_AUTH_PROVIDER = provider;
   vi.resetModules();
   return import("@/lib/reauth");
 }
 
+/**
+ * Stub `window.location` with a navigation spy.
+ *
+ * The Cognito path has no SDK to intercept: re-authentication IS a top-level navigation, so the
+ * assertion has to be on `assign`. jsdom throws "Not implemented" on the real one.
+ */
+function stubLocation(): ReturnType<typeof vi.fn> {
+  const assign = vi.fn();
+  Object.defineProperty(window, "location", {
+    configurable: true,
+    value: {
+      assign,
+      href: "https://console.example.com/recon/config",
+      origin: "https://console.example.com",
+      hostname: "console.example.com",
+    },
+  });
+  return assign;
+}
+
 describe("reauthenticate", () => {
   const savedProvider = process.env.NEXT_PUBLIC_AUTH_PROVIDER;
+  const savedLocation = window.location;
 
   beforeEach(() => {
     signInWithRedirect.mockReset().mockResolvedValue(undefined);
     loginRedirect.mockReset().mockResolvedValue(undefined);
     clear.mockReset();
+    buildLoginUrl
+      .mockReset()
+      .mockResolvedValue("https://example-login.auth.us-east-1.amazoncognito.com/oauth2/authorize");
+    clearTokens.mockReset();
     oktaConfigModule.HAS_OKTA_CONFIG = true;
     msalConfigModule.HAS_ENTRA_CONFIG = true;
+    cognitoPkceModule.HAS_COGNITO_CONFIG = true;
     // The loop guard lives in sessionStorage, and it is per-tab state that must not leak between
     // cases — a stale mark would silently make the next case's redirect "refused".
     installRealSessionStorage();
@@ -98,6 +134,46 @@ describe("reauthenticate", () => {
     if (savedProvider === undefined)
       delete process.env.NEXT_PUBLIC_AUTH_PROVIDER;
     else process.env.NEXT_PUBLIC_AUTH_PROVIDER = savedProvider;
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: savedLocation,
+    });
+  });
+
+  it("redirects to the Cognito hosted UI when no provider is named", async () => {
+    // Unset means Cognito (`lib/auth/provider.ts`), and this is the path a 401 takes on a default
+    // deployment — so it must be a real redirect, not the "nothing configured" log.
+    const assign = stubLocation();
+    const { reauthenticate } = await loadReauth(undefined);
+
+    expect(await reauthenticate("expired")).toBe(true);
+    expect(buildLoginUrl).toHaveBeenCalledWith("https://console.example.com/recon/config");
+    expect(assign).toHaveBeenCalledWith(await buildLoginUrl.mock.results[0].value);
+    expect(signInWithRedirect).not.toHaveBeenCalled();
+    expect(loginRedirect).not.toHaveBeenCalled();
+  });
+
+  it("drops the dead Cognito tokens before navigating away", async () => {
+    // Same reason as the Okta branch: a redirect that fails must leave the app unauthenticated, not
+    // holding a token that 401s every call behind a signed-in-looking UI.
+    stubLocation();
+    const { reauthenticate } = await loadReauth("cognito");
+
+    await reauthenticate("expired");
+
+    expect(clearTokens).toHaveBeenCalled();
+  });
+
+  it("reports failure rather than redirecting when Cognito is unconfigured", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const assign = stubLocation();
+    cognitoPkceModule.HAS_COGNITO_CONFIG = false;
+    const { reauthenticate } = await loadReauth("cognito");
+
+    expect(await reauthenticate("unauthorized")).toBe(false);
+    expect(assign).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
   });
 
   it("redirects to Okta and comes back to the current page", async () => {

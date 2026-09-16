@@ -20,16 +20,18 @@ hard way; none of it is inferable from reading the code.
 ## Commands that are actually the gate
 
 ```bash
-python3 -m pytest tests/ -q                  # 1874 passed, 21 skipped, ~50s
-python3 -m ruff check backend/ tests/        # lint
-cd chatbot-app/frontend && npx vitest run    # 124 files, 1711 tests
+python3 -m pytest tests/ -q                  # 2179 passed, 20 skipped, ~65s
+python3 -m ruff check .                      # lint (backend/, tests/, scripts/)
+cd chatbot-app/frontend && npx vitest run    # 143 files, 2051 tests
 cd chatbot-app/frontend && npx tsc --noEmit  # typecheck
+cd chatbot-app/frontend && npm run build     # then `git checkout -- next-env.d.ts`: the build rewrites it
 cd infra/environments/recon && terraform fmt -check -recursive ../..
 # Module tests: plan-only under mocked providers, no credentials. Both CIs run them, and they are
 # the only check that notices a renamed PIPELINE_* variable or a missing task-role grant.
 for tests in infra/modules/*/tests; do
   (cd "$(dirname "$tests")" && terraform init -backend=false && terraform test)
 done
+#                                            # 74 tests across 8 modules
 ```
 
 Three traps:
@@ -37,8 +39,9 @@ Three traps:
 - **`terraform validate` from `infra/` passes vacuously.** There is no configuration at that level.
   Run it from `infra/environments/recon`.
 - **Repo-wide ESLint is broken.** Use `prettier` + `tsc --noEmit`; CI's `frontend` job is the real gate.
-- **`ruff format` drift is pre-existing in 34 files.** Don't reformat them as a side effect — check
-  whether a file was already drifting at `HEAD` before "fixing" it.
+- **`ruff format` drift is pre-existing in 33 files.** Don't reformat them as a side effect — check
+  whether a file was already drifting at `HEAD` before "fixing" it, and run `ruff format` on a file you
+  ADD so the count does not grow.
 
 Every count above is a snapshot measured at `HEAD`, and **nothing asserts any of them.** They have
 drifted apart three ways before (this file, `README.md` and `.gitlab-ci.yml` each quoted a different
@@ -71,7 +74,10 @@ either app's edges:
 | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `chatbot-app/frontend/src/lib/auth/apps.ts`         | The app registry: `APPS`, `Viewer`, `resolveAppAccess`, `adminGroupFor` / `accessGroupFor`, `allConfiguredGroups`, `appForApiPath` / `appForPagePath`. Adding an app is one entry here plus its route trees; the pipeline entry also names `PIPELINE_ENABLED` as its `enabledEnv` |
 | `chatbot-app/frontend/src/lib/console/types.ts`     | The console-wide configuration contract: the SSM layout under `CONSOLE_SETTINGS_PREFIX`, the stored → env → default resolution as an overlay on the names `apps.ts` reads, the `/api/console/*` route shapes, the env-only switches (`REQUIRE_ACCESS_GROUPS`, `ALLOW_ANONYMOUS_API` and its two pre-shell names, `CONSOLE_ADMIN_GROUP`) and the validation limits. §14 of the design doc is the prose |
-| `chatbot-app/frontend/src/lib/api-auth.ts`          | Token verification, the groups claim, anonymous mode — three switch names mean the same thing (`ALLOW_ANONYMOUS_API`, plus the pre-shell `RECON_ALLOW_ANONYMOUS_API` and `PIPELINE_ALLOW_ANONYMOUS_API`), narrowed by `ANONYMOUS_GROUPS` |
+| `chatbot-app/frontend/src/lib/api-auth.ts`          | Token verification, the groups claim, anonymous mode — three switch names mean the same thing (`ALLOW_ANONYMOUS_API`, plus the pre-shell `RECON_ALLOW_ANONYMOUS_API` and `PIPELINE_ALLOW_ANONYMOUS_API`), narrowed by `ANONYMOUS_GROUPS`. Also the SERVER's `AUTH_PROVIDER` default and the per-provider default group claim |
+| `chatbot-app/frontend/src/lib/auth/provider.ts`     | The BROWSER's one reader of `NEXT_PUBLIC_AUTH_PROVIDER`, and the only place the default lives. Four modules used to carry their own `?? "entra"`; the gate, the token reader, the re-auth redirect and the header chip all call `authProviderBranch()` now |
+| `chatbot-app/frontend/src/lib/auth/cognito-pkce.ts` | The Cognito browser half: the `/oauth2/authorize` redirect, the code-for-token exchange, `state`, refresh-on-read, `sessionStorage` keys, `COGNITO_CALLBACK_PATH = "/callback"`. No SDK — platform `crypto` + `fetch`. `src/components/CognitoAuthWrapper.tsx` is the gate that drives it and `src/app/callback/page.tsx` the page under it |
+| `infra/modules/console-auth`                        | The pool itself when `auth_provider = "cognito"`: admin-create-only users, the hosted-UI domain, the public PKCE client and the five groups. **Not** in `modules/foundation`, deliberately — the module header says why, and the recon root's `local.console_groups` / `local.auth_groups_claim` are what keep the pool, the console and the intake authorizer agreeing |
 | `chatbot-app/frontend/src/proxy.ts`                 | The deny-by-default gate: every `/api/recon/*` and `/api/pipeline/*` request is verified and matched against that app's access group before a handler runs; a disabled app's BFF is a 403 |
 | `src/lib/auth/app-admin.ts` (`reconAdmin.ts` is recon's named binding) | The admin re-check inside the write routes that carry one — every pipeline write, but only part of recon's (see the access-groups rule below). The rail hiding a button is not the gate |
 | `src/lib/pipeline/server/env.ts`                    | Every environment name the pipeline BFF reads                                                                                                                            |
@@ -81,9 +87,10 @@ Rules that follow:
 
 - **The two apps stay decoupled.** Nothing under `src/{app,components,lib,hooks}` that is recon's
   imports from the pipeline's tree, or the reverse. The shared surface is the identity spine
-  (`src/lib/auth/`: the registry, `client-token.ts`, `authed-fetch.ts` behind every BFF client,
-  `app-admin.ts` behind every admin-gated write; `src/lib/api-auth.ts`, `src/lib/reauth.ts`, the auth
-  wrappers; `src/hooks/useAppSubject.ts` over the shell's `/api/me` store), the instrument theme
+  (`src/lib/auth/`: the registry, `provider.ts`, `cognito-pkce.ts`, `client-token.ts`,
+  `authed-fetch.ts` behind every BFF client, `app-admin.ts` behind every admin-gated write;
+  `src/lib/api-auth.ts`, `src/lib/reauth.ts`, the three auth wrappers and the switch in front of
+  them; `src/hooks/useAppSubject.ts` over the shell's `/api/me` store), the instrument theme
   (`src/app/app-theme.css`) with the chrome and primitives built on it (`src/components/app-ui/`), the
   `src/components/ui/` primitives, and app-agnostic helpers with no app state (`src/lib/server/` —
   HTTP envelope, memory request parsing, the model allowlist, `ssm.ts`, `memoryClient.ts` and
@@ -99,6 +106,26 @@ Rules that follow:
   On the Python side the same rule holds for `backend/recon_core/`: `deal_pipeline` imports it
   (memory retrieval, model selection, DynamoDB update helpers, S3 text reads, the SKILL.md parser
   with its `name_fallback` and `ttl_seconds` options) and adds nothing recon-specific to it.
+- **`AUTH_PROVIDER` unset means `cognito`, on BOTH sides, and the two must never diverge.** Since
+  2026-09-16 the default provider is an Amazon Cognito user pool this stack creates
+  (`infra/modules/console-auth`), because a sample deployed into a customer's own account cannot
+  require an external IdP tenant before the console opens. Okta and Entra are unchanged and still
+  selected by naming them. Two rules follow. **(1)** The browser default lives in
+  `src/lib/auth/provider.ts` and the server default in `resolveApiAuth`
+  (`src/lib/api-auth.ts`), and they must stay equal: a server defaulting to Entra while the browser
+  signs in with Cognito renders a UI that looks signed in and 401s every call, with nothing on screen
+  to say why. **(2)** An unrecognised value still resolves to Entra in the browser and to
+  `misconfigured` (a 503, never an open door) on the server — that asymmetry is deliberate
+  compatibility, not a bug: `"Okta"` picked Entra before Cognito existed and must keep picking it.
+  Do not lower-case or trim it "for consistency".
+- **`AUTH_GROUPS_CLAIM` has no literal default, and must not be given one.** A user pool emits group
+  membership as the reserved claim `cognito:groups`, which the service will not let you rename; Okta
+  and Entra release `groups` (or `roles`). Both halves resolve blank per provider —
+  `defaultGroupsClaim` in `api-auth.ts`, `local.auth_groups_claim` in the recon root. A hard-coded
+  `"groups"` default fails in the worst available way: every token verifies, every group list comes
+  back EMPTY, and every user is denied every app and every admin route with nothing anywhere saying
+  why. The env override is what a **federated** pool needs, because a SAML/OIDC provider mapped into
+  the pool commonly lands its groups on `custom:groups` instead.
 - **Access groups: unset access = open, unset admin = closed — until `REQUIRE_ACCESS_GROUPS`.**
   `RECON_ACCESS_GROUP` / `PIPELINE_ACCESS_GROUP` unset keeps that app open to every authenticated
   user (what a recon-only deployment had before the shell). `REQUIRE_ACCESS_GROUPS=true` (exact
@@ -108,6 +135,15 @@ Rules that follow:
   moment two populations share one OIDC client, "every authenticated user" stops meaning "a recon
   analyst". `RECON_ADMIN_GROUP` / `PIPELINE_ADMIN_GROUP` unset means nobody can change that app. Do
   not "fix" either direction.
+
+  ⚠️ That is about the console's **environment**, and under Cognito the environment is never blank.
+  `local.console_groups` in the recon root resolves a blank `*_group` variable to the group the pool
+  actually created (`recon-users`, `recon-admins`, `deal-desk`, `deal-desk-admins`,
+  `console-admins`), so the four names always reach the task non-blank — which is why the
+  `enable_deal_pipeline` validation exempts `auth_provider = "cognito"`, and why "unset access = open"
+  simply never arises there. Under Okta or Entra, `""` still reaches the console as `""` and every
+  sentence above holds unchanged. Reading the rule off `apps.ts` alone will mislead you: the
+  resolution happens in Terraform, and the console only ever sees the result.
 - **`RECON_ACCESS_GROUP` is recon's real write boundary, not `RECON_ADMIN_GROUP`.** Every pipeline
   write route re-checks the admin group. Recon's admin group gates only `config/*` (threshold,
   backend, Tier-1, contacts, templates, workflow-types), `memory` DELETE and `uploads`; the
@@ -203,11 +239,21 @@ aws stepfunctions describe-state-machine \
 
 aws ssm get-parameters-by-path --path /recon-dev/console --recursive  # stored console settings that
                                                              # OVERLAY the task's group names
+
+# WHO CAN SIGN IN. Under auth_provider = "cognito" the pool's groups are created EMPTY, so the tracked
+# tree says which groups exist and nothing at all about who is in them. A console that "denies
+# everyone" is almost always this and not a code problem.
+POOL=$(cd infra/environments/recon && terraform output -raw cognito_user_pool_id)
+aws cognito-idp list-users --user-pool-id "$POOL" --query 'Users[].Username'
+aws cognito-idp list-users-in-group --user-pool-id "$POOL" --group-name recon-users \
+  --query 'Users[].Username'
+# scripts/create_dev_users.py --dry-run reports the same thing for the five demonstration accounts.
 ```
 
-The last one is the console layer (§14 of the design doc): a group name or `PIPELINE_ENABLED` in the
-task definition is only the fallback, and a value stored under `CONSOLE_SETTINGS_PREFIX` wins. The
-Settings screen shows which is in force (`stored` / `env` / `default` chips); so does this command.
+The console-settings one is the console layer (§14 of the design doc): a group name or
+`PIPELINE_ENABLED` in the task definition is only the fallback, and a value stored under
+`CONSOLE_SETTINGS_PREFIX` wins. The Settings screen shows which is in force (`stored` / `env` /
+`default` chips); so does this command.
 
 The interceptor one matters most: it is the only place the provenance, evidence-quality and
 case-transition guards are enforced, and in `log` mode all three degrade to observation while every
@@ -226,6 +272,9 @@ Don't restate a rule in a second place — these are the single owners:
 | What extraction must emit                | `data/input/IDP-EXTRACTION-REQUIREMENTS.md`, asserted both ways by `tests/input_corpus/` |
 | The classification catalog               | `agent-blueprint/recon-agent/skills/*.md`                                                |
 | Which app owns a path, and who may use it | `chatbot-app/frontend/src/lib/auth/apps.ts`                                              |
+| Which identity provider the browser uses | `chatbot-app/frontend/src/lib/auth/provider.ts` (the server's mirror is `resolveApiAuth` in `api-auth.ts`) |
+| The Cognito browser flow (redirect, exchange, `state`, refresh, storage) | `chatbot-app/frontend/src/lib/auth/cognito-pkce.ts` |
+| Which group name each console role resolves to | `local.console_groups` in `infra/environments/recon/main.tf`, from the pool in `infra/modules/console-auth` |
 | The console-wide settings layout and resolution order | `chatbot-app/frontend/src/lib/console/types.ts`                              |
 | The OMS staging-CSV schema               | `backend/deal_pipeline/oms_fields.json` (the frontend mirror is asserted equal by a test)  |
 | The mock OMS validation rules            | `backend/deal_pipeline/oms_validator.py`, one stable `code` per rule                      |
@@ -246,5 +295,8 @@ lies.**
   the only defence, and all three of `data/input/`, `data/kb-seed/` and the rest of `data/` are
   swept. A tenant domain is the one exception, written as Microsoft's documentation placeholder
   `contoso.onmicrosoft.com`; the real one belongs in the gitignored tfvars and nowhere else.
+  The same rule holds outside `data/` wherever an address is a literal: `scripts/create_dev_users.py`
+  creates its five demonstration operators at `example.com` and takes **no** domain argument, so it
+  can neither mail a real person nor `--delete` a real operator's account. Its own test asserts that.
 - This is the first release. Nothing is "legacy", and there are no design-record or `§`-section
   references to a document outside the repo. If a comment needs a rule, state the rule.

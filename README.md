@@ -17,7 +17,9 @@ In addition AgentCore Memory and user feedback is used to extract generalizable 
 
 ## Two applications, one console
 
-The console hosts two applications behind one shell, one sign-in and one identity provider:
+The console hosts two applications behind one shell, one sign-in and one identity provider — an
+Amazon Cognito user pool this stack creates by default, or an external Okta / Entra tenant when
+`auth_provider` names one (see [Authentication](#authentication)):
 
 | App                      | Pages         | BFF               | What it does                                                                                                                                       |
 | ------------------------ | ------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -57,8 +59,20 @@ populations sign in through one OIDC client — a deal-desk user is then "authen
 `/api/recon/*` too — so the composed deployment fails closed: `REQUIRE_ACCESS_GROUPS=true` is set
 whenever the pipeline is enabled, and `infra/environments/recon` refuses to plan
 `enable_deal_pipeline = true` while either `recon_access_group` or `pipeline_access_group` is blank.
-An unset **admin** group fails closed, as it always has. Nothing in Terraform creates a group: an
-operator maintains membership in Okta or Entra and the next token carries it.
+An unset **admin** group fails closed, as it always has.
+
+**Who creates the group depends on the provider, and so does what "unset" means.** With
+`auth_provider = "okta"` or `"entra"` nothing in Terraform can create a group: an operator maintains
+membership in a tenant Terraform cannot see, and the paragraph above is the whole story. With
+`auth_provider = "cognito"` (the default) `infra/modules/console-auth` creates all five groups **in
+the pool**, so an unset variable does not mean "no group" — the root resolves it to the pool's own
+name for that group (`recon-users`, `recon-admins`, `deal-desk`, `deal-desk-admins`,
+`console-admins`) and hands the console those same strings, which is why
+`enable_deal_pipeline = true` is allowed to plan with both access variables blank there. It still
+fails closed in the way that matters: every group is created **empty**, so nobody reaches either app
+until an operator adds a user to one. `terraform output cognito_group_names` prints the five as the
+console will check them, and `scripts/create_dev_users.py` populates them with five demonstration
+accounts.
 
 The access check runs in `src/proxy.ts` for every `/api/recon/*` and `/api/pipeline/*` request. What
 happens after it differs between the apps. **Every Deal Pipeline write route re-checks
@@ -248,13 +262,13 @@ The architecture has three planes:
 
 | Concern            | Implementation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Entry points       | The IDP post-processing hook Lambda (`recon-dev-idp-hook`, invoked by recon's **own** EventBridge rule when an IDP document-processing execution reaches a terminal status), and an intake HTTP API (API Gateway + an OIDC JWT authorizer on the same Okta/Entra provider the console uses) for structured datasets                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Entry points       | The IDP post-processing hook Lambda (`recon-dev-idp-hook`, invoked by recon's **own** EventBridge rule when an IDP document-processing execution reaches a terminal status), and an intake HTTP API (API Gateway + an OIDC JWT authorizer on the same identity provider the console signs in through — the Cognito user pool this stack creates by default, or the Okta/Entra tenant when one is named) for structured datasets                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | Item / case stores | Five DynamoDB tables: `recon-dev-items` (canonical `ReconItem` inputs — **the only stream-enabled table**, which is what makes writing an item the way to open a case), `recon-dev-cases` (case lifecycle, status GSI), `recon-dev-audit` (append-only status-transition log), `recon-dev-lessons` (analyst decisions: approval, correction, auto-resolution, one row per item+trigger), and `recon-dev-notices` (extracted documents as **evidence**). Operator configuration lives in three more: contacts, email templates and workflow types                                                                                                                                                                                                                                                                                                                                                                                                    |
 | Deterministic tier | A Tier-1 Lambda consuming the items stream. Items match within tolerance and items are looked up in a mocked general ledger (Athena over S3) and auto-clear only on an unambiguous attribute match: account name, entry-type direction, and amount within tolerance (toggleable via SSM or the Config tab)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | Tier-2 dispatch    | A Step Functions state machine (`recon-dev-tier2`, STANDARD) on an EventBridge schedule. It collects `PENDING` cases oldest-first off the status GSI to S3, then investigates them in a Distributed `Map` whose **`MaxConcurrency` is the Bedrock token budget** — the escalating consumer dispatches nothing. Each child claims its case, then hands the runtime a Step Functions **task token** so the dispatcher returns in ~1s instead of blocking for the investigation                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | Agent              | Two interchangeable backends selected by the `agent_backend` SSM parameter: an AgentCore Runtime container (Strands `Agent` agentic loop), or the managed AgentCore Harness (config-declared), with the model each one invokes selected by a second parameter (`agent-model-id`), read per invocation. Skills and the system prompt are live from S3, with a ~60 s cache on the runtime and per-session on the harness. Two AgentCore gateways (AWS_IAM/SigV4): the egress tools gateway (9 targets, 6 of them conditional — one is a managed `bedrock-knowledge-bases` **connector** target, the rest Lambda/OpenAPI) with the Cedar Policy confidence gate, and an ingress agent gateway fronting the runtime (one `http/agentcoreRuntime` target of its own). AgentCore Memory holds the `lessons_learned` semantic strategy, and a fully managed Bedrock Knowledge Base holds the guidance corpus, queried with agent-supplied metadata filters |
 | Evaluation         | AgentCore Online Evaluation (a custom analyst-agreement evaluator plus 3 builtins) over harness OTel traces, on-demand batch re-scores, managed recommendations, and a versioned harness-config store (immutable S3 docs + SSM pointer). All of it surfaces in the Evals tab                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| Frontend           | Next.js on ECS Fargate behind an ALB and CloudFront, with a WAFv2 web ACL (`AWSManagedRulesCommonRuleSet`) on the distribution, which is the single internet entry point. Okta OIDC login (`auth_provider`, swappable to Entra) and same-origin BFF routes (`/api/recon/*`, plus `/api/pipeline/*` when the Deal Pipeline app is enabled) running under the task role, gated per app by identity-provider groups (see "Two applications, one console")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Frontend           | Next.js on ECS Fargate behind an ALB and CloudFront, with a WAFv2 web ACL (`AWSManagedRulesCommonRuleSet`) on the distribution, which is the single internet entry point. Amazon Cognito hosted-UI login with PKCE by default (`auth_provider`, swappable to Okta or Entra) and same-origin BFF routes (`/api/recon/*`, plus `/api/pipeline/*` when the Deal Pipeline app is enabled) running under the task role, gated per app by identity-provider groups (see "Two applications, one console")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | Notifications      | Microsoft Graph is the only channel (app-only, from the shared mailbox), reached through the egress gateway's OpenAPI target. It carries resolution emails on approve/auto-resolve (`cases/notify.py` plus the frontend BFF calling `sendSharedMailboxMail` through the gateway with SigV4), counterparty email sent by the BFF from an analyst-approved draft, and mailbox reads (`listSharedMailboxMessages`, reached only through the `search_correspondence` wrapper). No agent holds a send tool on either backend: the model writes the counterparty message into its proposal and a human approves a specific revision of it. Nothing stores an address: a draft and a resolution notice both name a contact id, and the address is read from the contacts table at the moment of sending, so deactivating a contact stops mail to them even if a draft was already approved. Sends are gated at the gateway REQUEST interceptor.            |
 | IaC                | Terraform (`infra/`) with S3-backed state. The AgentCore Harness lifecycle is an `aws_cloudformation_stack` (`infra/modules/recon-agent-harness`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
@@ -364,7 +378,11 @@ infra/
                         api, frontend-ecs, lambda-package, lambda-logs, deploy-actions, network,
                         observability, microsoft-graph-obo, tier2-dispatch, agentcore-memory,
                         seeded-object, deal-pipeline (bucket, tables, memories, parser + OMS
-                        Lambdas), console-settings (the console-wide layer's seeded SSM parameters)
+                        Lambdas), console-settings (the console-wide layer's seeded SSM parameters),
+                        console-auth (the console's OWN identity provider: a Cognito user pool, its
+                        hosted UI, one public PKCE app client and the five console groups —
+                        instantiated only when auth_provider = "cognito", which is the default.
+                        Deliberately NOT in foundation; see "Authentication")
   environments/recon/   The console's root, and the only one (S3-backed state via a partial
                         backend config); enable_deal_pipeline composes modules/deal-pipeline
                         into it
@@ -394,7 +412,7 @@ requirements-dev.txt    Test-only Python deps (pytest, moto, responses, ruff)
 | Layer    | Stack                                                                                                                                                            |
 | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Backend  | Python 3.12, `strands-agents==1.54.0`, `bedrock-agentcore==1.22.0`, `boto3==1.43.89`, `pydantic==2.13.4`, `aws-opentelemetry-distro==0.19.0` (runtime container) |
-| Frontend | Next.js 16, React 18, Tailwind CSS, Radix UI, `@aws-sdk/client-bedrock-agentcore`, MSAL / `@okta/okta-auth-js`                                                   |
+| Frontend | Next.js 16, React 18, Tailwind CSS, Radix UI, `@aws-sdk/client-bedrock-agentcore`; sign-in is Cognito hosted UI + PKCE with **no SDK** (`src/lib/auth/cognito-pkce.ts`, platform `crypto` + `fetch`), or MSAL / `@okta/okta-auth-js` when Entra or Okta is selected |
 | IaC      | Terraform (AWS provider `>= 6.62.0, < 7.0.0` — 6.62.0 is the floor for three AgentCore schema features this stack uses), S3 backend                              |
 | Agent    | Amazon Bedrock AgentCore (Runtime, Harness, Gateway, Memory, Policy, Evaluation, Identity)                                                                       |
 | LLMs     | Claude Sonnet 5 (default for both the runtime and harness backends; selectable per backend)                                                                      |
@@ -402,9 +420,12 @@ requirements-dev.txt    Test-only Python deps (pytest, moto, responses, ruff)
 
 ## Getting Started
 
-You need a clone of this repo, Terraform `>= 1.11`, and AWS credentials for the target account. Steps
-1 to 3 are one-time setup for a fresh account or a fresh checkout; from then on step 4 is the whole
-deployment.
+You need a clone of this repo, Terraform `>= 1.11`, and AWS credentials for the target account —
+**and nothing else**. Sign-in is an Amazon Cognito user pool this stack creates
+(`auth_provider = "cognito"`, the default), so there is no external identity provider to obtain
+before the console can be opened; Okta and Entra remain first-class alternatives and are configured
+exactly as they were. Steps 1 to 3 are one-time setup for a fresh account or a fresh checkout; from
+then on step 3 is the whole deployment, and step 4 is what makes it signable-in.
 
 ### 1. Bootstrap the Terraform state bucket (once per account)
 
@@ -441,9 +462,18 @@ cp backend.hcl.example backend.hcl            # then set the state bucket name f
 cp terraform.tfvars.example terraform.tfvars  # then fill in the required values
 ```
 
-`otel_layer_account` declares no default, so both plan and apply stop until it is set. It is AWS's own
-public layer-publisher account rather than a secret. See
-[Prerequisites & configuration](#prerequisites--configuration) for every variable.
+Two variables declare no usable default, so both plan and apply stop until they are set:
+
+- `otel_layer_account` — AWS's own public layer-publisher account rather than a secret. It lives in
+  tfvars only because the repo's pre-push guard rejects any 12-digit run in a committed file.
+- `cognito_hosted_ui_prefix` — the sign-in host becomes
+  `<prefix>.auth.<region>.amazoncognito.com`, and that name is **globally unique across every AWS
+  account**, so it cannot be derived from `name_prefix` without colliding with the next person who
+  deploys this sample. Add entropy (`recon-dev-login-7f3a`). It may not contain `aws`, `amazon` or
+  `cognito` — Cognito reserves those substrings and refuses the domain. Required only when
+  `auth_provider = "cognito"`; an Okta or Entra deployment never sets it.
+
+See [Prerequisites & configuration](#prerequisites--configuration) for every variable.
 
 ### 3. Deploy
 
@@ -463,11 +493,49 @@ attaches the Cedar Policy, seeds the skills, system prompts and KB corpus to S3,
 wires the CloudFront domain and agent runtime ARN through Terraform's dependency graph, and rolls the
 ECS service. No second apply, no manual build step. Most of the wall-clock time is CodeBuild.
 
-### 4. Configure Okta OIDC app for sign-in
+### 4. Make it signable-in
 
-Register the `okta_redirect_uri_to_register` output as a sign-in redirect URI on the Okta OIDC app,
-and `frontend_url` as a sign-out redirect URI. This needs an Okta org admin. Until the callback URI is
-registered, login cannot complete and every route stops at `400 invalid_request`.
+The apply creates the identity provider; it cannot create the people. What is left depends on
+`auth_provider`.
+
+**`cognito` (the default).** The pool exists with its five console groups and **no users** — self
+sign-up is disabled on purpose, so at this point nobody can open the console and the sign-in page
+offers no way to make an account. Two ways to fix that, and `post_deploy_checklist` says so in the
+apply output:
+
+```bash
+cd infra/environments/recon
+terraform output cognito_first_user_commands   # the two CLI calls for ONE real operator; edit the address
+terraform output cognito_hosted_ui_url         # the sign-in page, openable directly to check the pool
+
+# or five fictional accounts that demonstrate the whole access model at once
+python3 ../../../scripts/create_dev_users.py --dry-run
+python3 ../../../scripts/create_dev_users.py --generate-password
+```
+
+Access comes from **group membership, not from the account existing**: the pool's five groups are
+created empty, so a new user with no group sees the no-access state until an operator adds them to
+one. `scripts/create_dev_users.py` is described in [`scripts/README.md`](scripts/README.md); it is
+idempotent, has a `--dry-run` and a `--delete`, and never writes a password to a file.
+
+The console's own callback and sign-out URLs are registered on the app client by the apply itself
+(`enable_cognito_callback_patch`), because Cognito matches a redirect URL exactly and the CloudFront
+domain does not exist when the client is created. The `patch_cognito_callbacks` action in
+`infra/modules/deploy-actions/src/handler.py` does it: it reads the live client, replaces only the two
+URL lists, and writes everything else back as found. Set `enable_cognito_callback_patch = false` to
+keep that actor out of Cognito and register the two URLs `post_deploy_checklist` prints by hand
+instead.
+
+**`okta`.** Register the `okta_redirect_uri_to_register` output as a sign-in redirect URI on the Okta
+OIDC app, and `frontend_url` as a sign-out redirect URI. This needs an Okta org admin. Until the
+callback URI is registered, login cannot complete and every route stops at `400 invalid_request`.
+
+**`entra`.** The MSAL flow returns to the app's own origin, so there is no callback path to register;
+the app registration supplies `entra_tenant_id` and `entra_client_id`, and the group claim has to be
+released by the app manifest (`auth_groups_claim` names `groups` or `roles` accordingly).
+
+For either external provider, the groups the console checks must exist in that tenant and nothing here
+can create them — see [Two applications, one console](#two-applications-one-console).
 
 ### 5. Point recon at the IDP document-processing state machine (if applicable)
 
@@ -513,7 +581,7 @@ terraform apply -var="policy_enforcement_mode=LOG_ONLY"
 pip install -r agent-blueprint/recon-agent/requirements.txt -r requirements-dev.txt
 export AWS_DEFAULT_REGION=us-east-1   # moto builds real boto3 clients; botocore needs a region
 ruff check .
-python -m pytest -q            # 2136 passed, 20 skipped, ~65s
+python -m pytest -q            # 2179 passed, 20 skipped, ~65s
 #                              # 10 of the skips are in tests/integration/ — 9 need
 #                              # RECON_GATEWAY_URL (+ dev-account creds), 1 also needs
 #                              # EMAIL_CONFIRMATION_TOKEN. 4 are in tests/skills/, one per
@@ -524,12 +592,14 @@ python -m pytest -q            # 2136 passed, 20 skipped, ~65s
 # Frontend (chatbot-app/frontend). `npm run build` is the gate that matters — it compiles
 # every route, catching breakage both vitest and tsc miss.
 cd chatbot-app/frontend && npm ci && npx tsc --noEmit && npx vitest run && npm run build
-#                          # 137 files, 1933 passed
+#                          # 143 files, 2051 passed
+#                          # `npm run build` rewrites next-env.d.ts; `git checkout -- next-env.d.ts`
 
 # Terraform module tests (plan-only, mocked providers, no credentials). Both CIs run these.
 for tests in infra/modules/*/tests; do
   (cd "$(dirname "$tests")" && terraform init -backend=false && terraform test)
 done
+#                          # 74 tests across 8 modules
 ```
 
 `npm run lint` is not part of this: ESLint is broken repo-wide. `npm run verify` points at a
@@ -538,6 +608,69 @@ convention, so formatting is not gated either. CI runs exactly the commands abov
 
 These counts are a snapshot, not a gate — nothing asserts them, so treat a disagreement as this
 line being stale rather than as a missing test, and re-measure before quoting it.
+
+## The cheap development profile
+
+Five tier flags, all `true` by default, so an existing `terraform.tfvars` deploys exactly what it
+deployed before they existed. Turning them off applies the parts needed to exercise both console apps
+against **real AWS** from a laptop, without the parts that cost money every hour or add half an hour to
+a first apply:
+
+```hcl
+enable_frontend_tier         = false  # no image build, ECS service, ALB, CloudFront or WAF
+enable_private_networking    = false  # no NAT gateway; Lambdas + the runtime run unattached to the VPC
+enable_knowledge_base_corpus = false  # no corpus upload and no ingestion poll; the KB stays empty
+enable_agent_evals           = false  # no judge-model spend per session
+enable_observability         = false  # no runtime spans or OTEL logs delivered to CloudWatch
+```
+
+**What that still creates**, because a developer needs it: the Cognito user pool with its hosted UI,
+app client and five groups; every DynamoDB table and S3 bucket; the SSM parameter layers; the shared
+Lambda zip and every Lambda that runs from it; the intake HTTP API; the Deal Pipeline's own resources
+when `enable_deal_pipeline` is set; **and the recon agent tier** — the AgentCore Runtime container
+(a CodeBuild image build, so even this apply is not a fast one), the managed harness, the tools gateway
+with its targets, and Tier-1/Tier-2. The agent is what turns an intaken item into a case, so a console
+with no agent has an empty queue; it is deliberately not behind a flag.
+
+Then run the console on the laptop and create the users to sign in as:
+
+```bash
+cd infra/environments/recon
+terraform output -raw frontend_env_local > ../../../chatbot-app/frontend/.env.local
+python3 ../../../scripts/create_dev_users.py --dry-run     # then without --dry-run
+cd ../../../chatbot-app/frontend && npm run dev            # the BFF runs as YOUR AWS credentials
+```
+
+`frontend_env_local` renders a complete `.env.local` — from the console task's own environment when the
+frontend tier is deployed, and from this root's own values when it is not, with a `check` block
+comparing the two whenever both exist so a laptop and the container cannot silently disagree. It is a
+`sensitive` output (the environment carries `EMAIL_CONFIRMATION_TOKEN`), so `output -raw` is how you
+read it, and `.env.local` is gitignored. Re-render it after an apply rather than editing it by hand.
+
+**What this profile does not exercise.** Worth stating, because each gap is invisible from the laptop:
+
+- **The whole serving path.** No image build, so nothing catches a container-only build failure; no
+  ALB, no CloudFront and no WAF, so the CSP and security headers (which live in
+  `infra/modules/frontend-ecs`, not in `next.config.js`) are not applied, and the document-preview
+  behaviour that depends on `frame-src blob:` cannot be reproduced. No task role either: the BFF runs
+  with your own credentials, which are almost certainly wider than the task's, so a missing task-role
+  grant does not surface.
+- **The hosted-UI redirect against a real domain.** With no distribution there is no public host to
+  register, so the Cognito callback patch is skipped and only the `localhost` URLs the app client was
+  created with are registered. A redirect problem that only appears on the deployed domain — a
+  mismatched callback, a sign-out URL with a trailing slash — cannot be seen here.
+- **Sign-in at all, by default.** The rendered file sets `ALLOW_ANONYMOUS_API=true`, which replaces
+  token verification with one anonymous subject holding every configured group; and the browser gate
+  passes through unauthenticated on `localhost` / `127.0.0.1` anyway (parity with the Okta and Entra
+  wrappers), so no provider redirect happens. To exercise the real Cognito flow from a laptop, remove
+  `ALLOW_ANONYMOUS_API` and uncomment the server-side `AUTH_PROVIDER` / `COGNITO_USER_POOL_ID` /
+  `COGNITO_CLIENT_ID` lines the output leaves commented for exactly this purpose. The gate still does
+  not redirect on localhost — the **first BFF 401** does, through `src/lib/reauth.ts`, and it completes
+  because `cognito_local_dev_callbacks` registered `http://localhost:3000/callback`. Use
+  `ANONYMOUS_GROUPS` instead when all you want is to preview what a restricted user sees.
+- **Anything a flag switched off.** An empty knowledge base, an unscored Evals tab and a traceless
+  investigation all look like working screens with nothing in them. `post_deploy_checklist` prints one
+  line per flag that is off for that reason.
 
 ## CI/CD
 
@@ -559,8 +692,16 @@ verification jobs, the GitLab-only SAST gate, and the three CI/CD variables the 
 | `graph_enabled`                            | no       | Enable the `microsoft-graph` OpenAPI target (the platform's single email interface)                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `graph_mailbox`                            | no       | Shared mailbox SMTP address all Graph email is sent from / read (must be a real mailbox in the Entra tenant)                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `notify_email`                             | no       | Resolution-notification recipient (human approve + auto-resolve), sent **from** `graph_mailbox` via the gateway's `sendSharedMailboxMail` tool. Empty disables the email step. The dev environment points it at the shared mailbox itself, so notifications land in the same inbox the agent reads                                                                                                                                                                                                                                                            |
-| `entra_tenant_id/client_id/client_secret`  | no       | Entra app-only credentials for Graph email. `entra_tenant_id` + `entra_client_id` are **also** the intake API's JWT authorizer when `auth_provider=entra` (the default), and the plan fails without them                                                                                                                                                                                                                                                                                                                                                      |
-| `auth_provider`                            | no       | Identity provider for BOTH the console login and the intake API's JWT authorizer: `okta` (deployed) or `entra` (var default). There is no Cognito fallback — one of the two must be fully configured or the plan fails                                                                                                                                                                                                                                                                                                                                        |
+| `entra_tenant_id/client_id/client_secret`  | no       | Entra app-only credentials for Graph email. `entra_tenant_id` + `entra_client_id` are **also** the intake API's JWT authorizer when `auth_provider=entra`, and the plan fails without them then                                                                                                                                                                                                                                                                                                                                                      |
+| `auth_provider`                            | no       | Identity provider for BOTH the console login and the intake API's JWT authorizer: **`cognito` (the default)**, `okta` or `entra`. `cognito` instantiates `infra/modules/console-auth` and needs no external tenant; the same pool issues the tokens the intake API validates, so the deployment has exactly one identity provider. `okta` and `entra` create no pool and must be fully configured or the plan fails. A value that is none of the three is refused at plan                                                                                                                                                                                                                                                                                                                                        |
+| `cognito_hosted_ui_prefix`                 | **yes**, with `cognito` | The sign-in host, `<prefix>.auth.<region>.amazoncognito.com`. Globally unique across every AWS account, so it declares no default — add entropy — and it may not contain `aws`, `amazon` or `cognito`, which Cognito reserves. Cross-variable validation requires it only for this provider, so an Okta or Entra deployment never names a login domain it does not have |
+| `cognito_mfa_configuration`                | no       | `OPTIONAL` (default — TOTP offered and skippable), `ON` (TOTP required for everyone, enrolled before the console is reachable) or `OFF`. SMS is offered in no mode. `post_deploy_checklist` warns on every apply that is not `ON` |
+| `cognito_deletion_protection`              | no       | `INACTIVE` (default) so `terraform destroy` can remove the pool, which is what a sample being trialled needs. `ACTIVE` for a pool whose user list matters: recreating it changes the token issuer and every `sub`, so the audit trail's author ids stop resolving |
+| `cognito_local_dev_callbacks` / `cognito_local_dev_port` | no | `true` / `3000` (defaults) also register `http://localhost:<port>/callback` and `http://localhost:<port>` on the app client, so `npm run dev` can sign in against this deployment's pool. Cognito permits plain http for localhost only. `false` allows sign-in from the console's deployed host alone |
+| `cognito_redirect_uri`                     | no       | Pins the OAuth callback instead of letting the browser derive it from its own origin. Must end in `/callback` — that is the Cognito route; `/login/callback` is Okta's. Only needed when the console answers on more than one host |
+| `cognito_extra_callback_urls` / `cognito_extra_logout_urls` | no | Further URLs to register on the app client — a custom domain, a second environment. Cognito compares exactly, so a callback entry is a full URL including its path and a sign-out entry is a bare origin with no trailing slash |
+| `cognito_supported_identity_providers`     | no       | `["COGNITO"]` (default) is the pool's own directory. To federate an enterprise IdP, add an `aws_cognito_identity_provider` to the pool and **add its name here too** — the provider resource alone does not make the sign-in page offer it, and dropping `"COGNITO"` disables local pool users entirely. See [Authentication](#authentication) |
+| `enable_cognito_callback_patch`            | no       | `true` (default) registers this deployment's own callback and sign-out URLs on the app client at the end of the apply, because Cognito matches a redirect URL exactly and the CloudFront domain does not exist when the client is created. The `patch_cognito_callbacks` action reads the live client and replaces only those two lists. `false` keeps the deploy-time actor out of Cognito; register the two URLs `post_deploy_checklist` prints by hand instead |
 | `okta_issuer` / `okta_client_id`           | no       | Required when `auth_provider=okta`. They configure the console login **and** the intake API's authorizer — derived once in the root module's `oidc_*` locals so the API and the BFF accept identical tokens                                                                                                                                                                                                                                                                                                                                                   |
 | `agent_backend`                            | no       | `runtime` (default) or `harness`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `enable_deal_pipeline`                                                                        | no       | `false` (default) deploys the recon app alone. `true` composes `infra/modules/deal-pipeline` into this environment under the `<name_prefix>-pipeline` prefix and hands the console's task the `PIPELINE_*` variables plus `REQUIRE_ACCESS_GROUPS=true` and `PIPELINE_ENABLED=true`, so the Deal Pipeline app appears in the rail. The plan is **refused** while `recon_access_group` or `pipeline_access_group` is blank — see [Two applications, one console](#two-applications-one-console)                                                                                                                                                                                                                                              |
@@ -576,6 +717,11 @@ verification jobs, the GitLab-only SAST gate, and the three CI/CD variables the 
 | `reprocess_cap`                            | no       | Max re-process attempts before a case ages out (default `3`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `private_vpc`                              | no       | `false` (default) = public CloudFront + internet-facing ALB. `true` = the whole private topology in one flag: internal ALB on private subnets, Fargate with no public IP, no CloudFront, the interface endpoints, plus a VPC-only PRIVATE REST API onto the intake Lambda (an HTTP API cannot be made private, so `POST /items` would otherwise stay internet-facing). Does **not** remove the NAT — see [Private VPC deployment](assets/private-vpc-deployment.md) and [the intake API](assets/intake-http-api.md#reaching-it-from-a-private-vpc-deployment) |
 | `private_ingress_cidrs`                    | no       | CIDRs allowed to reach the internal ALB when `private_vpc=true` (VPN/corporate ranges). Empty ⇒ the VPC CIDR only. Ignored when `private_vpc=false`                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `enable_frontend_tier`                     | no       | `true` (default) builds and runs the console's serving tier: the container image build, ECR repository, ECS cluster and Fargate service, the ALB, CloudFront and its WAF web ACL. `false` skips all of it, and the console runs on a laptop from `frontend_env_local` instead — see [The cheap development profile](#the-cheap-development-profile) |
+| `enable_private_networking`                | no       | `true` (default) creates the private networking tier: two private subnets, the NAT gateway and its EIP, the S3/DynamoDB gateway endpoints and (with `private_vpc`) the interface endpoints. `false` removes the standing NAT charge and every VPC-attached Lambda plus the AgentCore Runtime then runs **unattached** (`vpc_subnet_ids = []`): they still reach AWS, over the Lambda service network, but nothing that is only reachable inside the VPC is reachable from them. `private_vpc = true` requires this to be `true` |
+| `enable_knowledge_base_corpus`             | no       | `true` (default) uploads the sample guidance corpus and ingests it, and creates the upload-ingestion trigger. `false` leaves the knowledge base **empty**, so `consult-guidance` retrieves nothing with no error anywhere. It does not remove the knowledge base itself, which lives in `modules/recon-agent` |
+| `enable_agent_evals`                       | no       | `true` (default) creates the analyst-agreement evaluator Lambda and the two online evaluation configs. `false` removes a recurring **model** spend rather than an hourly resource charge; the Evals tab then has no results and the batch route no evaluator, and `online_evals_enabled` is ignored |
+| `enable_observability`                     | no       | `true` (default) delivers the AgentCore Runtime's OTEL logs to CloudWatch and its traces to X-Ray. `false` skips both: a failed investigation has no trace, and RUNTIME-backend sessions cannot be scored even with `enable_agent_evals = true`, because the eval service reads content only from delivered log groups |
 
 Copy `infra/environments/recon/terraform.tfvars.example` → `terraform.tfvars` and fill values.
 `terraform.tfvars.example` is the only committed record of which variables an environment is
@@ -845,30 +991,125 @@ screen, not in either Config tab; see
 
 ### Authentication
 
-`NEXT_PUBLIC_AUTH_PROVIDER` (build-time, from the `auth_provider` Terraform var) selects one of two
-providers:
+`auth_provider` (Terraform) becomes both `AUTH_PROVIDER` on the console task, which the BFF verifies
+tokens with, and `NEXT_PUBLIC_AUTH_PROVIDER`, a **build argument** the browser bundle is compiled
+with. Three providers, and the two halves resolve the default identically so they cannot disagree —
+`src/lib/auth/provider.ts` in the browser, `resolveApiAuth` in `src/lib/api-auth.ts` on the server:
 
-- `okta` is the Okta OIDC redirect flow (`@okta/okta-auth-js`), and needs `okta_issuer` plus
-  `okta_client_id`. This is what the dev environment is deployed with.
-- `entra` is Microsoft Entra ID via MSAL. It is the Terraform variable's default, so it applies when
-  `auth_provider` is unset.
+| Value                  | Browser sign-in                                                                                                             | What it needs                                                                          |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| **`cognito`** (default) | An Amazon Cognito user pool's hosted UI, OAuth authorization code + **PKCE**, written against the platform `crypto` and `fetch` with no SDK (`src/lib/auth/cognito-pkce.ts`, gate `src/components/CognitoAuthWrapper.tsx`, redirect route `/callback`) | **Nothing external.** `infra/modules/console-auth` creates the pool, its hosted-UI domain, one public app client and the five groups |
+| `okta`                 | Okta OIDC redirect flow (`@okta/okta-auth-js`), redirect route `/login/callback`                                             | An Okta org, `okta_issuer` + `okta_client_id`, and an org admin to register the callback |
+| `entra`                | Microsoft Entra ID via MSAL, returning to the app's own origin                                                               | An Entra tenant, `entra_tenant_id` + `entra_client_id`, and a manifest that releases the group claim |
+
+**Cognito is the default because a sample has to be runnable.** This repo is deployed by people into
+their own accounts, and both external providers need a tenant nobody has on a first apply — so the
+console could not be opened at all until one was obtained. A user pool is a resource the same
+Terraform creates, and Well-Architected SEC02-BP04 names Amazon Cognito for
+["users of your applications"](https://docs.aws.amazon.com/wellarchitected/latest/security-pillar/sec_identities_identity_provider.html).
+Okta and Entra are unchanged and fully supported: name one in `auth_provider` and the pool is not
+created at all. The only thing this default changed for them is which provider applies when the
+variable is **unset**.
+
+**Where the pool comes from, and why not `modules/foundation`.** A Cognito user pool used to live in
+`infra/modules/foundation` and was deleted deliberately: it existed **only** to be the intake HTTP
+API's JWT issuer while the console itself signed in through Okta, which is one deployment with two
+identity providers and a hosted UI nobody ever logged in to. That critique was right, and this is not
+a revival of it — the pool is now the console's **actual login**, and the same pool issues the tokens
+the intake API's authorizer validates (`local.oidc_issuer` / `local.oidc_audience` in the root), so
+there is exactly one identity provider serving every door. It lives in its own module rather than back
+in `foundation` so that `foundation` keeps the shape it was left in: S3 + DynamoDB + SSM, with no
+identity provider in it. Two things stay as they are: `foundation` remains Cognito-free, and the
+VPC-only **private** intake REST API (`infra/modules/intake/private_api.tf`) stays SigV4-authorized —
+there is deliberately no IdP in that path, because a Lambda authorizer verifying pool tokens would
+have to fetch the JWKS from inside the VPC and would fail closed the moment the NAT is removed, which
+is the deployment that API exists for.
+
+What the pool is configured with, and what to change for a deployment that is not a trial: admin-create
+users only (**no self sign-up** — a stranger who finds the hosted UI gets a form and no way to make an
+account), email as the sign-in name, a 12-character password policy requiring all four character
+classes, TOTP MFA `OPTIONAL` (set `cognito_mfa_configuration = "ON"` before any real data), Cognito's
+own email sender (capped at 50 messages a day per account; wire SES for more), token validity of 60
+minutes with a 1-day refresh, token revocation on, `prevent_user_existence_errors` on, and
+`deletion_protection` `INACTIVE` so the sample can be destroyed again.
 
 `UserMenu` (`src/components/app-ui/UserMenu.tsx`, shared by both apps' headers) shows the signed-in
-user's name and a Logout button. The intake HTTP API's JWT authorizer validates this **same**
-provider — issuer and audience are derived from `auth_provider` once, in the root module's `oidc_*`
-locals — so the API and the BFF accept identical tokens. There is no Cognito user pool in this
-deployment. That authorizer, the two routes behind it, the VPC-only SigV4 door and the
-`POST /items` contract are in **[assets/intake-http-api.md](assets/intake-http-api.md)**.
+user and a Logout button for whichever provider is active. The intake HTTP API's JWT authorizer
+validates the **same** provider — issuer and audience are derived from `auth_provider` once, in the
+root module's `oidc_*` locals — so the API and the BFF accept identical tokens. That authorizer, the
+two routes behind it, the VPC-only SigV4 door and the `POST /items` contract are in
+**[assets/intake-http-api.md](assets/intake-http-api.md)**.
 
 Which apps a signed-in user may open, and where they are an admin, comes from the token's group claim
 (`AUTH_GROUPS_CLAIM`) matched against the four `*_ACCESS_GROUP` / `*_ADMIN_GROUP` variables (or the
 values a console admin stored over them from the Settings screen), and whether they may edit
 console-wide settings against `CONSOLE_ADMIN_GROUP`, which is environment-only — see
-[Two applications, one console](#two-applications-one-console). `ALLOW_ANONYMOUS_API=true` is the
-local-dev switch that replaces token verification with a single anonymous subject holding every
-configured group (or the ones in `ANONYMOUS_GROUPS`); `RECON_ALLOW_ANONYMOUS_API` and
-`PIPELINE_ALLOW_ANONYMOUS_API` are the same switch under each app's older name. None of the three
-may appear in a deployment.
+[Two applications, one console](#two-applications-one-console). `AUTH_GROUPS_CLAIM` has **no literal
+default**: the root resolves a blank one to `cognito:groups` under Cognito and to `groups` under Okta
+and Entra, because a user pool emits its group memberships as the reserved claim `cognito:groups` and
+will not let you rename it. A hard-coded `groups` default would have been silently wrong in the worst
+possible way — every token would verify, every group list would come back empty, and every user would
+be denied every app with nothing anywhere saying why.
+
+`ALLOW_ANONYMOUS_API=true` is the local-dev switch that replaces token verification with a single
+anonymous subject holding every configured group (or the ones in `ANONYMOUS_GROUPS`);
+`RECON_ALLOW_ANONYMOUS_API` and `PIPELINE_ALLOW_ANONYMOUS_API` are the same switch under each app's
+older name. None of the three may appear in a deployment.
+
+#### Bringing your own identity provider: federate it INTO the pool
+
+The supported way to keep a corporate directory is **not** to switch `auth_provider`. Add a SAML or
+OIDC identity provider to this pool (`aws_cognito_identity_provider`) and name it in
+`cognito_supported_identity_providers` **alongside `"COGNITO"`** — adding the provider resource alone
+does not make the sign-in page offer it, and dropping `"COGNITO"` from the list disables local pool
+users entirely. The corporate directory then becomes an upstream of the pool: the console still signs
+in through one hosted UI, the BFF still verifies **one** issuer and one token format, and the intake
+API's authorizer needs no change at all. This is the arrangement AWS documents —
+[Adding user pool sign-in through a third party](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-identity-federation.html).
+
+⚠️ **One thing is not true out of the box, and it is the thing that breaks per-app authorization.**
+`cognito:groups` carries only groups that exist **in the user pool** — the five this stack creates,
+plus the one Cognito creates automatically for each federated provider you add (named
+`<pool-id>_<IdP name>`, which auto-generated federated profiles join, though linked users do not). A
+group from the upstream directory — an Okta group, an Entra security group — **does not appear in
+`cognito:groups` at all**, so a federated user signs in successfully and lands in the no-access state.
+Carrying those memberships into the token takes one of two extra steps:
+
+- **Attribute mapping.** Map the incoming SAML attribute or OIDC claim onto a custom user-pool
+  attribute, which is emitted as `custom:<name>` — then set `auth_groups_claim = "custom:groups"` so
+  the console reads the claim you actually mapped to. See
+  [Specifying identity provider attribute mappings](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-specifying-attribute-mapping.html).
+- **A pre token generation Lambda trigger.** Version 1 of that trigger can override
+  `groupsToOverride`, which sets `cognito:groups` itself, or add an arbitrary claim to the ID token —
+  which is what you want if the mapping is not one-to-one. See
+  [Pre token generation Lambda trigger](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-pre-token-generation.html).
+
+Either way `auth_groups_claim` must name whichever claim the groups end up in, and the names inside it
+must match the five console group names — which, for a federated deployment, is the argument for
+setting the four `*_group` variables explicitly rather than inheriting the pool's own names.
+
+#### What it costs
+
+Amazon Cognito user pools are **free for the first 10,000 monthly active users who sign in directly**
+with pool credentials. Users who sign in through **SAML or OIDC federation are metered separately**:
+there is a 50 MAU free allowance and they are billed per MAU above it. So the federated arrangement
+above is the one with a bill attached at even small scale, and it is worth knowing before choosing it
+over local pool users for a demonstration.
+
+Two further points, both easy to get wrong:
+
+- **A "monthly active user" is not only a sign-in.** Creating a user, verifying an attribute, changing
+  group membership and an admin `AdminGetUser` query all count, which matters if anything automates
+  the pool. AWS enumerates them under
+  [Monthly active users](https://docs.aws.amazon.com/cognito/latest/developerguide/quotas.html).
+- **Feature plans decide the per-MAU price and which features exist.** `managed_login_version = 1`
+  (this module's default) is the *classic hosted UI*, which the Lite plan includes; **managed login**,
+  the newer branded sign-in experience, needs the **Essentials** plan. `infra/modules/console-auth`
+  does not set `user_pool_tier` at all, so the pool is created on whatever the service's default plan
+  is — Essentials, for pools created today. Compare the plans under
+  [User pool feature plans](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-sign-in-feature-plans.html)
+  and read the current numbers off the [Amazon Cognito pricing page](https://aws.amazon.com/cognito/pricing/)
+  rather than from here.
 
 ---
 
@@ -971,6 +1212,7 @@ lookup, so treat it as an order of magnitude. Note it now dominates the bill.
 | **S3** (assets, skills, configs, GL, IDP page copies)                                       | few GB + requests                                                 | **~$2**       |
 | **CloudFront**                                                                              | low egress                                                        | **~$2**       |
 | **Athena** (GL queries via `search_ledger`)                                                 | small scans, $5/TB                                                | **~$1**       |
+| **Amazon Cognito** (the console's user pool)                                                | a handful of operators signing in directly, well inside the 10,000-MAU free allowance — see [Authentication](#authentication) for the federated case, which is metered from 50 MAU | **$0**        |
 | **Total (demo profile)**                                                                    |                                                                   | **≈ $365/mo** |
 
 _These are rough list-price estimates for planning only. Validate them against the AWS Pricing

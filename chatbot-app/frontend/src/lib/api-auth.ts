@@ -26,6 +26,12 @@
  *    API credential; that is acceptable here only because the BFF is this SPA's own server tier
  *    on the same origin. The hardening step is a custom Okta authorization server issuing
  *    access tokens with a dedicated audience.
+ *  - The Cognito branch verifies the same ID token against the pool that the console signs in
+ *    through, and additionally pins `token_use` — see the comment on that check for why `aud` alone
+ *    is not enough there. `cognito` is the DEFAULT provider: this is a sample customers deploy in
+ *    their own accounts, and it must be runnable without an external IdP tenant. An enterprise IdP
+ *    is added by federating SAML/OIDC INTO the pool, which changes nothing in this file — the
+ *    issuer stays the pool and the group claim is mapped there.
  *  - A missing/incoherent configuration resolves to `misconfigured`, which the proxy turns into a
  *    **503 — never an open door**. A deploy that loses its issuer env var must break visibly rather
  *    than silently reopen the API.
@@ -46,7 +52,12 @@ import { NextResponse } from "next/server";
 import { allConfiguredGroups } from "@/lib/auth/apps";
 
 /** How the BFF is configured to authorize callers. */
-export type ApiAuthMode = "okta" | "entra" | "anonymous" | "misconfigured";
+export type ApiAuthMode =
+  | "cognito"
+  | "okta"
+  | "entra"
+  | "anonymous"
+  | "misconfigured";
 
 /**
  * The modes a request can actually be authorized under. `misconfigured` never yields `ok: true`, and
@@ -71,26 +82,45 @@ export type AuthResult =
   | { ok: false; status: 401 | 503; message: string };
 
 /**
+ * The claim a provider carries group membership in when the deployment has not named one.
+ *
+ * Cognito is the odd one out and not by choice: a user pool emits group membership as
+ * `cognito:groups`, a reserved claim name it will not let you rename. Okta releases `groups` when the
+ * app is configured to, and Entra uses `groups` or `roles` depending on the app registration — both
+ * of which the previous default already covered, so neither changes.
+ */
+function defaultGroupsClaim(mode?: ApiAuthMode): string {
+  return mode === "cognito" ? "cognito:groups" : "groups";
+}
+
+/**
  * Read the caller's group memberships out of a verified token payload.
  *
- * Which claim carries them is a per-deployment fact, not a constant: Okta puts them in `groups` when
- * the app is configured to release them, Entra uses `groups` or `roles` depending on how the app
- * registration is set up, and an app that was never configured to release them at all sends none. So
- * the claim NAME comes from the environment and an absent claim yields an empty list — the caller is
- * simply in no groups, which every consumer must already handle.
+ * Which claim carries them is a per-deployment fact, not a constant: see `defaultGroupsClaim` for
+ * what each provider emits by default, and an app that was never configured to release them at all
+ * sends none. So the claim NAME can always be overridden from the environment and an absent claim
+ * yields an empty list — the caller is simply in no groups, which every consumer must already handle.
+ *
+ * `AUTH_GROUPS_CLAIM` wins over the per-provider default in every mode. That override is what a
+ * customer who federates their own IdP into the user pool needs: pool federation can map an incoming
+ * SAML/OIDC group attribute to a CUSTOM claim (`custom:groups`) rather than to `cognito:groups`,
+ * which is reserved for groups defined in the pool itself.
  *
  * Read only from a payload `jwtVerify` has already returned, never from an unverified token: a group
  * list is an authorization input, and the whole point is that the caller could not have written it.
  *
  * @param payload the verified JWT payload.
  * @param env process environment to read `AUTH_GROUPS_CLAIM` from (injected in tests).
+ * @param mode the resolved auth mode, which decides the default claim name. Omitted means the
+ *   pre-Cognito default (`groups`).
  * @returns the caller's groups, or `[]` when the claim is absent or not a list of strings.
  */
 export function groupsFrom(
   payload: Record<string, unknown>,
   env: Record<string, string | undefined> = process.env,
+  mode?: ApiAuthMode,
 ): string[] {
-  const claim = env.AUTH_GROUPS_CLAIM || "groups";
+  const claim = env.AUTH_GROUPS_CLAIM || defaultGroupsClaim(mode);
   const raw = payload[claim];
   if (!Array.isArray(raw)) return [];
   return raw.filter((g): g is string => typeof g === "string");
@@ -167,17 +197,54 @@ export function oktaJwksUri(issuer: string): string {
 }
 
 /**
+ * The issuer a Cognito user pool stamps into every token it mints.
+ *
+ * Fixed by the service: `https://cognito-idp.<region>.amazonaws.com/<pool-id>`. Note it is NOT the
+ * hosted UI domain the browser signs in through — a deployment that puts the login domain in
+ * `COGNITO_USER_POOL_ID` fails every verification with an issuer mismatch, which is why this is
+ * derived rather than configured.
+ */
+export function cognitoIssuer(region: string, poolId: string): string {
+  return `https://cognito-idp.${region}.amazonaws.com/${poolId}`;
+}
+
+/**
+ * The provider this deployment verifies against, and whether it was named or defaulted.
+ *
+ * `cognito` is the default (decided 2026-09-16), mirroring the browser's `lib/auth/provider.ts` so
+ * the two halves can never disagree about which provider is in play: a server defaulting to entra
+ * while the browser signs in with Cognito would 401 every call from a UI that looks signed in.
+ * Anything explicitly named is still honoured exactly as before, including an unknown value, which
+ * stays `misconfigured` rather than falling back to anything.
+ */
+function resolveProvider(env: Record<string, string | undefined>): {
+  provider: string;
+  named: boolean;
+} {
+  const raw = (
+    env.AUTH_PROVIDER ??
+    env.NEXT_PUBLIC_AUTH_PROVIDER ??
+    ""
+  ).toLowerCase();
+  return raw
+    ? { provider: raw, named: true }
+    : { provider: "cognito", named: false };
+}
+
+/**
  * Resolve the authorization configuration from the environment.
  *
  * Pure (env is injectable) so the precedence rules are unit-testable. Note these are PLAIN env
  * vars, not `NEXT_PUBLIC_*`: the Dockerfile bakes `NEXT_PUBLIC_*` into the builder stage only,
  * so the running container cannot read them — the ECS task definition supplies `AUTH_PROVIDER`
- * / `OKTA_ISSUER` / `OKTA_CLIENT_ID` at runtime. The `NEXT_PUBLIC_*` fallbacks below exist only
- * for `next dev`, which loads `.env.local` into the server process.
+ * / `COGNITO_USER_POOL_ID` / `COGNITO_CLIENT_ID` (or the OKTA_/ENTRA_ pair) at runtime. The
+ * `NEXT_PUBLIC_*` fallbacks below exist only for `next dev`, which loads `.env.local` into the
+ * server process.
  *
  * Precedence: the anonymous switch wins over a configured provider. A `.env.local` that names the
  * provider the BROWSER should use (`NEXT_PUBLIC_AUTH_PROVIDER`) while opening the server for local
- * work is the normal dev setup, not a conflict.
+ * work is the normal dev setup, not a conflict. An unset provider means `cognito`, the same default
+ * the browser applies; an unrecognised one is `misconfigured`, never a fallback.
  *
  * @param env process environment to read (injected in tests).
  * @returns the resolved config; `mode: "misconfigured"` when it cannot be trusted.
@@ -189,11 +256,47 @@ export function resolveApiAuth(
     return { mode: "anonymous" };
   }
 
-  const provider = (
-    env.AUTH_PROVIDER ??
-    env.NEXT_PUBLIC_AUTH_PROVIDER ??
-    ""
-  ).toLowerCase();
+  const { provider, named } = resolveProvider(env);
+
+  if (provider === "cognito") {
+    const poolId = (
+      env.COGNITO_USER_POOL_ID ??
+      env.NEXT_PUBLIC_COGNITO_USER_POOL_ID ??
+      ""
+    ).trim();
+    const audience = (
+      env.COGNITO_CLIENT_ID ??
+      env.NEXT_PUBLIC_COGNITO_CLIENT_ID ??
+      ""
+    ).trim();
+    if (!poolId || !audience) {
+      // Both names in the message, exactly like the okta and entra branches, so the 503 body says
+      // which variable a deploy dropped. Two wordings because the two situations need different
+      // next steps: an operator who NAMED cognito has a missing variable, while a laptop that named
+      // nothing at all mostly wants to know about the anonymous switch (and would otherwise be told
+      // to configure a user pool it does not have).
+      return {
+        mode: "misconfigured",
+        reason: named
+          ? "AUTH_PROVIDER=cognito but COGNITO_USER_POOL_ID and/or COGNITO_CLIENT_ID are unset"
+          : "AUTH_PROVIDER is unset, so the default provider is cognito, but " +
+            "COGNITO_USER_POOL_ID and/or COGNITO_CLIENT_ID are unset — set them, name another " +
+            "provider, or set ALLOW_ANONYMOUS_API=true for local dev",
+      };
+    }
+    // Region the same way every other server-side reader in this app does it, NEXT_PUBLIC_ fallback
+    // included for `next dev`.
+    const region =
+      (env.AWS_REGION || env.NEXT_PUBLIC_AWS_REGION || "").trim() || "us-east-1";
+    const issuer = cognitoIssuer(region, poolId);
+    return {
+      mode: "cognito",
+      issuer,
+      // A user pool publishes its keys at the standard OIDC location under its issuer.
+      jwksUri: `${issuer}/.well-known/jwks.json`,
+      audience,
+    };
+  }
 
   if (provider === "okta") {
     const issuer = trimSlash(
@@ -231,11 +334,10 @@ export function resolveApiAuth(
     };
   }
 
+  // Only an explicitly named provider can reach here: an unset one resolved to cognito above.
   return {
     mode: "misconfigured",
-    reason: provider
-      ? `unsupported AUTH_PROVIDER "${provider}" (expected "okta" or "entra")`
-      : "AUTH_PROVIDER is unset — set it, or set ALLOW_ANONYMOUS_API=true for local dev",
+    reason: `unsupported AUTH_PROVIDER "${provider}" (expected "cognito", "okta" or "entra")`,
   };
 }
 
@@ -341,11 +443,33 @@ export async function authorizeRequest(
     if (!payload.sub) {
       return { ok: false, status: 401, message: "token has no sub claim" };
     }
+    // ⚠️ Cognito mints TWO kinds of token from one pool with one signing key, and they carry the
+    // app client id in different claims: an ID token puts it in `aud`, while an ACCESS token has no
+    // `aud` at all and puts it in `client_id`. This app verifies the ID token (that is what
+    // `lib/auth/client-token.ts` supplies), so the `audience` check above already rejects an access
+    // token today — a token with no `aud` cannot match one. This assertion is the belt to that
+    // braces: any signed-in user can obtain an access token for the same pool, and it is signed by
+    // the same key from the same issuer, so the ONLY thing standing between it and acceptance is the
+    // audience check. Relax that check in the future — to accept a second client id, to support a
+    // resource server audience — and an `aud`-less access token starts sailing through. `token_use`
+    // is stamped by Cognito, is inside the signature, and cannot be `"id"` on an access token, so
+    // pinning it keeps the two apart no matter what happens to the audience rule.
+    if (config.mode === "cognito" && payload.token_use !== "id") {
+      return {
+        ok: false,
+        status: 401,
+        message:
+          `token rejected: expected a Cognito ID token (token_use "id"), got ` +
+          `${JSON.stringify(payload.token_use ?? null)}`,
+      };
+    }
     return {
       ok: true,
       mode: config.mode,
       subject: payload.sub,
-      groups: groupsFrom(payload),
+      // The default claim name depends on the provider: Cognito's is `cognito:groups`. An explicit
+      // AUTH_GROUPS_CLAIM still wins for every mode.
+      groups: groupsFrom(payload, process.env, config.mode),
     };
   } catch (error) {
     const status = statusForVerifyError(error);

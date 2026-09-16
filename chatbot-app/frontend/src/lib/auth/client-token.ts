@@ -12,16 +12,33 @@
  * a token-read failure is logged under a neutral prefix instead of being blamed on whichever app
  * happened to own the copy.
  *
- * Both providers' clients are reached through the instance the auth wrapper stashes on `window`
- * (`__okta_instance` / `__msal_instance`); when the wrapper has not built one yet, one is constructed
- * from the same config rather than kept as a second parallel client.
+ * The SDK-backed providers' clients are reached through the instance the auth wrapper stashes on
+ * `window` (`__okta_instance` / `__msal_instance`); when the wrapper has not built one yet, one is
+ * constructed from the same config rather than kept as a second parallel client. The Cognito path has
+ * no SDK and no instance: its tokens live in this tab's `sessionStorage` and
+ * `lib/auth/cognito-pkce.ts` refreshes them on read, so a token that has aged out is renewed here
+ * rather than at some later 401.
  *
  * Returns no header when unauthenticated (local dev, or unconfigured builds). That is not a silent
  * failure: the server decides, and it only accepts a missing header when `ALLOW_ANONYMOUS_API=true`
  * (or one of the older app-specific switches) is explicitly set.
  */
 
-const PROVIDER = process.env.NEXT_PUBLIC_AUTH_PROVIDER ?? "entra";
+import { authProviderBranch } from "@/lib/auth/provider";
+
+/**
+ * Read the current Cognito ID token, refreshing it first if it has expired or is about to.
+ *
+ * Dynamically imported like the other two branches, so a build using a different provider does not
+ * carry this module — and so a test can mock it.
+ */
+async function cognitoIdToken(): Promise<string | null> {
+  const { HAS_COGNITO_CONFIG, currentIdToken } = await import(
+    "@/lib/auth/cognito-pkce"
+  );
+  if (!HAS_COGNITO_CONFIG) return null;
+  return currentIdToken();
+}
 
 /** Read the current Okta ID token from the wrapper's OktaAuth instance. */
 async function oktaIdToken(): Promise<string | null> {
@@ -91,7 +108,14 @@ async function entraIdToken(): Promise<string | null> {
 export async function idToken(): Promise<string | null> {
   if (typeof window === "undefined") return null;
   try {
-    return PROVIDER === "okta" ? await oktaIdToken() : await entraIdToken();
+    switch (authProviderBranch()) {
+      case "okta":
+        return await oktaIdToken();
+      case "entra":
+        return await entraIdToken();
+      default:
+        return await cognitoIdToken();
+    }
   } catch (error) {
     console.warn("[ClientToken] could not read ID token:", error);
     return null;

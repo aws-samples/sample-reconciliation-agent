@@ -57,6 +57,9 @@ describe("isShellHidden", () => {
   it.each([
     ["/login", true],
     ["/login/callback", true],
+    // The Cognito app client's callback URL; `/login/callback` is Okta's. One handshake path per
+    // provider, because each provider dictates its own.
+    ["/callback", true],
     ["/oauth-complete", true],
     ["/health", true],
     ["/embed", true],

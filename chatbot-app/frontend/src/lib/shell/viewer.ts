@@ -26,8 +26,17 @@ import { normalizePreferences } from "@/lib/shell/preferences";
  * The auth handshake pages run BEFORE there is a session to describe, `/health` is a probe with no
  * page at all, and `/embed` is meant for iframes where a second navigation frame would be noise. A path
  * is hidden when it equals an entry or lives under it (`/login/callback`).
+ *
+ * One handshake path per provider, because each provider dictates its own: `/login/callback` is the
+ * Okta redirect URI, `/callback` is the Cognito app client's, and Entra returns to the origin.
  */
-export const SHELL_HIDDEN_PATHS: readonly string[] = ["/login", "/oauth-complete", "/health", "/embed"];
+export const SHELL_HIDDEN_PATHS: readonly string[] = [
+  "/login",
+  "/callback",
+  "/oauth-complete",
+  "/health",
+  "/embed",
+];
 
 /**
  * Whether the shell (rail and access gating) stays out of the way on this path.

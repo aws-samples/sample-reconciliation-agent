@@ -10,9 +10,15 @@ or locally with `npm run dev`.
 frontend/src/app/page.tsx         the landing chooser; /api/me reports the viewer's per-app access
 frontend/src/lib/auth/apps.ts     the app registry: paths, BFF prefixes, access + admin group names
 frontend/src/lib/auth/            the rest of the identity spine both apps and the shell share:
-                                  client-token.ts (the browser's ID-token reader), authed-fetch.ts (the
-                                  one 401-aware fetch every BFF client is built on), app-admin.ts (the
-                                  admin gate every admin-only write route calls, parameterised by app)
+                                  provider.ts (the ONE reader of NEXT_PUBLIC_AUTH_PROVIDER and the only
+                                  place its default lives), cognito-pkce.ts (the default provider's whole
+                                  browser flow, no SDK), client-token.ts (the browser's ID-token reader),
+                                  authed-fetch.ts (the one 401-aware fetch every BFF client is built on),
+                                  app-admin.ts (the admin gate every admin-only write route calls,
+                                  parameterised by app)
+frontend/src/components/          the three auth gates AuthWrapper.tsx switches between:
+                                  CognitoAuthWrapper (default), OktaAuthWrapper, EntraAuthWrapper
+frontend/src/app/callback/        the Cognito hosted-UI redirect target; /login/callback is Okta's
 frontend/src/lib/shell/viewer.ts  the one /api/me read: the viewer store the rail, the landing page and
                                   every app page derive the signed-in viewer from
 frontend/src/lib/console/        the console-wide settings layer: types.ts (the contract: SSM layout,
@@ -90,7 +96,9 @@ from identity-provider groups — `RECON_ACCESS_GROUP` / `RECON_ADMIN_GROUP` and
 / `PIPELINE_ADMIN_GROUP`, resolved by `src/lib/auth/apps.ts`. An unset access group leaves that app
 open to every authenticated user, unless `REQUIRE_ACCESS_GROUPS=true`, which the composed deployment
 sets whenever the pipeline is enabled: then a blank access group denies the app to everyone but its
-admins. An unset admin group means nobody can change it. `PIPELINE_ENABLED=false` switches the
+admins. An unset admin group means nobody can change it. (Under the default Cognito provider the
+console never sees a blank one: the recon root resolves each name to the group the user pool actually
+created — see [Sign-in](#sign-in) — so "unset access = open" is an Okta/Entra situation only.) `PIPELINE_ENABLED=false` switches the
 pipeline app off entirely (hidden from `/api/me`, 403 from the proxy); unset means enabled. Locally,
 `ALLOW_ANONYMOUS_API=true` grants everything and `ANONYMOUS_GROUPS` previews a restricted user — the
 pre-shell names `RECON_ALLOW_ANONYMOUS_API` and `PIPELINE_ALLOW_ANONYMOUS_API` still mean the same
@@ -136,6 +144,66 @@ preferences stay in the browser. Per-app configuration (both Config tabs) stays 
 link between the two is the pipeline Config tab's "Use console default", which copies the console's
 default model id into the pipeline's own parameter through its normal PUT. §14 of
 `docs/deal-pipeline-design.md` is the design.
+
+## Sign-in
+
+Three providers, chosen by `NEXT_PUBLIC_AUTH_PROVIDER` at **build** time in the container (Next.js
+inlines every `NEXT_PUBLIC_*`) and by `AUTH_PROVIDER` at run time for the server half. `AuthWrapper`
+(`src/components/AuthWrapper.tsx`) is the switch; each branch is a wrapper with the same shape — a
+client-hydration guard, a pass-through for local dev and unconfigured builds, and children rendered
+only once there is a session.
+
+| Value                  | Flow                                                                                                              | Redirect route     |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------ |
+| **`cognito`** (default) | Cognito hosted UI, OAuth authorization code + PKCE, **no SDK** — `src/lib/auth/cognito-pkce.ts` over the platform `crypto` and `fetch` | `/callback`        |
+| `okta`                 | `@okta/okta-auth-js` redirect flow, with `src/lib/okta-renew.ts` for silent renewal                                | `/login/callback`  |
+| `entra`                | MSAL, returning to the app's own origin                                                                            | none               |
+
+The default lives in **one** place per side and the two mirror each other:
+`DEFAULT_AUTH_PROVIDER` in `src/lib/auth/provider.ts` for the browser, `resolveApiAuth` in
+`src/lib/api-auth.ts` for the server. Four modules used to carry their own
+`process.env.NEXT_PUBLIC_AUTH_PROVIDER ?? "entra"` — the gate, `client-token.ts`, `reauth.ts` and
+`UserMenu` — and four copies of a default is one too many the moment the default changes: a build whose
+gate signs in with Cognito while the token reader looks for an MSAL account renders the app and then
+401s every call, with nothing on screen to say why. Unset or blank means `cognito`; an unrecognised
+value still resolves to Entra in the browser (compatibility — `"Okta"` picked Entra before Cognito
+existed) and to `misconfigured` on the server, which the proxy turns into a **503, never an open door**.
+
+**The Cognito path, in the four files that own it.** `cognito-pkce.ts` builds the
+`/oauth2/authorize` URL with an S256 challenge and a per-attempt `state`, exchanges the code at
+`/oauth2/token` with no client secret (the app client is public — PKCE is what replaces the secret),
+and refreshes **on read** rather than on a timer, so every BFF call renews a token that has aged out.
+Tokens live in `sessionStorage`, per tab, cleared when the tab closes: the refresh token therefore does
+not outlive the tab, and the cost is that a new tab bounces through `/oauth2/authorize` once — silently,
+while the pool's own first-party session cookie on the hosted-UI domain is still valid.
+`CognitoAuthWrapper.tsx` drives it and completes the `?code=` exchange itself, because it renders before
+every page and would otherwise send the browser back to `/authorize` while sitting on the callback URL;
+`src/app/callback/page.tsx` only forwards the now-authenticated user to where they were going.
+`api-auth.ts` verifies the resulting ID token against the same pool — issuer derived as
+`https://cognito-idp.<region>.amazonaws.com/<pool-id>`, **not** the hosted-UI domain — and additionally
+pins `token_use`.
+
+Two things to know before touching any of this:
+
+- **`localhost` and `127.0.0.1` pass through unauthenticated**, in all three wrappers. So `npm run dev`
+  renders immediately and no provider redirect is *started* by the gate. With `ALLOW_ANONYMOUS_API=true`
+  that is the whole local story. Without it, the app renders, the first BFF call goes with no
+  `Authorization` header, the 401 backstop in `src/lib/reauth.ts` starts the hosted-UI redirect, and it
+  completes only because the deployment registered `http://localhost:3000/callback` on the app client
+  (`cognito_local_dev_callbacks`). That is the sequence to expect when debugging a laptop sign-in — and
+  it is why the Cognito gate checks for a `?code=`/`?error=` callback **before** its pass-through, unlike
+  the other two: a laptop that arrives on `/callback` holding a real code has to be allowed to finish,
+  or the 401 that started the redirect simply repeats. A local page load with no callback in the URL
+  still passes straight through, and the gate never redirects a laptop by itself.
+- **`AUTH_GROUPS_CLAIM` is per-provider, not a constant.** A user pool emits group membership as the
+  reserved claim `cognito:groups`; Okta and Entra release `groups` (or `roles`). `groupsFrom` defaults
+  by mode and an explicit `AUTH_GROUPS_CLAIM` always wins — which is what a **federated** pool needs,
+  because a SAML/OIDC provider mapped into the pool commonly lands its groups on `custom:groups`
+  instead. The repository README's "Authentication" section is the federation and cost guide.
+
+`frontend/.env.example` documents every name on both sides, and
+`terraform output -raw frontend_env_local` in `infra/environments/recon` renders a complete
+`.env.local` for a laptop run against a real deployment.
 
 ## The BFF exists because the browser must not hold credentials
 

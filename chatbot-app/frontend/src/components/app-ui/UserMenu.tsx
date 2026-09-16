@@ -2,28 +2,33 @@
 
 import { useEffect, useState } from "react";
 import { signOut } from "@/components/AuthWrapper";
+import { cognitoUserName } from "@/components/CognitoAuthWrapper";
 import { oktaUserName } from "@/components/OktaAuthWrapper";
-
-const PROVIDER = process.env.NEXT_PUBLIC_AUTH_PROVIDER ?? "entra";
+import { authProviderBranch } from "@/lib/auth/provider";
 
 /**
  * Top-right identity chip for an app's header: shows the logged-in user's name and a logout
- * control. Reads the name from the active auth provider — Okta (getUser) or Entra (MSAL active
- * account) — and falls back to "local" in dev / when auth is unconfigured.
+ * control. Reads the name from the active auth provider — Cognito (ID-token claims), Okta (getUser)
+ * or Entra (MSAL active account) — and falls back to "local" in dev / when auth is unconfigured.
  */
 async function resolveName(): Promise<string> {
   try {
-    if (PROVIDER === "okta") {
-      return (await oktaUserName()) ?? "local";
+    switch (authProviderBranch()) {
+      case "okta":
+        return (await oktaUserName()) ?? "local";
+      case "entra": {
+        // Read the MSAL active account stashed on window by EntraAuthWrapper.
+        const w = window as unknown as {
+          __msal_instance?: {
+            getActiveAccount?: () => { name?: string; username?: string } | null;
+          };
+        };
+        const acct = w.__msal_instance?.getActiveAccount?.();
+        return acct?.name || acct?.username || "local";
+      }
+      default:
+        return (await cognitoUserName()) ?? "local";
     }
-    // Entra: read the MSAL active account stashed on window by EntraAuthWrapper.
-    const w = window as unknown as {
-      __msal_instance?: {
-        getActiveAccount?: () => { name?: string; username?: string } | null;
-      };
-    };
-    const acct = w.__msal_instance?.getActiveAccount?.();
-    return acct?.name || acct?.username || "local";
   } catch {
     return "local";
   }

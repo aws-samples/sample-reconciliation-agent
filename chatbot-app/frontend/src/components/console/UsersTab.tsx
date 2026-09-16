@@ -29,6 +29,7 @@ import type { ConsoleViewer } from "@/lib/shell/viewer";
 // resolve to. The checker answers that question without waiting for the person to sign in.
 
 const MODE_LABEL: Record<ConsoleViewer["mode"], string> = {
+  cognito: "Amazon Cognito user pool",
   okta: "Okta",
   entra: "Microsoft Entra ID",
   anonymous: "Anonymous (local development: no identity provider)",
@@ -215,7 +216,8 @@ export function UsersTab({ viewer, store }: { viewer: ConsoleViewer; store: Cons
         testId="membership-note"
       >
         <p className="text-label text-[var(--shell-ink-dim)]">
-          Group membership is managed in the identity provider (Okta or Microsoft Entra ID). Add or remove a person
+          Group membership is managed in the identity provider (an Amazon Cognito user pool, Okta or Microsoft
+          Entra ID). Add or remove a person
           there and their next token carries the change; nothing on this screen alters who is in a group. Three
           switches are environment-only and can never be changed from the console, so an edit here cannot widen
           access past what the deployment allows or make someone a console admin:

@@ -27,6 +27,21 @@ mock_provider "aws" {
       repository_url = "123456789012.dkr.ecr.us-east-1.amazonaws.com/frontend-test"
     }
   }
+
+  # The public host in private_vpc mode, so the two Cognito URL outputs are known at plan. Nothing in
+  # the task policy or the container environment reads the load balancer, so this override does not
+  # bear on either golden hash.
+  #
+  # `arn` has to be given alongside `dns_name`: an override_resource replaces the whole computed set,
+  # so leaving it out hands aws_lb_listener.http a generated placeholder that its own ARN validation
+  # rejects at plan.
+  override_resource {
+    target = aws_lb.this
+    values = {
+      dns_name = "internal-frontend-test-000000.us-east-1.elb.amazonaws.com"
+      arn      = "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/frontend-test/0000000000000000"
+    }
+  }
 }
 
 mock_provider "null" {}
@@ -45,9 +60,16 @@ variables {
   vpc_cidr                      = "10.0.0.0/16"
   ecs_private_security_group_id = "sg-00000000000000000"
 
-  recon_api_base    = "https://api.example.test"
-  cognito_hosted_ui = "login.example.test"
-  cognito_client_id = "client"
+  recon_api_base = "https://api.example.test"
+
+  # A Cognito deployment's three runtime names, so the golden environment below covers them with real
+  # values rather than the empty strings an Okta deployment would render. auth_provider is left at its
+  # module default ("entra"), which is what makes the pair below a genuine mixed-provider rendering:
+  # every auth name is present, and which ones are populated is a deployment's choice, not a change of
+  # shape in the task definition.
+  cognito_user_pool_id = "us-east-1_Example1"
+  cognito_client_id    = "client"
+  cognito_hosted_ui    = "login.example.test"
 
   cases_table          = "frontend-test-cases"
   cases_table_arn      = "arn:aws:dynamodb:us-east-1:123456789012:table/frontend-test-cases"
@@ -80,8 +102,20 @@ variables {
   # audience the intake API shares with the BFF took their place. The previous pair
   # (df19d661…/0c35474a…) belongs to the pre-merge rendering and would fail against any tree that
   # has upstream's auth wiring.
+  #
+  # The ENVIRONMENT hash was retaken again on 2026-09-16, in the change that made Cognito the console's
+  # DEFAULT identity provider: COGNITO_USER_POOL_ID, COGNITO_CLIENT_ID and COGNITO_HOSTED_UI joined the
+  # task environment after OKTA_CLIENT_ID, in that order, always present and empty for an Okta or Entra
+  # deployment (the same way OKTA_ISSUER is empty for an Entra one). Three added names and three added
+  # values move the hash; nothing that was already there moved. The previous environment value
+  # (b5d8270d…) belongs to the tree with no Cognito wiring at all.
+  #
+  # The POLICY hash is deliberately UNCHANGED across that same change, and that is worth stating: the
+  # console verifies pool tokens by fetching a public JWKS document over HTTPS, so the ECS task role
+  # gained no cognito-idp grant of any kind. The only IAM that moved is the deploy-actions actor's, in
+  # its own module and its own test.
   golden_recon_policy_sha256      = "0aedcb7452916db802218a08411a258b17dd939e8802ad690aca3f690ed6ae2e"
-  golden_recon_environment_sha256 = "b5d8270dd48ec6c455ebe909723b1084a5c0446372c5cc231afea5e67f70bd34"
+  golden_recon_environment_sha256 = "a97992fc56c22a43fae2b62afef91a5d887615d22d608e9d2321dfb0ed009ac6"
 
   # Synthetic apps. alpha and beta are enabled, gamma is not. The names are chosen so that a sort by
   # name WOULD interleave the two apps (ALPHA_BUCKET, BETA_QUEUE, ZULU_TABLE) and would move alpha's
@@ -158,6 +192,42 @@ run "recon_only_console_is_unchanged_apart_from_the_group_and_switch_variables" 
   assert {
     condition     = !anytrue([for s in jsondecode(aws_iam_role_policy.ecs_task.policy).Statement : can(s.Sid)])
     error_message = "with app_wiring empty the task policy must carry no app statement"
+  }
+
+  # Every auth name the BFF resolves a provider from is present whichever provider is selected, so the
+  # task definition's SHAPE does not depend on the choice: src/lib/api-auth.ts reads AUTH_PROVIDER and
+  # then that provider's names, answering 503 when they are blank rather than accepting an unverified
+  # token. A name that is absent instead of empty is indistinguishable at runtime from one that was
+  # never wired, which is exactly the ambiguity this pins.
+  assert {
+    condition = alltrue([
+      for name in ["AUTH_PROVIDER", "OKTA_ISSUER", "OKTA_CLIENT_ID", "COGNITO_USER_POOL_ID", "COGNITO_CLIENT_ID", "COGNITO_HOSTED_UI", "AUTH_GROUPS_CLAIM"] :
+      contains([for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name], name)
+    ])
+    error_message = "the task environment must name every auth variable for every provider -- AUTH_PROVIDER, the Okta pair, the Cognito three and AUTH_GROUPS_CLAIM -- present and empty when the selected provider does not use it"
+  }
+
+  # And the Cognito three carry the pool this module was handed, not a derived or reformatted version
+  # of it: the BFF composes the issuer from the pool id verbatim, and the hosted-UI host is what the
+  # browser is redirected to.
+  assert {
+    condition = (
+      { for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name => e.value }["COGNITO_USER_POOL_ID"] == "us-east-1_Example1"
+      && { for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name => e.value }["COGNITO_CLIENT_ID"] == "client"
+      && { for e in jsondecode(aws_ecs_task_definition.frontend.container_definitions)[0].environment : e.name => e.value }["COGNITO_HOSTED_UI"] == "login.example.test"
+    )
+    error_message = "COGNITO_USER_POOL_ID, COGNITO_CLIENT_ID and COGNITO_HOSTED_UI must reach the task with the module inputs' values, unaltered"
+  }
+
+  # The ECS task role gains NOTHING for Cognito, and that is the point: token verification is an HTTPS
+  # fetch of a public JWKS document, not an AWS API call. A cognito-idp grant appearing here would mean
+  # someone had reached for the control plane where the OIDC metadata endpoint was enough.
+  assert {
+    condition = !anytrue(flatten([
+      for s in jsondecode(aws_iam_role_policy.ecs_task.policy).Statement :
+      [for a in flatten([s.Action]) : startswith(a, "cognito-idp:") || startswith(a, "cognito-identity:")]
+    ]))
+    error_message = "the console task role must hold no Cognito action: it verifies tokens against a public JWKS URL and never calls the Cognito control plane"
   }
 }
 
@@ -350,13 +420,108 @@ run "task_environment_output_is_the_container_environment" {
   }
 
   # The names the root indexes from the map: a recon variable, the token that makes the output
-  # sensitive, the console-wide prefix, the two switches, and the enabled apps' variables.
+  # sensitive, the console-wide prefix, the two switches, the auth names (the Cognito three among them
+  # -- the root writes both the runtime and the NEXT_PUBLIC_ copy of each into .env.local from these),
+  # and the enabled apps' variables.
   assert {
     condition = length(setsubtract(
-      toset(["CASES_TABLE", "EMAIL_CONFIRMATION_TOKEN", "CONSOLE_SETTINGS_PREFIX", "PIPELINE_ENABLED", "REQUIRE_ACCESS_GROUPS", "ALPHA_BUCKET", "BETA_QUEUE", "ZULU_TABLE"]),
+      toset([
+        "CASES_TABLE", "EMAIL_CONFIRMATION_TOKEN", "CONSOLE_SETTINGS_PREFIX",
+        "PIPELINE_ENABLED", "REQUIRE_ACCESS_GROUPS",
+        "AUTH_PROVIDER", "AUTH_GROUPS_CLAIM", "OKTA_ISSUER", "OKTA_CLIENT_ID",
+        "COGNITO_USER_POOL_ID", "COGNITO_CLIENT_ID", "COGNITO_HOSTED_UI",
+        "ALPHA_BUCKET", "BETA_QUEUE", "ZULU_TABLE",
+      ]),
       toset(keys(output.task_environment)),
     )) == 0
-    error_message = "task_environment must carry the recon, console-wide and app names the root's frontend_env_local output indexes"
+    error_message = "task_environment must carry the recon, auth, console-wide and app names the root's frontend_env_local output indexes"
+  }
+}
+
+# The two URLs a Cognito app client must have registered for this deployment. The root feeds them
+# straight into the callback patch, so a wrong path here is a redirect_mismatch at sign-in with nothing
+# in the plan to explain it -- and the sign-out URL in particular is easy to get wrong, because the
+# obvious "origin with a trailing slash" does not match what the browser sends.
+run "the_cognito_urls_to_register_follow_the_frontend_route_contract" {
+  command = plan
+
+  variables {
+    auth_provider = "cognito"
+  }
+
+  # private_vpc = true in this file, so the public host is the ALB's DNS name rather than a CloudFront
+  # domain. The path contract is the same either way, which is what is being pinned.
+  assert {
+    condition     = endswith(output.cognito_callback_url, "/callback") && startswith(output.cognito_callback_url, "https://")
+    error_message = "cognito_callback_url must be an https URL ending in /callback, the path the console serves the redirect on; got ${output.cognito_callback_url}"
+  }
+
+  # No path and no trailing slash: cognito-pkce.ts sends window.location.origin as logout_uri and
+  # Cognito compares the string exactly.
+  assert {
+    condition     = output.cognito_logout_url == trimsuffix(output.cognito_callback_url, "/callback")
+    error_message = "cognito_logout_url must be the same origin as the callback with no path and no trailing slash; got ${output.cognito_logout_url}"
+  }
+
+  # A pinned redirect wins, so a console reachable on a custom domain registers that domain rather
+  # than the distribution's.
+  assert {
+    condition     = output.cognito_callback_url != ""
+    error_message = "cognito_callback_url must be non-empty when auth_provider = cognito"
+  }
+}
+
+# ...and both are empty for the other two providers, so an Okta or Entra deployment's root renders no
+# Cognito checklist line and passes no URLs to a patch it does not run.
+run "the_cognito_urls_are_empty_for_the_other_providers" {
+  command = plan
+
+  assert {
+    condition     = output.cognito_callback_url == "" && output.cognito_logout_url == ""
+    error_message = "with auth_provider = entra (this file's default) both Cognito URL outputs must be empty"
+  }
+}
+
+# A pinned callback URL must end in /callback. Anything else is refused by the frontend when the module
+# loads, so it is refused here at plan instead -- where the message can name the variable. A trailing
+# slash is the case worth pinning: Cognito compares the registered string exactly, so ".../callback/"
+# and ".../callback" are different URLs.
+run "a_pinned_cognito_redirect_uri_with_the_wrong_path_fails_at_plan" {
+  command = plan
+
+  variables {
+    auth_provider        = "cognito"
+    cognito_redirect_uri = "https://console.example.test/callback/"
+  }
+
+  expect_failures = [var.cognito_redirect_uri]
+}
+
+# The Okta callback path ENDS in "/callback", so the shape rule above accepts it. Copying
+# okta_redirect_uri into this variable is the obvious mistake and it applies cleanly, which is why
+# there is a second validation for exactly this string.
+run "the_okta_callback_path_is_refused_as_a_cognito_redirect_uri" {
+  command = plan
+
+  variables {
+    auth_provider        = "cognito"
+    cognito_redirect_uri = "https://console.example.test/login/callback"
+  }
+
+  expect_failures = [var.cognito_redirect_uri]
+}
+
+run "a_pinned_cognito_redirect_uri_is_used_verbatim" {
+  command = plan
+
+  variables {
+    auth_provider        = "cognito"
+    cognito_redirect_uri = "https://console.example.test/callback"
+  }
+
+  assert {
+    condition     = output.cognito_callback_url == "https://console.example.test/callback"
+    error_message = "a pinned cognito_redirect_uri must be the URL to register, not the derived host; got ${output.cognito_callback_url}"
   }
 }
 

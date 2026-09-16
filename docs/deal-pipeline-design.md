@@ -287,8 +287,9 @@ Routes under `/pipeline`: `inbox`, `inbox/[id]`, `deals`, `deals/[id]`, `assista
 console's landing chooser (§13), which sends a viewer with access to exactly one app straight
 into it — for a pipeline-only viewer that is `/pipeline/inbox`. Beside this tree the console
 serves the reconciliation app (`/recon/*`, `/api/recon/*`), the shell's `/api/me`, its Settings
-screen at `/console/settings` with `/api/console/*` behind it (§14), `/login/callback` (the OIDC
-redirect target), the liveness endpoints `/health` and `/api/health`, and the BFF in §9. `config`
+screen at `/console/settings` with `/api/console/*` behind it (§14), the provider's OIDC redirect
+target (`/callback` for Cognito, the default; `/login/callback` for Okta; Entra returns to the origin),
+the liveness endpoints `/health` and `/api/health`, and the BFF in §9. `config`
 carries the one console-aware control in this app: **Use console default** beside the parser-model
 presets, which copies the console-wide default model id into this app's own parameter through the
 same admin-gated PUT (§14); every other setting on that screen is this app's own. This app's own
@@ -311,7 +312,7 @@ CONSOLE_SETTINGS_PREFIX=/deal-pipeline-dev/console
 CONSOLE_ADMIN_GROUP=console-admins
 # CONSOLE_ORGANIZATION_LABEL=Agentic Operations Console
 # CONSOLE_DEFAULT_MODEL_ID=
-NEXT_PUBLIC_AUTH_PROVIDER=entra
+NEXT_PUBLIC_AUTH_PROVIDER=cognito
 AWS_REGION=us-east-1
 PIPELINE_ASSETS_BUCKET=
 EMAILS_TABLE=
@@ -363,15 +364,26 @@ because none of the names it reads is console-wide, and the only console value t
 the default model id its `/config` GET reports.
 
 Two further groups are read from `.env.local` and only matter with a real identity provider.
-Server-side token verification — `AUTH_PROVIDER`, `OKTA_ISSUER`, `OKTA_CLIENT_ID`,
-`ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `AUTH_GROUPS_CLAIM` — is read only when none of the three
-anonymous switches is `true`; an incomplete set is a 503 from the BFF, never an open door.
-Browser-side login — `NEXT_PUBLIC_ENTRA_TENANT_ID`, `NEXT_PUBLIC_ENTRA_CLIENT_ID`,
-`NEXT_PUBLIC_ENTRA_API_AUDIENCE`, `NEXT_PUBLIC_OKTA_ISSUER`, `NEXT_PUBLIC_OKTA_CLIENT_ID`,
-`NEXT_PUBLIC_OKTA_REDIRECT_URI` — is active only when the provider named by
-`NEXT_PUBLIC_AUTH_PROVIDER` has its client settings present. `chatbot-app/frontend/.env.example`
-is the template for the whole console: the shared authorization block, then the recon variables,
-then this app's.
+Server-side token verification — `AUTH_PROVIDER`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`,
+`OKTA_ISSUER`, `OKTA_CLIENT_ID`, `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `AUTH_GROUPS_CLAIM` — is read
+only when none of the three anonymous switches is `true`; an incomplete set is a 503 from the BFF,
+never an open door. Browser-side login — `NEXT_PUBLIC_COGNITO_USER_POOL_ID`,
+`NEXT_PUBLIC_COGNITO_CLIENT_ID`, `NEXT_PUBLIC_COGNITO_HOSTED_UI`,
+`NEXT_PUBLIC_COGNITO_REDIRECT_URI` (optional; the browser otherwise derives it from its own origin),
+`NEXT_PUBLIC_ENTRA_TENANT_ID`, `NEXT_PUBLIC_ENTRA_CLIENT_ID`, `NEXT_PUBLIC_ENTRA_API_AUDIENCE`,
+`NEXT_PUBLIC_OKTA_ISSUER`, `NEXT_PUBLIC_OKTA_CLIENT_ID`, `NEXT_PUBLIC_OKTA_REDIRECT_URI` — is active
+only when the provider named by `NEXT_PUBLIC_AUTH_PROVIDER` has its client settings present.
+
+`AUTH_PROVIDER` / `NEXT_PUBLIC_AUTH_PROVIDER` unset means **`cognito`**, an Amazon Cognito user pool
+the console's Terraform root creates itself (`infra/modules/console-auth`), so neither this app nor
+the console needs an external identity-provider tenant to be signable-in; `okta` and `entra` are
+unchanged alternatives. Leave `AUTH_GROUPS_CLAIM` unset under Cognito: a user pool emits group
+membership as the reserved claim `cognito:groups`, and blank resolves per provider on both sides
+(`cognito:groups`, or `groups` for Okta and Entra). Set it only when the groups arrive elsewhere,
+which is the federated case — a SAML/OIDC provider mapped into the pool commonly lands them on
+`custom:groups`. The repository README's "Authentication" section is the whole picture, including
+federation and cost. `chatbot-app/frontend/.env.example` is the template for the whole console: the
+shared authorization block, then the recon variables, then this app's.
 
 ## 12. Demo script
 
@@ -402,7 +414,8 @@ left switches between the apps the viewer has access to. The registry behind bot
 two group variable names per app and, for this app only, `enabledEnv: "PIPELINE_ENABLED"` — the
 value `false` (exact) makes `resolveAppAccess` report `{access: false, admin: false}`, so `/api/me`
 hides the app and the proxy 403s `/api/pipeline/*`; unset or anything else is enabled, and recon
-has no such switch. `/api/me` returns the `Viewer` — subject, groups, auth mode and
+has no such switch. `/api/me` returns the `Viewer` — subject, groups, auth mode (`anonymous`,
+`cognito`, `okta` or `entra`, mirroring `VerifiedAuthMode` in `src/lib/api-auth.ts`) and
 `apps.<id>.{access, admin}` — and, since the console layer (§14), `console.{admin, configured,
 organizationLabel}` and the caller's own `preferences`; the shell renders from that alone.
 
@@ -416,7 +429,17 @@ the behaviour a recon-only deployment had before the shell — and an unset admi
 as before. That open default is only safe while one population signs in, so the console has
 `REQUIRE_ACCESS_GROUPS`: exactly `true` makes a blank access group **deny** the app to everyone but
 its admins. The composed deployment sets it whenever the pipeline is enabled, and the recon root
-refuses to plan `enable_deal_pipeline = true` while either access group is blank. `src/proxy.ts`
+refuses to plan `enable_deal_pipeline = true` while either access group is blank — **except** under
+`auth_provider = "cognito"` (the default), where the premise no longer holds: the user pool
+`infra/modules/console-auth` creates owns all four app groups plus the console-admin group, and the
+root's `local.console_groups` resolves a blank variable to the group the pool actually created
+(`deal-desk` and `deal-desk-admins` for this app), handing the console that name. So the four names
+always reach the task non-blank there and "blank access group = open" never arises; what still fails
+closed is membership, because every group is created **empty**. Under Okta or Entra nothing in
+Terraform can create a group, `""` reaches the console as `""`, and the paragraph above holds
+unchanged. `scripts/create_dev_users.py` populates the pool's groups with five demonstration accounts
+— one of them pipeline-access only, one an admin of both apps — which is how the split described here
+is checked in a browser. `src/proxy.ts`
 applies the access check to every `/api/pipeline/*` and `/api/recon/*` request before the handler
 runs. Behind it the two apps differ: every admin-gated route in §9 re-checks `PIPELINE_ADMIN_GROUP`
 for itself, whereas on the recon side only `config/*`, `memory` DELETE and `uploads` re-check
@@ -442,8 +465,10 @@ When true it instantiates `infra/modules/deal-pipeline` beside `modules/frontend
 console's task role the bucket, table, memory, Lambda and SSM access this app needs, and passes the
 task the §11 variables under the prefixed names together with `PIPELINE_ENABLED=true` and
 `REQUIRE_ACCESS_GROUPS=true`; with the flag off the task carries `PIPELINE_ENABLED=false` and no
-pipeline environment or grants. The plan is refused while `recon_access_group` or
-`pipeline_access_group` is blank. The module creates the same *kinds* of resources as §3, but
+pipeline environment or grants. Under `auth_provider = "okta"` or `"entra"` the plan is refused while
+`recon_access_group` or `pipeline_access_group` is blank; under the default `"cognito"` it is not,
+because the pool creates both groups and the root passes the console their names (see **Access
+groups** above). The module creates the same *kinds* of resources as §3, but
 **not the same names or tags**: the composed root instantiates it with
 `name_prefix = "<name_prefix>-pipeline"` (default `recon-dev-pipeline`), so the §3 names become
 `recon-dev-pipeline-emails`, `recon-dev-pipeline-assets-<account_id>`,
@@ -451,7 +476,12 @@ pipeline environment or grants. The plan is refused while `recon_access_group` o
 pipeline creates can collide with a recon name — and the recon provider sets no `default_tags`. Find
 the pipeline's resources by the `<name_prefix>-pipeline` prefix or through the root's Terraform
 state. Running this app alone against `npm run dev` means running it against such a deployment,
-with `.env.local` rendered by `terraform output -raw frontend_env_local`.
+with `.env.local` rendered by `terraform output -raw frontend_env_local`. That deployment does not have
+to include the serving tier: `enable_frontend_tier = false` skips the container build, ECS service, ALB
+and CloudFront while creating every table, bucket, Lambda and memory this app reads, and the same
+output still renders a complete `.env.local` — composed from the root's own values rather than read
+back from a task definition that does not exist. The repository README's "The cheap development
+profile" lists the five flags and what that profile does **not** exercise.
 
 **Samples from S3 in the container.** The console image holds the built app and no `data/`, so
 the simulated inbox cannot read `data/deal-emails` there. `infra/modules/deal-pipeline` seeds the
@@ -462,7 +492,7 @@ same ids (the file or object name without `.json`), so a sample picked from the 
 environment reads back on the next request. Nothing is cached in either mode; a new sample on disk
 shows up on the next open, and a new sample in S3 after the apply that seeded it.
 
-**Decoupling.** The two apps share the identity spine (`src/lib/auth/`, including `client-token.ts`, the one browser-side ID-token reader, `authed-fetch.ts`, which `recon-auth.ts` binds for recon and `pipelineApi.ts` imports directly, and `app-admin.ts`; `src/lib/api-auth.ts`,
+**Decoupling.** The two apps share the identity spine (`src/lib/auth/`, including `provider.ts`, the one reader of `NEXT_PUBLIC_AUTH_PROVIDER`, `cognito-pkce.ts`, the default provider's browser flow, `client-token.ts`, the one browser-side ID-token reader, `authed-fetch.ts`, which `recon-auth.ts` binds for recon and `pipelineApi.ts` imports directly, and `app-admin.ts`; `src/lib/api-auth.ts`,
 `src/lib/reauth.ts`), the `src/components/ui/` primitives and a few app-agnostic helpers, and
 nothing else: no import crosses from `src/{app,components,lib,hooks}/*pipeline*` into `*recon*` or
 back. Adding a third app is one entry in `APPS` plus its own route trees.

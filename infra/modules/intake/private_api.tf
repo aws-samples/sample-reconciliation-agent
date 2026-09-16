@@ -79,12 +79,21 @@ resource "aws_api_gateway_method" "post_items" {
   resource_id = aws_api_gateway_resource.items[0].id
   http_method = "POST"
 
-  # SigV4, not a bearer token. A REST API has no native OIDC authorizer — COGNITO_USER_POOLS is
-  # Cognito-only and this stack no longer runs a user pool — so the alternative was a Lambda authorizer
-  # verifying Okta JWTs, which would have to fetch Okta's JWKS from INSIDE this VPC. A VPC-only endpoint
-  # whose authorization depends on internet egress fails closed the moment the NAT is removed, which is
-  # the one deployment this API exists for. IAM also matches both AgentCore gateways, needs no new
-  # dependency in the shared Lambda zip, and is auditable per-principal in CloudTrail.
+  # SigV4, not a bearer token, and the reasoning is NOT "there is nothing to authorize against".
+  #
+  # A REST API's only native OIDC authorizer is COGNITO_USER_POOLS, and the console DOES run a user pool
+  # again (modules/console-auth) whenever auth_provider = "cognito" — so that authorizer is now
+  # available and is still not wanted here. Two reasons, in order. First, it would bind this VPC-only
+  # door to whichever identity provider the CONSOLE happens to sign in through: it exists for one
+  # provider out of three, so an operator who moved to Okta or Entra would find this API's authorization
+  # gone with nothing in the diff about it. Second, the caller is machinery, not a person — nothing here
+  # has a browser to complete a hosted-UI redirect in, so a human-shaped credential is the wrong shape.
+  #
+  # The provider-agnostic alternative, a Lambda authorizer verifying the selected issuer's JWTs, would
+  # have to fetch that issuer's JWKS from INSIDE this VPC. A VPC-only endpoint whose authorization
+  # depends on internet egress fails closed the moment the NAT is removed, which is the one deployment
+  # this API exists for. IAM avoids all of it, matches both AgentCore gateways, needs no new dependency
+  # in the shared Lambda zip, and is auditable per-principal in CloudTrail.
   #
   # Callers therefore need credentials plus execute-api:Invoke on this method, not a token.
   authorization = "AWS_IAM"

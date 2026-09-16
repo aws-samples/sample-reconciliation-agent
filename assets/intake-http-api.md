@@ -20,9 +20,9 @@ Split across two Terraform modules that share one API.
 | Resource            | Name                                                   | Declared in                                                                                     |
 | ------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
 | HTTP API            | `recon-dev-api`                                        | `infra/modules/intake/main.tf` (`aws_apigatewayv2_api.http`)                                    |
-| JWT authorizer      | `recon-dev-oidc-jwt` (Okta/Entra, not Cognito)         | `infra/modules/intake/main.tf:111`                                                              |
+| JWT authorizer      | `recon-dev-oidc-jwt` (issuer-agnostic)                 | `infra/modules/intake/main.tf:121`                                                              |
 | Stage               | `$default`, `auto_deploy = true`                       | `infra/modules/intake/main.tf`                                                                  |
-| Route `POST /items` | → `recon-dev-intake` Lambda                            | `infra/modules/intake/main.tf:130`                                                              |
+| Route `POST /items` | → `recon-dev-intake` Lambda                            | `infra/modules/intake/main.tf:140`                                                              |
 | Route `GET /skills` | → `recon-dev-skills-bff` Lambda                        | `infra/modules/api/main.tf:118`                                                                 |
 | Access logs         | `/aws/apigateway/recon-dev-intake`, 365-day retention  | `infra/modules/intake/main.tf`                                                                  |
 | Private REST API    | `recon-dev-intake-private` — `private_vpc = true` only | `infra/modules/intake/private_api.tf` (see [below](#reaching-it-from-a-private-vpc-deployment)) |
@@ -59,14 +59,22 @@ derived from `auth_provider` in **one** place, `infra/environments/recon/main.tf
 using the same derivation `chatbot-app/frontend/src/lib/api-auth.ts` performs for the BFF, so the API
 and the BFF accept exactly the same tokens by construction:
 
-| `auth_provider` | `issuer`                                          | `audience`        |
-| --------------- | ------------------------------------------------- | ----------------- |
-| `okta`          | `okta_issuer`                                     | `okta_client_id`  |
-| `entra`         | `https://login.microsoftonline.com/<tenant>/v2.0` | `entra_client_id` |
+| `auth_provider`         | `issuer`                                               | `audience`               |
+| ----------------------- | ------------------------------------------------------ | ------------------------ |
+| `cognito` (the default) | `https://cognito-idp.<region>.amazonaws.com/<pool-id>` | the pool's SPA client id |
+| `okta`                  | `okta_issuer`                                          | `okta_client_id`         |
+| `entra`                 | `https://login.microsoftonline.com/<tenant>/v2.0`      | `entra_client_id`        |
+
+The `cognito` row is the **console's own user pool** (`module.console_auth`), the one operators sign in
+through — so by default this API and the console validate one identity provider, not two. Note the
+issuer is the `cognito-idp` endpoint, **not** the hosted-UI domain the browser is redirected to; the
+JWKS lives under the former.
 
 Entra's **v2.0** issuer specifically: a v1 token (`sts.windows.net`) fails this check by design, which
-matches `api-auth.ts`. An unset provider fails the plan in `modules/intake`'s variable validation
-rather than authorizing against nothing.
+matches `api-auth.ts`. An unset `auth_provider` does not reach this module's validation at all — the
+root resolves it to `cognito`, so an unconfigured deployment fails the plan on the required
+`cognito_hosted_ui_prefix` instead, naming the variable that is missing rather than authorizing against
+nothing.
 
 Both routes set `authorization_type = "JWT"` with this authorizer id, so **every route on this API is
 protected** and there is no unauthenticated route to accidentally inherit.
@@ -88,13 +96,17 @@ What it checks, and what it does not:
 
 ### Getting a token
 
-The same token the console holds. `/api/recon/*` and `POST /items` accept the identical Okta (or
-Entra) token, so anything that can call the BFF can call this API:
+The same token the console holds — a user-pool ID token by default, or an Okta or Entra one when
+`auth_provider` names those. `/api/recon/*` and `POST /items` accept the identical token, so anything
+that can call the BFF can call this API:
 
 1. **From the browser session** — sign in to the console and reuse its bearer token. `reconFetch`
    attaches it for BFF calls; the same value works here.
 2. **Machine-to-machine** — an Okta client-credentials grant on the same authorization server, or an
-   Entra app-only token, whose `aud` is the configured client id.
+   Entra app-only token, whose `aud` is the configured client id. On a Cognito deployment this needs a
+   SECOND app client, one with a secret, plus a resource server for the scope — the console's own
+   client has no secret, deliberately, and its client id is the only `aud` this authorizer accepts, so
+   plan for a variable rather than assuming the console's client will do.
 3. **Skip the API.** For local verification the cheaper path is invoking the Lambda directly with a
    synthetic API Gateway event — what the console's BFF does (below), and it fires the real Tier-1
    stream.
@@ -372,16 +384,19 @@ Five things to know about it:
   all-or-nothing batch, the conditional put and the `written` count all come from the same code, so
   there is no second contract to keep in step — which is why the integration reuses the Lambda instead
   of a private twin of it.
-- **SigV4, not a bearer token — a deliberate asymmetry with the public door.** A REST API has no
-  native OIDC authorizer: `COGNITO_USER_POOLS` is Cognito-only and this stack runs no user pool, so the
-  alternative was a Lambda authorizer verifying Okta JWTs. That authorizer would have to fetch Okta's
-  JWKS **from inside this VPC**, and a VPC-only endpoint whose authorization depends on internet egress
-  fails closed the moment the NAT is removed — the one deployment this API exists for. It would also put
-  PyJWT + `cryptography` into `modules/lambda-package`'s single shared `runtime_dependencies` list, which
-  every backend Lambda's zip carries and which is duplicated in `.gitlab-ci.yml`. IAM avoids all of it,
+- **SigV4, not a bearer token — a deliberate asymmetry with the public door.** A REST API's only native
+  OIDC authorizer is `COGNITO_USER_POOLS`, and the console does run a user pool again under the default
+  `auth_provider` — so that authorizer is available and is still the wrong choice here: it would bind
+  this VPC-only door to whichever provider the *console* signs in through, so choosing `okta` or `entra`
+  would silently take this API's authorization with it. The provider-agnostic alternative, a Lambda
+  authorizer verifying the selected issuer's JWTs, would have to fetch that issuer's JWKS **from inside
+  this VPC**, and a VPC-only endpoint whose authorization depends on internet egress fails closed the
+  moment the NAT is removed — the one deployment this API exists for. It would also put PyJWT +
+  `cryptography` into `modules/lambda-package`'s single shared `runtime_dependencies` list, which every
+  backend Lambda's zip carries and which is duplicated in `.gitlab-ci.yml`. IAM avoids all of it,
   matches both AgentCore gateways, and is auditable per-principal in CloudTrail.
-- **Callers need `execute-api:Invoke`** on the method, plus credentials — not a token, and not a Cognito
-  or Okta user. Nothing in the repo calls it today.
+- **Callers need `execute-api:Invoke`** on the method, plus credentials — not a token, and not a pool,
+  Okta or Entra user. Nothing in the repo calls it today.
 - **No access logging, deliberately, and it costs you.** REST-API CloudWatch logging needs an IAM role
   ARN in API Gateway's **account** settings — a per-account singleton (`aws_api_gateway_account`) that
   silently overwrites whatever any other stack in the account set. So a request rejected by the

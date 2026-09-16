@@ -37,9 +37,17 @@
  * than merely tidy — a `proxy` ALWAYS runs on the Node.js runtime (Next rejects a `runtime` key
  * here outright), whereas `middleware` defaulted to Edge. Edge would break this gate: Next inlines
  * `process.env` references into Edge bundles at BUILD time, but the auth configuration
- * (`AUTH_PROVIDER`/`OKTA_ISSUER`/`OKTA_CLIENT_ID`) and the group names (`RECON_ACCESS_GROUP` and
- * friends) are supplied at RUNTIME by the ECS task definition, so on Edge those reads would bake in
- * as undefined and every request would 503, or every app would read as open.
+ * (`AUTH_PROVIDER` and whichever provider's pair goes with it — `COGNITO_USER_POOL_ID`/
+ * `COGNITO_CLIENT_ID`, `OKTA_ISSUER`/`OKTA_CLIENT_ID`, `ENTRA_TENANT_ID`/`ENTRA_CLIENT_ID`) and the
+ * group names (`RECON_ACCESS_GROUP` and friends) are supplied at RUNTIME by the ECS task definition,
+ * so on Edge those reads would bake in as undefined and every request would 503, or every app would
+ * read as open.
+ *
+ * Nothing in this file is provider-specific and nothing needed to become so for Cognito: it forwards
+ * whatever status `authorizeRequest` decided, and the `WWW-Authenticate: Bearer` header on a 401 is
+ * the scheme, not the issuer. The matcher lists route prefixes only — no auth handshake path is
+ * matched, so `/callback` (Cognito) and `/login/callback` (Okta) pass through untouched exactly as
+ * they always did.
  *
  * Node-runtime interceptors are registered in `.next/server/functions-config-manifest.json` (as
  * `/_middleware`), NOT in the top-level `middleware-manifest.json`, which only ever lists EDGE

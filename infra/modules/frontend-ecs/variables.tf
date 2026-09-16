@@ -90,9 +90,9 @@ variable "recon_api_base" {
   type        = string
 }
 
-# --- Auth provider selection (Okta OIDC vs Entra) ---
+# --- Auth provider selection (Amazon Cognito, Okta OIDC, or Entra) ---
 variable "auth_provider" {
-  description = "Frontend identity provider: 'entra' (default) or 'okta'. Baked into the build."
+  description = "Frontend identity provider: 'cognito' (the default the frontend resolves when this is unset), 'okta' or 'entra'. Baked into the build AND set on the task, because the browser and the BFF must agree on which provider is in play."
   type        = string
   default     = "entra"
 }
@@ -109,6 +109,75 @@ variable "okta_client_id" {
   default     = ""
 }
 
+# ---------------------------------------------------------------------------------
+# Amazon Cognito (auth_provider = "cognito"): the console's own user pool, from modules/console-auth.
+#
+# All three default to "" and all three are rendered into the task environment unconditionally,
+# exactly as OKTA_ISSUER and OKTA_CLIENT_ID already are for an Entra deployment. That is deliberate
+# and it is the house pattern: the container always names every auth variable, and the ones the
+# selected provider does not use are empty. The alternative -- omitting the names -- reads to an
+# auditor as "this console has no Cognito configuration" when what it means is "this console is not
+# using it", and it would make the task definition's shape depend on the provider.
+#
+# Two copies of each value reach the image, and they are not redundant:
+#   * NEXT_PUBLIC_COGNITO_* are BUILD arguments. Next.js inlines them into the browser bundle at
+#     build time, so they are what the PKCE flow in src/lib/auth/cognito-pkce.ts actually reads. A
+#     running container cannot see them.
+#   * COGNITO_* are RUNTIME task variables, read by the BFF (src/lib/api-auth.ts) to derive this
+#     pool's issuer and JWKS URL and to check the `aud`. Without them every /api/* request answers
+#     503 "misconfigured" -- deliberately, never an open door.
+# Both halves are therefore required for a working Cognito deployment, which is why one variable
+# feeds both rather than there being a build-time and a runtime input to keep in step.
+# ---------------------------------------------------------------------------------
+
+variable "cognito_user_pool_id" {
+  description = "Cognito user pool id (COGNITO_USER_POOL_ID), e.g. us-east-1_ABC123def, from modules/console-auth. The BFF composes the token issuer as https://cognito-idp.<region>.amazonaws.com/<this> and fetches the JWKS under it, so a wrong value fails every verification with an issuer mismatch. Empty unless auth_provider=cognito. Not a secret."
+  type        = string
+  default     = ""
+}
+
+variable "cognito_client_id" {
+  description = "Cognito app client id of the public PKCE client (COGNITO_CLIENT_ID). It is both the `aud` the BFF requires and the client_id the browser sends to the hosted UI. Empty unless auth_provider=cognito. Not a secret: this client has no secret, and the id is in the browser bundle and in every authorize URL."
+  type        = string
+  default     = ""
+}
+
+variable "cognito_hosted_ui" {
+  description = "Hosted-UI (managed login) HOST, e.g. example-login.auth.us-east-1.amazoncognito.com — no scheme, no trailing slash (cognito-pkce.ts also tolerates an https:// prefix). This is where the browser is redirected to sign in and where it exchanges the code for tokens. Empty unless auth_provider=cognito."
+  type        = string
+  default     = ""
+}
+
+# The Cognito counterpart of okta_redirect_uri, and it exists for the same reason: left empty the
+# browser derives the redirect from its own origin, which is a generated *.cloudfront.net domain that
+# changes if the distribution is recreated. Unlike Okta, the callback is registered by THIS stack (the
+# root's Cognito callback patch), so drift self-heals on the next apply -- pinning matters when the
+# console is reachable on more than one host (a custom domain as well as the distribution domain),
+# because Cognito redirects only to a URL that is registered and the browser sends whichever origin
+# it happens to be on.
+variable "cognito_redirect_uri" {
+  description = "Pinned Cognito OAuth callback URL (NEXT_PUBLIC_COGNITO_REDIRECT_URI). Must end in /callback — the path the console serves the redirect on (cognito-pkce.ts, COGNITO_CALLBACK_PATH). Empty = derive it from the browser origin, which is right for a single-host deployment."
+  type        = string
+  default     = ""
+
+  # Deliberately the same LOOSE rule cognito-pkce.ts applies (an absolute URL ending in the callback
+  # path), so Terraform and the frontend never disagree about what is acceptable. A trailing slash is
+  # the mistake it catches: ".../callback/" does not end in "/callback", and Cognito compares exactly.
+  validation {
+    condition     = var.cognito_redirect_uri == "" || can(regex("^https?://.+/callback$", var.cognito_redirect_uri))
+    error_message = "cognito_redirect_uri must be an absolute http(s) URL ending in /callback (or empty to derive it from the browser origin). The path is fixed by the console's own route, and a trailing slash does not count: the frontend refuses the value at load rather than failing later at sign-in."
+  }
+
+  # The one confusable value, called out separately because the rule above cannot catch it: the Okta
+  # flow's callback is /login/callback and the Cognito flow's is /callback, so "…/login/callback" ends
+  # in "/callback" and passes. Copying okta_redirect_uri across is the obvious mistake, it applies
+  # cleanly, and the failure is a browser sent to a route that does not serve the Cognito redirect.
+  validation {
+    condition     = !endswith(var.cognito_redirect_uri, "/login/callback")
+    error_message = "cognito_redirect_uri looks like the OKTA callback URL (/login/callback). The Cognito flow is served at /callback — set that path, or leave this empty and let the browser derive it."
+  }
+}
+
 # The group whose members may change platform configuration — the auto-resolve threshold, the agent
 # backend, the Tier-1 switch, and the list of addresses the platform may email.
 #
@@ -123,11 +192,16 @@ variable "recon_admin_group" {
 }
 
 # Which claim carries group memberships. Okta releases them as `groups` when the app is configured to;
-# Entra uses `groups` or `roles` depending on the app registration. Wrong name means an empty group list,
-# which reads as "not an admin" rather than as a misconfiguration — so if the Config tab is missing for
-# someone who should have it, check this before checking the group name.
+# Entra uses `groups` or `roles` depending on the app registration; a Cognito user pool uses
+# `cognito:groups`, a RESERVED name the service will not let you rename. Wrong name means an empty group
+# list, which reads as "not an admin" rather than as a misconfiguration — so if the Config tab is missing
+# for someone who should have it, check this before checking the group name.
+#
+# The default stays "groups" (this module's callers have always passed a value anyway). The recon root
+# resolves it per provider in local.auth_groups_claim, so a Cognito deployment is handed
+# "cognito:groups" explicitly rather than relying on the console's own fallback.
 variable "auth_groups_claim" {
-  description = "JWT claim carrying OIDC group memberships (Okta: groups; Entra: groups or roles)."
+  description = "JWT claim carrying group memberships (Cognito: cognito:groups; Okta: groups; Entra: groups or roles)."
   type        = string
   default     = "groups"
 }

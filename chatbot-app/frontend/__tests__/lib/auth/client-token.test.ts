@@ -1,14 +1,22 @@
 /**
  * The one browser-side ID-token reader the shell and both apps share.
  *
- * Exercised through the Entra/MSAL path because that is the default provider
- * (NEXT_PUBLIC_AUTH_PROVIDER is unset in tests); the Okta branch is the same shape. The property
- * beyond the token itself is neutrality: a failure here is logged under the shell's own prefix, so a
- * recon-only console never sees a warning that blames an app it does not run.
+ * Exercised through the Entra/MSAL path; the Okta branch is the same shape and the Cognito branch has
+ * its own file. The provider is now NAMED rather than implied: it used to be left unset because the
+ * default was Entra, and the default is Cognito since 2026-09-16 (`lib/auth/provider.ts`). Nothing
+ * about the Entra path changed — the assertions below are untouched.
+ *
+ * The property beyond the token itself is neutrality: a failure here is logged under the shell's own
+ * prefix, so a recon-only console never sees a warning that blames an app it does not run.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fakeMsal } from "../../helpers/msal";
+
+// Before the dynamic import below: `lib/auth/provider.ts` reads the variable at module load.
+vi.hoisted(() => {
+  process.env.NEXT_PUBLIC_AUTH_PROVIDER = "entra";
+});
 
 const msal = fakeMsal();
 const { account, acquireTokenSilent, getActiveAccount } = msal;

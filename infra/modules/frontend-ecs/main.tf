@@ -21,14 +21,35 @@ locals {
   # the image hash: the codebuild trigger skips when a tag already exists in ECR, so a config
   # change that doesn't move the hash (e.g. switching auth_provider to okta) would otherwise
   # keep serving the old image forever.
+  #
+  # ⚠️ EVERY value passed as a --build-arg below belongs in this list. The Cognito four are here for
+  # exactly the reason the Okta ones are: they are inlined into the browser bundle, so a pool
+  # recreated with a new id would leave the image pointing at the old one, the sign-in would fail with
+  # an unregistered client, and the plan would show nothing at all -- the tag already exists, so the
+  # build is skipped.
   build_config = join("|", [
     var.region, var.recon_api_base,
     var.auth_provider, var.okta_issuer, var.okta_client_id, var.okta_redirect_uri,
+    var.cognito_user_pool_id, var.cognito_client_id, var.cognito_hosted_ui, var.cognito_redirect_uri,
   ])
   source_hash = sha1(join("", concat(
     [for f in local.frontend_files : try(filesha1("${var.frontend_dir}/${f}"), "")],
     [local.build_config],
   )))
+
+  # The Cognito hosted-UI ORIGIN as a CSP source, or "" — appended to `connect-src` in the CloudFront
+  # response-headers policy below (see the comment there for why only connect-src). The leading space
+  # is part of the value so an Okta or Entra deployment renders the directive it always rendered, with
+  # no trailing separator to distinguish it.
+  #
+  # The scheme is stripped and re-added rather than interpolated: cognito_hosted_ui is documented as a
+  # bare host but cognito-pkce.ts tolerates an `https://` prefix, and a value pasted with one would
+  # otherwise render `https://https://...` — a source the browser silently ignores, leaving exactly
+  # the failure this line exists to prevent.
+  csp_cognito_hosted_ui = trimsuffix(replace(trimspace(var.cognito_hosted_ui), "/^https?:\\/\\//", ""), "/")
+  csp_cognito_connect_src = (
+    local.csp_cognito_hosted_ui == "" ? "" : " https://${local.csp_cognito_hosted_ui}"
+  )
 }
 
 # ============================================================
@@ -243,6 +264,25 @@ resource "aws_codebuild_project" "frontend" {
       name  = "OKTA_REDIRECT_URI"
       value = var.okta_redirect_uri
     }
+    # Cognito's four. Empty for an Okta or Entra deployment, which passes them as empty build args and
+    # leaves the browser bundle with no Cognito configuration -- exactly what the Okta values do for an
+    # Entra build today.
+    environment_variable {
+      name  = "COGNITO_USER_POOL_ID"
+      value = var.cognito_user_pool_id
+    }
+    environment_variable {
+      name  = "COGNITO_CLIENT_ID"
+      value = var.cognito_client_id
+    }
+    environment_variable {
+      name  = "COGNITO_HOSTED_UI"
+      value = var.cognito_hosted_ui
+    }
+    environment_variable {
+      name  = "COGNITO_REDIRECT_URI"
+      value = var.cognito_redirect_uri
+    }
   }
 
   source {
@@ -264,6 +304,10 @@ resource "aws_codebuild_project" "frontend" {
                 --build-arg NEXT_PUBLIC_OKTA_ISSUER=$OKTA_ISSUER \
                 --build-arg NEXT_PUBLIC_OKTA_CLIENT_ID=$OKTA_CLIENT_ID \
                 --build-arg NEXT_PUBLIC_OKTA_REDIRECT_URI=$OKTA_REDIRECT_URI \
+                --build-arg NEXT_PUBLIC_COGNITO_USER_POOL_ID=$COGNITO_USER_POOL_ID \
+                --build-arg NEXT_PUBLIC_COGNITO_CLIENT_ID=$COGNITO_CLIENT_ID \
+                --build-arg NEXT_PUBLIC_COGNITO_HOSTED_UI=$COGNITO_HOSTED_UI \
+                --build-arg NEXT_PUBLIC_COGNITO_REDIRECT_URI=$COGNITO_REDIRECT_URI \
                 -t $ECR_REPO_URI:latest -t $ECR_REPO_URI:$SOURCE_HASH .
         post_build:
           commands:
@@ -902,6 +946,16 @@ resource "aws_ecs_task_definition" "frontend" {
       { name = "AUTH_PROVIDER", value = var.auth_provider },
       { name = "OKTA_ISSUER", value = var.okta_issuer },
       { name = "OKTA_CLIENT_ID", value = var.okta_client_id },
+      # Cognito's runtime pair, present and empty for an Okta or Entra deployment exactly as the two
+      # Okta names above are for an Entra one. The BFF composes the issuer from the pool id and
+      # AWS_REGION and requires the client id as the `aud`; with AUTH_PROVIDER=cognito and either of
+      # these blank it answers 503 for every /api/* request rather than accepting an unverified token.
+      # The hosted-UI host is here too, although only the browser build needs it, so that an operator
+      # reading `aws ecs describe-task-definition` can see which pool this console signs in to without
+      # cross-referencing the image's build arguments.
+      { name = "COGNITO_USER_POOL_ID", value = var.cognito_user_pool_id },
+      { name = "COGNITO_CLIENT_ID", value = var.cognito_client_id },
+      { name = "COGNITO_HOSTED_UI", value = var.cognito_hosted_ui },
       # --- Configuration-change role (src/lib/reconAdmin.ts) ---
       # Membership is an OIDC group claim from Okta/Entra, so the group itself is
       # created in the identity provider, not by Terraform. Leaving `recon_admin_group` empty is a
@@ -1168,13 +1222,24 @@ resource "aws_cloudfront_response_headers_policy" "security" {
       # top-level redirect, because the iframe flow needs the provider's session cookie in a
       # third-party context — which Safari already blocks and Chrome is phasing out. Allowing the
       # frame would buy back a mechanism that fails again later, silently.
+      #
+      # The Cognito hosted UI, by contrast, DOES need a `connect-src` entry, and only that. The
+      # sign-in leg is a top-level navigation (no CSP directive governs one here), but the
+      # code-for-token POST and every silent refresh in src/lib/auth/cognito-pkce.ts are `fetch`
+      # calls to `https://<hosted-ui>/oauth2/token` — cross-origin, so `connect-src 'self'` refuses
+      # them and the browser reports it as a CSP violation, not as an auth error. Left out, sign-in
+      # cannot complete on the DEFAULT provider and the console's error screen blames an
+      # unregistered callback URL. It is derived from the variable rather than hard-coded to
+      # `*.amazoncognito.com` so a pool on a custom hosted-UI domain is covered too, and so an Okta
+      # or Entra deployment (cognito_hosted_ui = "") renders the byte-identical policy it always
+      # did. Still NO `frame-src` for it: nothing frames the hosted UI.
       content_security_policy = join("; ", [
         "default-src 'self'",
         "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
         "style-src 'self' 'unsafe-inline'",
         "font-src 'self' data:",
         "img-src 'self' data: blob:",
-        "connect-src 'self' https://*.okta.com https://login.microsoftonline.com",
+        "connect-src 'self' https://*.okta.com https://login.microsoftonline.com${local.csp_cognito_connect_src}",
         # ⚠️ `frame-src` must be stated, and `blob:` is the whole reason. Source documents are
         # fetched with the BFF's Authorization header and handed to the element as an OBJECT URL --
         # neither `<iframe src>` nor `<img src>` can carry a header, so there is no other shape this

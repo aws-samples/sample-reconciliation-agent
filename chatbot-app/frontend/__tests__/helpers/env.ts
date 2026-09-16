@@ -47,6 +47,15 @@ export const AUTH_ENV_NAMES: readonly string[] = [
   "AUTH_GROUPS_CLAIM",
   "AUTH_PROVIDER",
   "NEXT_PUBLIC_AUTH_PROVIDER",
+  // Cognito is the DEFAULT provider, so these have to be cleared like the rest: a developer's shell
+  // that happens to export a real pool id would otherwise leave `resolveApiAuth({})` resolving to a
+  // working configuration in a test that meant to have none.
+  "COGNITO_USER_POOL_ID",
+  "COGNITO_CLIENT_ID",
+  "NEXT_PUBLIC_COGNITO_USER_POOL_ID",
+  "NEXT_PUBLIC_COGNITO_CLIENT_ID",
+  "NEXT_PUBLIC_COGNITO_HOSTED_UI",
+  "NEXT_PUBLIC_COGNITO_REDIRECT_URI",
   "OKTA_ISSUER",
   "OKTA_CLIENT_ID",
   "NEXT_PUBLIC_OKTA_ISSUER",

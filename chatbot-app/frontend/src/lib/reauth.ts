@@ -6,8 +6,11 @@
  * 401 backstop in `reconFetch`.
  *
  * This is the FALLBACK, not the first response to an expiring session: `okta-renew.ts` renews
- * silently with the refresh token, and this module is where the app lands when that is impossible
- * or was refused.
+ * silently with the refresh token, `lib/auth/cognito-pkce.ts` renews on every token read, and this
+ * module is where the app lands when that is impossible or was refused.
+ *
+ * Which provider it redirects to comes from `lib/auth/provider.ts` — the one reader of
+ * `NEXT_PUBLIC_AUTH_PROVIDER`, so this cannot disagree with the gate that signed the user in.
  *
  * Why a top-level redirect and not the SDK's own silent renew:
  *
@@ -32,7 +35,7 @@
  * `oktaTokenManagerOptions` for why that is what enforces it.
  */
 
-const PROVIDER = process.env.NEXT_PUBLIC_AUTH_PROVIDER ?? "entra";
+import { AUTH_PROVIDER, authProviderBranch } from "@/lib/auth/provider";
 
 /** What discovered that the session is gone. `"user"` bypasses the loop guard below. */
 export type ReauthTrigger = "user" | "expired" | "unauthorized";
@@ -74,6 +77,27 @@ function automaticReauthRefusal(): string | null {
     );
   }
   return null;
+}
+
+/**
+ * Start a Cognito hosted UI sign-in redirect, returning the user to the current URL afterwards.
+ *
+ * A plain top-level navigation to `/oauth2/authorize`: there is no SDK on this path, and none of the
+ * iframe machinery discussed above exists to avoid. If the pool session is still alive the round trip
+ * is invisible; if it is not, the user lands on the hosted UI's sign-in page, which is correct.
+ *
+ * @param originalUri absolute URL to return to once sign-in completes.
+ */
+async function cognitoReauth(originalUri: string): Promise<boolean> {
+  const { HAS_COGNITO_CONFIG, buildLoginUrl, clearTokens } = await import(
+    "@/lib/auth/cognito-pkce"
+  );
+  if (!HAS_COGNITO_CONFIG) return false;
+  // Drop the dead tokens before leaving, for the reason the Okta branch below spells out: a redirect
+  // that fails must leave the app unauthenticated rather than holding a token that 401s every call.
+  clearTokens();
+  window.location.assign(await buildLoginUrl(originalUri));
+  return true;
 }
 
 /**
@@ -171,10 +195,13 @@ export async function reauthenticate(trigger: ReauthTrigger): Promise<boolean> {
   }
 
   const originalUri = window.location.href;
+  const branch = authProviderBranch();
   const started =
-    PROVIDER === "okta"
+    branch === "okta"
       ? await oktaReauth(originalUri)
-      : await entraReauth(originalUri);
+      : branch === "entra"
+        ? await entraReauth(originalUri)
+        : await cognitoReauth(originalUri);
 
   if (!started) {
     // No configured provider: this build runs unauthenticated (local dev, or a deploy whose
@@ -182,8 +209,8 @@ export async function reauthenticate(trigger: ReauthTrigger): Promise<boolean> {
     // the BFF wants a token nobody can mint — so name that rather than looking broken silently.
     console.error(
       `[Reauth] cannot re-authenticate (${trigger}): NEXT_PUBLIC_AUTH_PROVIDER is ` +
-        `"${PROVIDER}" but its issuer/client id are not configured in this build. If the API is ` +
-        `rejecting calls, the server needs ALLOW_ANONYMOUS_API=true or a real provider.`,
+        `"${AUTH_PROVIDER}" but its issuer/client id are not configured in this build. If the API ` +
+        `is rejecting calls, the server needs ALLOW_ANONYMOUS_API=true or a real provider.`,
     );
   }
   return started;

@@ -92,7 +92,8 @@ export interface AppAccess {
 export interface Viewer {
   subject: string;
   groups: string[];
-  mode: "anonymous" | "okta" | "entra";
+  /** How the caller was authenticated; mirrors `VerifiedAuthMode` in `lib/api-auth.ts`. */
+  mode: "anonymous" | "cognito" | "okta" | "entra";
   apps: Record<AppId, AppAccess>;
 }
 

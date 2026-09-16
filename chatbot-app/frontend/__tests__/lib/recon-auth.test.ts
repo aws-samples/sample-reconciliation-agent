@@ -1,10 +1,17 @@
 /**
  * Browser-side Authorization header for the recon BFF — the client half of its deny-by-default gate.
  *
- * Exercised through the Entra/MSAL path because that is the default provider
- * (NEXT_PUBLIC_AUTH_PROVIDER is unset in tests); the Okta branch is the same shape.
+ * Exercised through the Entra/MSAL path; the Okta and Cognito branches are the same shape. The
+ * provider is now NAMED rather than implied: it used to be left unset because the default was Entra,
+ * and the default is Cognito since 2026-09-16 (`lib/auth/provider.ts`). Nothing about the Entra path
+ * changed — the assertions below are untouched — but this file has to say which path it is on.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// Before the imports below are evaluated: `lib/auth/provider.ts` reads the variable at module load.
+vi.hoisted(() => {
+  process.env.NEXT_PUBLIC_AUTH_PROVIDER = "entra";
+});
 
 const account = { homeAccountId: "acct-1" };
 const acquireTokenSilent = vi.fn();
