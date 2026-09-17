@@ -52,10 +52,10 @@ that gap, and they are for different people:
   access, and no groups at all.
 
 ```bash
-python3 scripts/create_dev_users.py --dry-run --profile <profile>          # read the pool, write nothing
-python3 scripts/create_dev_users.py --profile <profile>                    # prompts for the password
-python3 scripts/create_dev_users.py --generate-password --profile <profile> # prints one instead
-python3 scripts/create_dev_users.py --delete --dry-run                     # then --delete
+AWS_PROFILE=<profile> python3 scripts/create_dev_users.py --dry-run           # read the pool, write nothing
+AWS_PROFILE=<profile> python3 scripts/create_dev_users.py                     # prompts for the password
+AWS_PROFILE=<profile> python3 scripts/create_dev_users.py --generate-password  # prints one instead
+AWS_PROFILE=<profile> python3 scripts/create_dev_users.py --delete --dry-run   # then --delete
 ```
 
 With no `--user-pool-id` it reads `cognito_user_pool_id` and `cognito_group_names` from
@@ -63,6 +63,13 @@ With no `--user-pool-id` it reads `cognito_user_pool_id` and `cognito_group_name
 followed without being told. `--user-pool-id` plus `--group <role>=<name>` covers a clone with no
 state; the five roles are `recon-access`, `recon-admin`, `pipeline-access`, `pipeline-admin`,
 `console-admin`.
+
+⚠️ **`AWS_PROFILE`, not `--profile`, when the script resolves anything from Terraform.** Both scripts
+accept `--profile`, and both hand it only to `boto3.Session` — never to the `terraform` subprocess they
+shell out to first. The recon root's state is remote (`backend "s3"`), so that read needs credentials
+of its own and takes them from the ambient environment. Exporting `AWS_PROFILE` covers both halves;
+`--profile` alone covers the second half and silently leaves the first on your default credentials.
+With `--user-pool-id` / `--items-table` there is no Terraform read and `--profile` is sufficient.
 
 Four things about it are decisions rather than details:
 
@@ -97,13 +104,16 @@ rather than reporting a missing output.
 The Deal Pipeline app seeds its own demo corpus at apply time, so it demonstrates itself. Recon does
 not: a `ReconItem` row arrives only from the intake API or a structured feed, so a first apply ends
 with an empty queue, an empty dashboard and no case to open — which is indistinguishable from a broken
-deployment. This writes six items that between them land in **six different states**.
+deployment. This writes six items that between them land in **six visibly different outcomes**: two
+auto-clear on two different paths, and four escalate naming four different reasons.
+[Step 5 of Getting Started](../README.md#5-give-recon-something-to-reconcile) is the same list written
+as "what you should see in the console, and where".
 
 ```bash
-python3 scripts/seed_recon_demo_items.py --dry-run --profile <profile>   # print the rows, write nothing
-python3 scripts/seed_recon_demo_items.py --profile <profile>             # seed all six
-python3 scripts/seed_recon_demo_items.py --scenario ledger-match         # or one at a time
-python3 scripts/seed_recon_demo_items.py --delete --dry-run              # then --delete
+AWS_PROFILE=<profile> python3 scripts/seed_recon_demo_items.py --dry-run   # print the rows, write nothing
+AWS_PROFILE=<profile> python3 scripts/seed_recon_demo_items.py             # seed all six
+AWS_PROFILE=<profile> python3 scripts/seed_recon_demo_items.py --scenario ledger-match  # or one at a time
+AWS_PROFILE=<profile> python3 scripts/seed_recon_demo_items.py --delete --dry-run       # then --delete
 ```
 
 | Scenario              | Tier-1 does                            | Why                                                   |
@@ -137,9 +147,14 @@ Four things about it are decisions rather than details:
   `DUPLICATE_SKIPPED` and the console keeps the original six cases. The delete run prints the
   `aws dynamodb delete-item` calls for those case rows if you do want to replay from scratch.
 
-With no `--items-table` it reads the `items_table` Terraform output from `infra/environments/recon`.
-That root does not re-export the output yet (`infra/modules/foundation` has it), so until it does, pass
-the name: it is `<name_prefix>-items`, e.g. `--items-table recon-dev-items`.
+With no `--items-table` it reads the `items_table` Terraform output from `infra/environments/recon`,
+which the recon root now re-exports from `infra/modules/foundation` — so a deployment under any
+`name_prefix` is followed without being told. `--items-table <name>` covers a checkout with no state (the
+table is `<name_prefix>-items`) and is also how a test points the script at a moto table. That
+Terraform read happens even under `--dry-run` and needs credentials of its own — see the `AWS_PROFILE`
+note above; only the `--items-table` form is genuinely credential-free. ⚠️ The script's own docstring
+and the error message in `resolve_items_table` still say the root does not export it; both predate the
+output and are stale, not a description of today.
 
 `live_qa.py` and `capture_ui_screenshots.py` need `pip install playwright` (deliberately not in `requirements-dev.txt`: no test
 imports it, so pinning it there would make every CI run download a browser-automation stack for

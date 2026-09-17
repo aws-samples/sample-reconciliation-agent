@@ -300,7 +300,7 @@ Worth knowing before you debug it, or decide it's broken:
 - The endpoint is **not** a root Terraform output. Get it from the API:
 
   ```bash
-  aws apigatewayv2 get-apis --profile huthmac \
+  aws apigatewayv2 get-apis --profile <your-profile> \
     --query "Items[?Name=='recon-dev-api'].ApiEndpoint" --output text
   ```
 

@@ -420,12 +420,57 @@ requirements-dev.txt    Test-only Python deps (pytest, moto, responses, ruff)
 
 ## Getting Started
 
-You need a clone of this repo, Terraform `>= 1.11`, and AWS credentials for the target account —
-**and nothing else**. Sign-in is an Amazon Cognito user pool this stack creates
-(`auth_provider = "cognito"`, the default), so there is no external identity provider to obtain
-before the console can be opened; Okta and Entra remain first-class alternatives and are configured
-exactly as they were. Steps 1 to 3 are one-time setup for a fresh account or a fresh checkout; from
-then on step 3 is the whole deployment, and step 4 is what makes it signable-in.
+You need a clone of this repo, Terraform `>= 1.11`, AWS credentials for the target account, and the
+toolchain the five `local-exec` provisioners shell out to during the apply: a POSIX shell, `zip`,
+`rsync`, the AWS CLI, and `python3` with `pip`. A laptop that already has the AWS CLI and Python has all of
+it but possibly `rsync` — `infra/modules/lambda-package/stage.sh:66` runs `rsync -a --delete` to build
+the Lambda staging directory, and a minimal CI image or container build agent often does not ship it.
+Install it before the first apply rather than after: that provisioner runs *during* the apply, so a
+missing binary surfaces once Terraform has already begun creating resources.
+
+**No external identity provider is needed** — sign-in is an Amazon Cognito user pool this
+stack creates (`auth_provider = "cognito"`, the default), so the console can be opened on a first
+apply; Okta and Entra remain first-class alternatives and are configured exactly as they were.
+
+Steps 1 to 3 are one-time setup for a fresh account or a fresh checkout; from then on step 3 is the
+whole deployment. Steps 4 and 5 are the two things the apply cannot do for you — create the people, and
+create the content — and skipping either leaves a console that looks broken but is not.
+
+**The whole path, from a clone to a browser you are signed in to,** using the cheap profile so nothing
+hourly is created and nothing is built for the edge. Each line is one of the steps below; the numbers
+are where to read why:
+
+```bash
+# 1  once per account
+cd infra/bootstrap && terraform init && terraform apply
+
+# 2  once per checkout: backend.hcl (the state bucket) + terraform.tfvars (five values)
+cd ../environments/recon
+cp backend.hcl.example backend.hcl && cp terraform.tfvars.example terraform.tfvars
+# ... edit both. name_prefix and cognito_hosted_ui_prefix must be GLOBALLY unique — see step 2.
+# ... and add the five cheap-profile flags from "The cheap development profile" below.
+
+# 3  deploy. Re-run it if the gateway targets or Cedar policies fail the first time — see step 3.
+../../scripts/deploy-recon.sh plan && ../../scripts/deploy-recon.sh apply
+
+# 4  create the five demonstration operators in the pool the apply just made
+python3 ../../../scripts/create_dev_users.py --dry-run          # then --generate-password
+
+# 5  give recon a queue: six items Tier-1 will decide six different ways
+python3 ../../../scripts/seed_recon_demo_items.py --dry-run     # then without --dry-run
+
+# 6..8 render the laptop's environment, then run the console
+terraform output -raw frontend_env_local > ../../../chatbot-app/frontend/.env.local
+cd ../../../chatbot-app/frontend && npm ci && npm run dev       # http://localhost:3000
+```
+
+That last block is the cheap profile's own recipe, described with its caveats under
+[The cheap development profile](#the-cheap-development-profile) — including the one that surprises
+people: the rendered `.env.local` sets `ALLOW_ANONYMOUS_API=true`, so by default the laptop does **not**
+sign in at all and you see the console as a single anonymous subject holding every configured group.
+Exercising the real Cognito redirect from a laptop is three lines of that file, and the section says
+which. With the frontend tier left on (the default), skip the last block: the apply builds and serves
+the console itself, and `terraform output frontend_url` is the address.
 
 ### 1. Bootstrap the Terraform state bucket (once per account)
 
@@ -470,8 +515,45 @@ Two variables declare no usable default, so both plan and apply stop until they 
   `<prefix>.auth.<region>.amazoncognito.com`, and that name is **globally unique across every AWS
   account**, so it cannot be derived from `name_prefix` without colliding with the next person who
   deploys this sample. Add entropy (`recon-dev-login-7f3a`). It may not contain `aws`, `amazon` or
-  `cognito` — Cognito reserves those substrings and refuses the domain. Required only when
+  `cognito` — AWS documents the rule as "you cannot use keywords aws, amazon, or cognito for domain
+  prefix" ([AWS Security
+  Blog](https://aws.amazon.com/blogs/security/how-to-set-up-amazon-cognito-for-federated-authentication-using-azure-ad/)),
+  and `infra/modules/console-auth/variables.tf:19-26` turns it into a plan-time error rather than a
+  mid-apply `InvalidParameterException`. Required only when
   `auth_provider = "cognito"`; an Okta or Entra deployment never sets it.
+
+⚠️ **A third value has a default that you must nevertheless change: `name_prefix`.** It defaults to
+`recon-dev` in both `variables.tf` and `terraform.tfvars.example`, and **that default is already
+taken.** `infra/modules/foundation` names two buckets `${name_prefix}-raw` and `${name_prefix}-assets`
+with no account suffix (`modules/foundation/main.tf:221,226`), and S3 bucket names are global. Both
+`recon-dev-raw` and `recon-dev-assets` exist right now: an unauthenticated `HEAD` on each returns
+`403`, not `404`, which is S3 saying the name is in use by a bucket you may not read. Unless the
+account you are deploying into is the one that owns them, `CreateBucket` answers `BucketAlreadyExists`
+and the first apply stops there
+([CreateBucket errors](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateBucket.html)). Every
+other name in the stack is either
+prefix-derived within your own account or already carries the account id, so a `name_prefix` nobody
+else has claimed is enough: pick something with entropy in it (`recon-<team>-<4 hex>`) and reuse the
+same value for `cognito_hosted_ui_prefix`'s stem. The two buckets are the only globally-unique names
+this repo composes without an account suffix; a recommended fix is at the end of
+[Installing into an existing, governed AWS account](#installing-into-an-existing-governed-aws-account).
+
+A minimal `terraform.tfvars` for a first deployment is five lines — everything else has a working
+default:
+
+```hcl
+region                   = "us-east-1"           # see the region note below; not freely changeable
+name_prefix              = "recon-amx-7f3a"      # globally unique, because of the two buckets above
+otel_layer_account       = "<12-digit-account-id>"
+cognito_hosted_ui_prefix = "recon-amx-login-7f3a" # globally unique; no "aws"/"amazon"/"cognito"
+console_admin_group      = "console-admins"       # else nobody may edit console-wide settings
+```
+
+`region` is documented as an ordinary variable, and for this stack it is not: a `CLOUDFRONT`-scoped WAF
+web ACL has to be created in us-east-1 and a `lifecycle.precondition` in `infra/modules/frontend-ecs`
+asserts `var.region == "us-east-1"`, and two module defaults hardcode the availability zones
+`us-east-1a` / `us-east-1b`. Deploy elsewhere and you are editing modules, not tfvars —
+[the governed-account section](#3-region-availability) has the detail.
 
 See [Prerequisites & configuration](#prerequisites--configuration) for every variable.
 
@@ -491,7 +573,26 @@ container and the frontend image (the build driver blocks until the push succeed
 AgentCore Runtime is created), provisions the managed Harness (an `aws_cloudformation_stack`),
 attaches the Cedar Policy, seeds the skills, system prompts and KB corpus to S3,
 wires the CloudFront domain and agent runtime ARN through Terraform's dependency graph, and rolls the
-ECS service. No second apply, no manual build step. Most of the wall-clock time is CodeBuild.
+ECS service. No manual build step and nothing to run in a second pass. Both container builds sit on the
+apply's critical path rather than beside it: the frontend driver polls `codebuild batch-get-builds` every
+10 seconds for up to 180 iterations — 30 minutes — before it gives up
+(`infra/modules/frontend-ecs/main.tf:334-345`), so expect the apply to spend most of its time waiting
+there.
+
+⚠️ **Expect to re-run the apply once on a first install, and do not debug it before you do.** The
+AgentCore gateway targets and the Cedar policies race the gateway's own tool surface: on a first apply
+into an empty account they can fail once — the gateway exists, its tool list is not yet readable, and
+the target or policy creation that depends on it errors — and the identical apply succeeds on the next
+run with no change to any input. `terraform apply` again. Nothing is lost, because everything that
+already succeeded is in state. The consequence for automation is the part worth designing around: CI
+that runs `terraform apply` exactly once will report a failed deployment for a first install that is
+in fact fine, so a first install should be run by hand, or the apply step given a retry.
+
+For a first apply that costs less and finishes sooner, set the five tier flags in
+[The cheap development profile](#the-cheap-development-profile) before this step. That profile still
+creates the user pool, every table and bucket, the intake API and the whole agent tier — it skips the
+NAT gateway, the ECS/ALB/CloudFront serving tier, the knowledge-base corpus, the evals and the
+observability delivery — and the console then runs on your laptop against it.
 
 ### 4. Make it signable-in
 
@@ -518,6 +619,23 @@ created empty, so a new user with no group sees the no-access state until an ope
 one. `scripts/create_dev_users.py` is described in [`scripts/README.md`](scripts/README.md); it is
 idempotent, has a `--dry-run` and a `--delete`, and never writes a password to a file.
 
+The five accounts are fixed, all at `example.com` (RFC 2606 reserves it, so none can receive mail and
+`--delete` can never remove a real operator's account), and each one exists to show a state the others
+cannot:
+
+| Account                      | Groups                | What signing in as it demonstrates                                                                            |
+| ---------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `recon-analyst@example.com`  | recon access only     | Trade Reconciliation alone — the rail shows one app, and the Deal Pipeline is not merely disabled but absent     |
+| `deal-desk-user@example.com` | pipeline access only  | Deal Pipeline alone, the mirror image, which is what proves the two apps' access is genuinely independent        |
+| `both-apps-admin@example.com`| both **admin** groups | Both apps with every admin control: the Config tabs, approvals, the threshold, the backend switch               |
+| `console-admin@example.com`  | console admin only    | The `/console/settings` screen and **neither app** — the state that proves the console-wide layer is separate from app access |
+| `no-access@example.com`      | none                  | What an authenticated stranger gets. Under Cognito this is the **default** state of every new account, because the pool creates its groups empty |
+
+One temporary password serves all five, prompted for without echo or generated with
+`--generate-password`, printed once and stored nowhere; every account lands in
+`FORCE_CHANGE_PASSWORD` and sets its own at first sign-in. No invite mail is sent
+(`MessageAction="SUPPRESS"`) — it would carry that password to five undeliverable addresses.
+
 The console's own callback and sign-out URLs are registered on the app client by the apply itself
 (`enable_cognito_callback_patch`), because Cognito matches a redirect URL exactly and the CloudFront
 domain does not exist when the client is created. The `patch_cognito_callbacks` action in
@@ -537,7 +655,80 @@ released by the app manifest (`auth_groups_claim` names `groups` or `roles` acco
 For either external provider, the groups the console checks must exist in that tenant and nothing here
 can create them — see [Two applications, one console](#two-applications-one-console).
 
-### 5. Point recon at the IDP document-processing state machine (if applicable)
+### 5. Give recon something to reconcile
+
+The apply creates the machinery, not the content — the same class of gap as step 4, and the one that
+looks most like a broken deployment. **The Deal Pipeline seeds its own demo corpus at apply time**
+(seven fictional new-issue emails from `data/deal-emails/`, uploaded to the pipeline bucket under
+`samples/`), so it demonstrates itself the moment it is deployed. **Recon does not.** A `ReconItem` row
+reaches the items table only from the intake API or from a structured feed, and a fresh account has
+neither — so a first apply ends with an empty queue, an empty dashboard and no case to open. That state
+is indistinguishable from a stack that is wired up wrong: there is nothing to click, and no way to tell
+"working, with no data" from "the agent never ran".
+
+```bash
+AWS_PROFILE=<profile> python3 scripts/seed_recon_demo_items.py --dry-run   # prints the six rows, writes nothing
+AWS_PROFILE=<profile> python3 scripts/seed_recon_demo_items.py             # seed all six
+```
+
+With no `--items-table` the script reads the `items_table` Terraform output from
+`infra/environments/recon`, so it follows whatever `name_prefix` this deployment used. `--items-table
+<name> --region <region>` covers a checkout with no state (the table is `<name_prefix>-items`), and
+`--scenario <name>` seeds one at a time.
+
+**Two things about credentials, because the flags do not cover both halves of the run.** With
+`--items-table <name>`, `--dry-run` needs no credentials and no resolvable region, because it builds no
+client at all (`scripts/seed_recon_demo_items.py:809-812`). Resolving the table from Terraform instead
+does need them even under `--dry-run`: `main()` shells out to `terraform output -json` in
+`infra/environments/recon` first (`:795-797`, `:551-557`), and that root's state is remote
+(`backend "s3"` in `infra/environments/recon/backend.tf`), so reading the output is an S3 read. And
+`--profile` reaches only the boto3 session (`:811`), never the `terraform` subprocess — so export
+`AWS_PROFILE`, as above, rather than passing `--profile`, or the state read silently uses your default
+credentials while the flag you supplied applies to the DynamoDB write alone.
+
+**It writes items, not cases, and that is the whole design.** `<name_prefix>-items` is the platform's
+only stream-enabled table, and an item write is what runs Tier-1: the Tier-1 Lambda consumes the
+stream, applies the deterministic engine, and either auto-clears the item into a terminal case or opens
+a `PENDING` one for the Tier-2 agent. Writing case rows directly would produce six records nothing had
+reasoned about — no `tier1_match` evidence, no `tier1_escalation_reason`, no break-type hint, and
+nothing to dispatch the agent. Seeding items means what you see afterwards is what the platform
+decided, not what the script asserted. Every amount, borrower, facility and wire reference is read off
+`data/general-ledger/gl-entries.csv`, the mocked ledger the `gl-query` Lambda serves through Athena, so
+the two ledger-lookup items match rows that really exist and the agent's own ledger searches return
+something. The names are this repo's fictional corpus; no real institution appears.
+
+**What you should see, and where.** Give Tier-1 a few seconds — the stream trigger is `LATEST` with a
+batch of 10, so all six arrive in one or two invocations and the deterministic tier decides without a
+model. Two items auto-clear, on two **different** paths, and four escalate naming four **different**
+reasons:
+
+| Scenario              | Tier-1 does                      | Why, and what the case shows                                                                                                                       |
+| --------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `autoclear-interest`  | `AUTO_CLEARED` / `amount-match`  | Two sides differing by 0.02, inside the 0.05 tolerance. `tier1_match` reads `matched_on: rule`, with both compared values and the margin             |
+| `ledger-match`        | `AUTO_CLEARED` / `gl-match`      | **No sides at all**, so the only counterpart is the ledger; exactly one row is within tolerance. `tier1_match` reads `matched_on: general_ledger` and embeds the matched row. No model runs on either of these two |
+| `amount-mismatch`     | `PENDING` / `tolerance_miss`     | Both sides are booked and disagree by 3,655.20 — a real break, for the agent to check against the ledger row for the same wire                       |
+| `ledger-ambiguous`    | `PENDING` / `gl_ambiguous`       | No sides, and **two** ledger rows within tolerance under one wire settling two facilities. The deterministic lookup refuses to choose, attaches both as `gl_candidates`, and hands the aggregation judgement to the agent |
+| `missing-amount`      | `PENDING` / `missing_match_attr` | The expected side omits `amount` entirely. A data-quality problem upstream, **not** a reconciliation difference, and the agent is told which it is looking at |
+| `unparseable-amount`  | `PENDING` / `unparseable_amount` | The expected side carries `n/a` where a number belongs. Named separately from the row above on purpose: "no amount" and "not a number" are different problems |
+
+Open `/recon/queue` — the default OPEN filter lists the four escalated cases as `PENDING`, each detail
+screen naming its own escalation reason and a break-type of `record-match-review` (two sides) or
+`ledger-status-resolution` (no sides). Switch the status filter to `AUTO_CLEARED` for the two Tier-1
+resolved by itself. The escalated four then move without anyone pressing anything: Tier-1 nudges the
+Tier-2 map run on every escalation and the run is scheduled on top of that, so each case goes
+`PENDING → IN_PROGRESS → PROPOSED` within a couple of minutes. That wait is model latency. A case that
+stays `PENDING` means the agent tier is not running; one that reaches `FAILED` means the investigation
+errored, and the trace on the case says where.
+
+Re-running is free — the ids are derived from a fixed prefix and ordinal with no clock and no uuid, and
+the write is the same conditional put intake uses, so a second run reports six `SKIP` and never
+re-fires Tier-1 for an item already in flight. `--delete` removes the six **items** by exact key and
+refuses any id outside its own prefix, so it never scans and can never remove a row an analyst or the
+intake API wrote; the cases stay, which means "delete then re-seed" does not reset the demo. The delete
+run prints the `aws dynamodb delete-item` calls for the case rows if you want to replay from scratch.
+Full detail is in [`scripts/README.md`](scripts/README.md#seed_recon_demo_itemspy--giving-a-fresh-deployment-something-to-reconcile).
+
+### 6. Point recon at the IDP document-processing state machine (if applicable)
 
 Set `idp_state_machine_arn` to the ARN of the IDP deployment's document-processing Step Functions
 state machine, from that stack's outputs. An ARN and not a name, because IDP's stack generates a
@@ -563,7 +754,7 @@ nothing reports it. If you do register the hook there instead — pointing it at
 `idp_hook_function_arn` output — leave `idp_state_machine_arn` empty. Exactly one of the two may be
 wired, since both deliver the same event and both together ingest every document twice.
 
-### 6. Optional flips
+### 7. Optional flips
 
 ```bash
 # Harness instead of the runtime backend (instant A/B; flip back with agent_backend=runtime)
@@ -573,7 +764,7 @@ terraform apply -var="agent_backend=harness"
 terraform apply -var="policy_enforcement_mode=LOG_ONLY"
 ```
 
-### 7. Run the tests
+### 8. Run the tests
 
 ```bash
 # Backend (repo root). The suite imports the same backend modules the agent container runs,
@@ -632,13 +823,14 @@ when `enable_deal_pipeline` is set; **and the recon agent tier** — the AgentCo
 with its targets, and Tier-1/Tier-2. The agent is what turns an intaken item into a case, so a console
 with no agent has an empty queue; it is deliberately not behind a flag.
 
-Then run the console on the laptop and create the users to sign in as:
+Then run the console on the laptop, create the users to sign in as, and seed a queue to look at:
 
 ```bash
 cd infra/environments/recon
 terraform output -raw frontend_env_local > ../../../chatbot-app/frontend/.env.local
-python3 ../../../scripts/create_dev_users.py --dry-run     # then without --dry-run
-cd ../../../chatbot-app/frontend && npm run dev            # the BFF runs as YOUR AWS credentials
+python3 ../../../scripts/create_dev_users.py --dry-run       # then without --dry-run
+python3 ../../../scripts/seed_recon_demo_items.py --dry-run  # then without --dry-run  (step 5)
+cd ../../../chatbot-app/frontend && npm run dev              # the BFF runs as YOUR AWS credentials
 ```
 
 `frontend_env_local` renders a complete `.env.local` — from the console task's own environment when the
@@ -684,9 +876,9 @@ verification jobs, the GitLab-only SAST gate, and the three CI/CD variables the 
 | Variable                                   | Required | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ------------------------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `region`                                   | yes      | AWS region (default `us-east-1`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `name_prefix`                              | yes      | Resource name prefix (e.g. `recon-dev`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `name_prefix`                              | yes      | Resource name prefix. Must be **globally unique**, not merely unique in your account: `infra/modules/foundation` derives two S3 bucket names from it with no account suffix (`${name_prefix}-raw`, `${name_prefix}-assets`), so pick something with entropy — `recon-<team>-<4 hex>`. The shipped default `recon-dev` is already taken; see [step 2](#2-create-the-two-local-config-files)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `otel_layer_account`                       | **yes**  | AWS's own public publisher account for the `AWSOpenTelemetryDistroPython` layer. It declares no default on purpose: a wrong or absent value composes a valid-looking layer ARN that fails at apply with an opaque Lambda error, so Terraform stops and names the variable instead. Not a secret. It lives in tfvars only because the repo's pre-push guard rejects any 12-digit run in a committed file. Only read when `enable_worker_tracing = true`, though `terraform plan` requires it either way                                                        |
-| `idp_state_machine_arn`                    | no       | ARN of the IDP document-processing Step Functions state machine. Recon's own EventBridge rule matches its terminal execution statuses, and that rule is the only thing that invokes the ingest hook — so an environment with an IDP deployment **must** set it. Empty creates no rule: uploads complete and the notices table stays empty with no error anywhere. Mutually exclusive with registering the hook on the IDP side (step 5)                                                                                                                       |
+| `idp_state_machine_arn`                    | no       | ARN of the IDP document-processing Step Functions state machine. Recon's own EventBridge rule matches its terminal execution statuses, and that rule is the only thing that invokes the ingest hook — so an environment with an IDP deployment **must** set it. Empty creates no rule: uploads complete and the notices table stays empty with no error anywhere. Mutually exclusive with registering the hook on the IDP side (step 6)                                                                                                                       |
 | `idp_input_bucket`                         | no       | Name of the IDP deployment's input bucket, from that stack's outputs. The Documents tab streams a document's source bytes from it, and an extraction-routed upload is put into it. Empty leaves the preview reporting it has nowhere to read from and the upload route nowhere to put a file — which is the correct behaviour, since the alternative is a put that lands where nothing reads it                                                                                                                                                               |
 | `idp_input_bucket_arn`                     | no       | ARN of the same bucket. Only the console task role is granted on it, and only `s3:PutObject` on the object path — never `ListBucket`, and never on the pipeline's output prefixes                                                                                                                                                                                                                                                                                                                                                                             |
 | `graph_enabled`                            | no       | Enable the `microsoft-graph` OpenAPI target (the platform's single email interface)                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -712,7 +904,7 @@ verification jobs, the GitLab-only SAST gate, and the three CI/CD variables the 
 | `interceptor_mode`                         | no       | Gateway REQUEST interceptor: `enforce` (default) or `log` (observes only, **never blocks**). The example tfvars also ships `"enforce"` explicitly; set `"log"` only for a first rollout, then remove it.                                                                                                                                                                                                                                                                                                                                                      |
 | `enable_worker_tracing`                    | no       | `true` (default) attaches the ADOT layer and OTel env to the agent-worker AND the Tier-2 dispatch Lambdas so its invocations share one trace with the agent's own spans. `false` means no layer, no OTel env, PassThrough X-Ray. On the runtime backend the dispatcher is the InvokeAgentRuntime caller, so without it that trace has no client end                                                                                                                                                                                                           |
 | `max_concurrent_investigations`            | no       | `14` (default). Ceiling on simultaneous Tier-2 investigations — the Bedrock token budget, applied as the Distributed Map's `MaxConcurrency` for the runtime backend and as reserved concurrency on the worker for the harness backend. Bounded on BOTH sides: too high throttles the model, too low lets the tail of a burst outlive the async queue's retention. Not a tuning knob                                                                                                                                                                           |
-| `schedule_enabled` / `schedule_expression` | no       | Whether the Tier-2 map run fires on a schedule, and how often. The module default is disabled; recon-dev runs `rate(5 minutes)`. This is the polling latency an escalated case waits before an investigation starts                                                                                                                                                                                                                                                                                                                                           |
+| `schedule_enabled` / `schedule_expression` | —        | **Not root variables.** They are `infra/modules/tier2-dispatch` inputs, and the root passes `true` and `rate(1 minute)` as literals (`main.tf`, the `tier2_dispatch` module block). The schedule is a safety net rather than the primary trigger — Tier-1 nudges the map run the moment it escalates — so changing the cadence is a one-line edit in the root, not a tfvars value                                                                                                                                                                                                                                                                                                                                           |
 | `otel_layer_version`                       | no       | Version of AWS's public `AWSOpenTelemetryDistroPython` Lambda layer (default `30`; pinned rather than `latest`, which AWS does not publish)                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `reprocess_cap`                            | no       | Max re-process attempts before a case ages out (default `3`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `private_vpc`                              | no       | `false` (default) = public CloudFront + internet-facing ALB. `true` = the whole private topology in one flag: internal ALB on private subnets, Fargate with no public IP, no CloudFront, the interface endpoints, plus a VPC-only PRIVATE REST API onto the intake Lambda (an HTTP API cannot be made private, so `POST /items` would otherwise stay internet-facing). Does **not** remove the NAT — see [Private VPC deployment](assets/private-vpc-deployment.md) and [the intake API](assets/intake-http-api.md#reaching-it-from-a-private-vpc-deployment) |
@@ -1067,6 +1259,28 @@ in through one hosted UI, the BFF still verifies **one** issuer and one token fo
 API's authorizer needs no change at all. This is the arrangement AWS documents —
 [Adding user pool sign-in through a third party](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-identity-federation.html).
 
+⚠️ **Only half of that recipe is parameterised, and the README used to leave this unsaid.**
+`cognito_supported_identity_providers` is a real tfvars knob, but `infra/modules/console-auth` declares
+only four resource types — the pool, its domain, the app client and the five groups — and **no
+`aws_cognito_identity_provider`, with no variable that would create one**. So federating a directory
+into this pool takes one code edit, and there is no configuration-only path to it today. The shallower
+of the two ways to make that edit is to add the resource in the **root** (`infra/environments/recon`)
+against `module.console_auth[0].user_pool_id`, rather than forking the module; a `map(object(...))`
+input on `console-auth` is the proper fix and is not there yet.
+
+Two values your identity team will ask for, both already available as outputs:
+
+| They need                      | It is                                                            | Read it from                                        |
+| ------------------------------ | ---------------------------------------------------------------- | ---------------------------------------------------- |
+| ACS / reply URL                | `https://<hosted-ui-host>/saml2/idpresponse`                     | `terraform output cognito_hosted_ui_url`, plus the path |
+| SP entity ID / audience URI    | `urn:amazon:cognito:sp:<pool-id>`                                | `terraform output cognito_user_pool_id`               |
+
+And one prerequisite that fails at **first sign-in** rather than at apply, which makes it easy to miss:
+this pool sets `username_attributes = ["email"]`, so `email` is a required attribute and the IdP must
+send an `email` claim in the assertion **and** you must map that claim to the attribute for the
+provider. Both the URL formats and the `email` requirement are in
+[Configuring your third-party SAML identity provider](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-integrating-3rd-party-saml-providers.html).
+
 ⚠️ **One thing is not true out of the box, and it is the thing that breaks per-app authorization.**
 `cognito:groups` carries only groups that exist **in the user pool** — the five this stack creates,
 plus the one Cognito creates automatically for each federated provider you add (named
@@ -1079,14 +1293,36 @@ Carrying those memberships into the token takes one of two extra steps:
   attribute, which is emitted as `custom:<name>` — then set `auth_groups_claim = "custom:groups"` so
   the console reads the claim you actually mapped to. See
   [Specifying identity provider attribute mappings](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-specifying-attribute-mapping.html).
+  The trap here is size: Cognito caps any attribute at 2,048 bytes
+  ([Quotas in Amazon Cognito](https://docs.aws.amazon.com/cognito/latest/developerguide/quotas.html)),
+  which is a real ceiling for a group list rather than a theoretical one — AWS ships a *Truncate large
+  attributes* inbound-federation example for exactly this case. Measure the raw value your directory
+  sends before relying on a straight mapping; we have not measured yours.
+- **An inbound federation Lambda trigger.** The trigger AWS built for exactly this case: it runs
+  *during* federation, before Cognito creates or updates the federated profile, and can add, override or
+  suppress attributes — AWS's own documented examples are group-membership management and truncating an
+  over-long attribute. It is the right answer when the directory's group list is large or the mapping is
+  not one-to-one. See
+  [Inbound federation Lambda trigger](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-inbound-federation.html).
 - **A pre token generation Lambda trigger.** Version 1 of that trigger can override
   `groupsToOverride`, which sets `cognito:groups` itself, or add an arbitrary claim to the ID token —
-  which is what you want if the mapping is not one-to-one. See
+  useful when the decision has to be made per token rather than per federated profile. See
   [Pre token generation Lambda trigger](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-pre-token-generation.html).
 
-Either way `auth_groups_claim` must name whichever claim the groups end up in, and the names inside it
-must match the five console group names — which, for a federated deployment, is the argument for
-setting the four `*_group` variables explicitly rather than inheriting the pool's own names.
+`infra/modules/console-auth` attaches **no** Lambda triggers and exposes no variable for one, so either
+of the last two options is a second code edit alongside the provider resource.
+
+However you do it, `auth_groups_claim` must name whichever claim the groups end up in, and the names
+inside it must match the five console group names — which, for a federated deployment, is the argument
+for setting the four `*_group` variables and `console_admin_group` explicitly rather than inheriting the
+pool's own names.
+
+One thing here works better than a reader would guess: **an identity provider you add out of band
+survives every subsequent apply.** The callback patch (`enable_cognito_callback_patch`) reads the live
+app client and rebuilds the update request by *exclusion* — it replaces only `CallbackURLs` and
+`LogoutURLs` and writes every other field back as found — so it cannot clobber
+`SupportedIdentityProviders`. And the client's `lifecycle { ignore_changes }` covers only those same two
+URL lists, so a change to `cognito_supported_identity_providers` does take effect on the next apply.
 
 #### What it costs
 
@@ -1096,8 +1332,11 @@ there is a 50 MAU free allowance and they are billed per MAU above it. So the fe
 above is the one with a bill attached at even small scale, and it is worth knowing before choosing it
 over local pool users for a demonstration.
 
-Two further points, both easy to get wrong:
+Three further points, all easy to get wrong:
 
+- **Both allowances are per account _or per AWS organization_.** The pricing page says so in as many
+  words, so a member account in a large organization does not get its own 10,000 and 50 — the
+  organization's may already be spent. Worth checking before quoting "free" to anyone.
 - **A "monthly active user" is not only a sign-in.** Creating a user, verifying an attribute, changing
   group membership and an admin `AdminGetUser` query all count, which matters if anything automates
   the pool. AWS enumerates them under
@@ -1154,6 +1393,369 @@ endpoints so nothing needs the NAT. The NAT itself survives the flag — removin
 edit. The three ingress options, the endpoint set and why `bedrock-agent-runtime` is deliberately
 absent, and the private-mode architecture diagram are in
 **[assets/private-vpc-deployment.md](assets/private-vpc-deployment.md)**.
+
+---
+
+## Installing into an existing, governed AWS account
+
+Everything above assumes what this repository was built to assume: **a sandbox account it effectively
+owns, in us-east-1, with a default VPC in it.** That is the right assumption for a sample whose job is
+to be deployable in an afternoon, and it is the wrong assumption for the account most enterprises would
+actually put it in. This section is the honest inventory of the difference. It is written so that you
+can decide, before you spend a day on it, which of these you can absorb and which one is a fork.
+
+Nothing here is a criticism of a governed account's controls. The controls are correct; the sample
+simply does not offer the inputs they require yet. Where that is so, this section says what the change
+would be rather than pretending a variable exists.
+
+| Requirement of your account                        | Where this sample stands today                                                                                                        |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| **No default VPC** (typical of AWS Control Tower)  | **Blocked, at plan time.** There is no `vpc_id` input, and the default VPC is read unconditionally. See below — this is the one hard stop |
+| **Bedrock model access managed centrally**         | Works, but undocumented until now, and needs `aws-marketplace:*` plus an Anthropic first-time-use submission                             |
+| **A region other than us-east-1**                  | Blocked by two pins — one fails loudly at plan, one at apply — plus a third that is a pin to the US *geography* and surfaces only at the first model invocation |
+| **An existing Terraform state bucket, KMS-CMK encrypted** | Import path documented; the bootstrap root sets `AES256` only, so a mandatory-CMK control fails there first                       |
+| **A resource-naming standard**                      | Mostly satisfied by `name_prefix`; two S3 bucket names are the exception                                                              |
+| **Permission boundaries or an IAM path on every role** | **Not supported.** Neither argument appears anywhere in `infra/`                                                                    |
+| **Mandatory tags**                                 | Six lines in the root fixes it, with no module edits                                                                                    |
+| **Your own workforce identity provider**           | Federating it *into* the pool this stack creates works, and costs one code edit. Pointing at a pool you already own is not supported     |
+
+### 1. Networking — a default VPC is a hard prerequisite today
+
+`infra/environments/recon/main.tf` reads the account's default VPC at the root level, with no `count`:
+
+```hcl
+data "aws_vpc" "default" {
+  default = true
+}
+```
+
+Both consumers of it — `module.network` and `module.frontend` — are count-gated by the tier flags, so it
+is tempting to assume the cheap development profile is VPC-free. **It is not.** A root-level `data`
+block is read during every refresh regardless of whether any surviving resource consumes it, so in an
+account with no default VPC *every* invocation fails there: plan, apply, and the cheap profile with all
+five `enable_*` flags off. It fails before a single resource is evaluated, which at least means it fails
+in seconds and costs nothing.
+
+Supplying a VPC id is necessary and **not sufficient**, and this is the part to budget for. Three more
+things are hardcoded to the *shape* of a default VPC, in module variable defaults the root never
+overrides:
+
+| Hardcoded                                                                              | Where                                                        | Why it breaks in a landing-zone VPC                                                        |
+| -------------------------------------------------------------------------------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| `private_subnet_cidrs = ["172.31.110.0/24", "172.31.111.0/24"]`, `nat_subnet_cidr = "172.31.108.0/24"` | `infra/modules/network/variables.tf`                         | `172.31.0.0/16` is the default-VPC range. A 10.x VPC rejects them as not inside the VPC       |
+| `public_subnet_cidrs = ["172.31.100.0/24", "172.31.101.0/24"]`                          | `infra/modules/frontend-ecs/variables.tf`                    | Same, and equally not overridable from the root                                              |
+| `availability_zones = ["us-east-1a", "us-east-1b"]`                                     | both of the above                                            | Pins the stack to us-east-1 even though `var.region` looks free                              |
+
+Both modules also require the VPC to have an **attached internet gateway** (`data
+"aws_internet_gateway"`, filtered on the VPC id), which many landing-zone workload VPCs do not have
+because egress runs through a shared inspection VPC. And the stack **writes into** whatever VPC it is
+given: three subnets, two route tables, a route to the IGW, an EIP and a NAT gateway. In a landing zone
+where the network team owns that VPC's route tables, that is an unauthorised change and not merely a
+configuration mismatch.
+
+There is no supported path to a customer-supplied VPC at all right now: `private_vpc = true`, the
+closest thing, is cross-validated to *require* `enable_private_networking = true`, and the frontend's
+private subnet ids only ever arrive from `module.network`, never from a variable.
+
+**Plan for a networking fork, not a tfvars change.** The smallest honest sequence is: a `vpc_id`
+variable with a `count`-gated default-VPC lookup behind it (which unblocks plan); then the four CIDR and
+AZ inputs surfaced as root variables (without which you have only moved the failure from "no VPC found"
+to "CIDR not in VPC"); and then, if the network team owns the subnets, an `existing_*_subnet_ids` pair so
+the modules consume subnets instead of creating them — which makes the NAT, route-table and IGW
+resources conditional and is genuinely the largest of the three.
+
+### 2. Bedrock model access
+
+Nothing in this repo mentions Bedrock model-access prerequisites, and in a governed account they are the
+likeliest cause of a green apply followed by an agent that only returns `AccessDeniedException`. AWS's
+[Request access to models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html)
+states the current requirements:
+
+- The invoking IAM role needs `aws-marketplace:Subscribe`, `aws-marketplace:Unsubscribe` and
+  `aws-marketplace:ViewSubscriptions`. **`aws-marketplace:*` is one of the more commonly SCP-denied
+  namespaces in a member account**, so check this first.
+- For Anthropic models you must complete the First Time Use form before invoking — "once per account or
+  once at the organization's management account", and a submission at the management account is
+  inherited by the organization. A member-account operator may not be able to do this themselves.
+- The account needs a valid AWS Marketplace payment method.
+- The failure mode is unkind: during a subscription setup period of up to 15 minutes calls **may succeed
+  temporarily**, and if a prerequisite is missing the subscription fails and subsequent calls return
+  `AccessDeniedException`. So a smoke test that passed once is not evidence.
+
+Compounding it: the default model id everywhere in this stack is `us.anthropic.claude-sonnet-5`, a **US
+geographic cross-Region inference profile**. Such a profile routes inference to any of its destination
+Regions, and **you need model access in each of them**, not only in your deployment Region. The
+destination list is per profile — read it off
+[Supported Regions and models for inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html)
+or the model's own detail page rather than assuming. A single-Region model id avoids this at the cost of
+the throughput headroom the profile exists to give.
+
+### 3. Region availability
+
+`region` is documented as an ordinary variable with a default of `us-east-1`. Treat that as a floor,
+not a choice. Three independent things hold this stack in the US, and only the first two hold it in
+us-east-1 specifically:
+
+1. **A `lifecycle.precondition` in `infra/modules/frontend-ecs` asserts `var.region == "us-east-1"`**,
+   because a `CLOUDFRONT`-scoped WAFv2 web ACL must be created there and the module inherits the root
+   provider. This one fails loudly at plan, with an error message that says so.
+2. **The hardcoded `us-east-1a` / `us-east-1b` availability zones** in §1 — these fail at apply, not at
+   plan, which is worse.
+3. **The `us.` inference profile** in §2 — a pin to the US *geography*, not to us-east-1 (a `us.`
+   profile is callable from more than one US source Region; the destination list is per profile and per
+   model, so read it off the model's detail page). It is also the only one of the three that **nothing
+   validates**: `pipeline_agent_model_id`, `pipeline_memory_model_id` and `harness_model_id` are plain
+   strings with no `validation` block (`infra/environments/recon/variables.tf:347,358,565`), so a
+   wrong-geography deployment plans and applies cleanly and the agent then fails on its first
+   `InvokeModel` with an access-denied or validation error.
+
+AgentCore itself is not the constraint. Its
+[supported Regions table](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html)
+listed 22 Regions when this was written, with Gateway, Identity, Observability, Policy and Evaluations
+in all 22 and Memory in 16;
+**AgentCore Runtime Instances** is the narrowest feature this stack needs, and at the time of writing
+that table shows it in US East (N. Virginia), US East (Ohio), US West (Oregon), Europe (Frankfurt),
+Europe (Ireland), Asia Pacific (Mumbai), Asia Pacific (Singapore), Asia Pacific (Sydney) and Asia
+Pacific (Tokyo). So a customer who wants eu-west-1 can have it from AgentCore's side and would still be
+stopped by items 1 and 2 above — at plan and at apply — and then, if they got past those without also
+changing the model id, by item 3 at the agent's first invocation. Check that table rather than this
+paragraph — it changes.
+
+**Commercial partition only.** There are 98 hardcoded `arn:aws:` strings across `infra/modules/**` and
+the root, including an AWS-managed policy ARN and the Cedar principal matchers, so AWS GovCloud (US) and
+China are out of scope for this sample as written. AgentCore's own table does list GovCloud (US-West) for
+several features, so this is a limitation of the sample and not of the service.
+
+### 4. The Terraform state bucket
+
+`infra/bootstrap` keeps local state by design — it cannot use the bucket it is creating as its own
+backend — and names the bucket `${project_name}-tfstate-${account_id}`, with `project_name` defaulting
+to `recon-dev`. Two things matter in a governed account:
+
+- **It encrypts with `AES256` only.** No CMK, no bucket key, no lifecycle rule on noncurrent versions. An
+  account with a mandatory-KMS control fails here first, before anything else in this repo runs. Either
+  add a `kms_master_key_id` to that resource or skip the bootstrap root entirely and point `backend.hcl`
+  at a bucket your platform team already manages.
+- **If you already have a state bucket, import it** rather than applying over it — a plain apply answers
+  `BucketAlreadyOwnedByYou` instead of adopting it. The four `terraform import` commands are in
+  [step 1](#1-bootstrap-the-terraform-state-bucket-once-per-account). Skipping the import is not free:
+  an unimported bucket has no Terraform source, so drift in its versioning, encryption or public-access
+  settings appears in no plan.
+
+### 5. Naming and uniqueness
+
+`name_prefix` carries almost the whole naming standard: change it and the tables, roles, parameters,
+repositories, clusters, security groups and AgentCore resources all follow. Two exceptions:
+
+- **The two `foundation` buckets have no account suffix** — `${name_prefix}-raw` and
+  `${name_prefix}-assets`. S3 names are globally unique, so these are the reason `name_prefix` must be
+  globally unique too, and the reason the shipped default cannot be applied by anyone (see
+  [step 2](#2-create-the-two-local-config-files)). `foundation` is the outlier here rather than the
+  pattern: every other bucket in the repo — the frontend source and CloudFront-log buckets, the pipeline's
+  assets bucket, the state bucket — already appends `${account_id}`.
+- **`cognito_hosted_ui_prefix`** is globally unique by nature and correctly has no default, so it is not a
+  defect; it is just one more name to coordinate.
+
+**A second deployment in the same account** collides on nothing if it uses a different `name_prefix`, and
+on almost everything if it reuses one — the tables, every SSM parameter under `/${name_prefix}/`, every
+IAM role name, the ECR repository, the ECS cluster, the CodeBuild projects, the security group, and the
+AgentCore Policy engine and Memory (whose names are `name_prefix` with hyphens replaced by underscores,
+and which the module's own comments tell you to import rather than recreate).
+
+### 6. IAM permission boundaries and role paths
+
+There are **32 `aws_iam_role` resource blocks** in `infra/modules/**`. Exactly one carries a `count`
+of its own (`infra/modules/agentcore-memory/main.tf:26`, on `create_execution_role`); what removes the
+rest from a smaller apply is the tier flags gating whole MODULES in the root, so a default apply
+creates about thirty roles and the deal pipeline adds two
+(`infra/modules/deal-pipeline/lambdas.tf:57,205`). `infra/modules/recon-agent` alone declares
+eight. And:
+
+- `permissions_boundary` appears **zero times** in `infra/`.
+- `path` appears **zero times on any IAM resource** (the three matches in the tree are an ALB health
+  check and two filesystem paths).
+
+There is no provider-level default for either argument, so if your account mandates them this is not
+configurable today. **Two outcomes, and the quiet one is the more likely:**
+
+- With a **preventive** control — an SCP or boundary-enforcing policy that denies `iam:CreateRole` unless
+  `iam:PermissionsBoundary` matches or a path prefix is used — the apply fails at the first
+  `aws_iam_role` Terraform reaches. *Which* one is not deterministic: Terraform walks ten nodes in
+  parallel and several roles depend only on data sources. The consolation is that it fails within the
+  first minute, before any container build.
+- With a **detective-only** control — an AWS Config rule, a Security Hub control, a drift report — the
+  apply **succeeds** and leaves about thirty roles at the IAM root path with no boundary. This is the
+  worse outcome and it is the more common enterprise setup.
+
+Adding both arguments means two root variables mirrored onto the roughly twenty modules that declare a
+role, and one line each on 32 resource blocks. Inline `aws_iam_role_policy` needs nothing. Two things to
+know while you do it: check that `iam:AttachRolePolicy` is permitted, because `infra/modules/frontend-ecs`
+attaches the AWS-managed `AmazonECSTaskExecutionRolePolicy`; and note that a role **path** changes the
+role ARN's shape, which the Cedar principal matchers in `infra/modules/recon-agent` build by string. Those
+matchers survive a path only because of a `like "*<role>*"` fallback disjunct beside the exact-ARN
+comparison — so authorization keeps working, but by substring match rather than by the equality the
+policy appears to rest on. Worth a look before you rely on it.
+
+### 7. Mandatory tagging
+
+**The stack is essentially untagged, and the recon root's provider block is three lines with no
+`default_tags`.** Of 271 resource declarations across `infra/modules/**` and the root, **14** carry a
+`tags` argument, and nine of those are `Name`-only tags in `infra/modules/network`. Modules `foundation`,
+`recon-agent`, `intake`, `deal-pipeline`, `gl-mock` and `tier2-dispatch` have none at all. Only two
+modules accept a `tags` variable, and the root passes tags to neither.
+
+The good news is that this is the cheapest item on the list to fix, and it needs **no module edits**:
+
+```hcl
+# infra/environments/recon/variables.tf
+variable "default_tags" {
+  description = "Tags applied to every resource the AWS provider can tag."
+  type        = map(string)
+  default     = {}
+}
+
+# infra/environments/recon/providers.tf
+provider "aws" {
+  region = var.region
+  default_tags {
+    tags = var.default_tags
+  }
+}
+```
+
+Two caveats to carry into a compliance conversation. `default_tags` reaches only resources the AWS
+provider tags, so it does not reach the inner resources of the CloudFormation-managed AgentCore harness
+stack (`aws_cloudformation_stack`). And a tagging SCP that denies untagged `ec2:CreateSubnet` would be
+satisfied by the block above, while a Config rule that scans every resource type may not be.
+
+### 8. Identity — three routes, and what each costs
+
+The console and the intake HTTP API deliberately share one identity provider, chosen by `auth_provider`
+and resolved once into the root's `oidc_*` locals, so whichever route you take there is exactly one
+issuer and one token format in the deployment. What differs is where the directory lives, and — in every
+federated case — how group memberships reach the token.
+
+| Route                                                       | Supported today                       | What it costs you                                                                                            |
+| ----------------------------------------------------------- | ------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| **1. Federate your directory into the pool this stack creates** | Yes, with one code edit           | An `aws_cognito_identity_provider` you add yourself, a group-claim mechanism, and a federated-MAU bill           |
+| **2. Point the console at a user pool you already own**     | **No. There is no input for it**      | Would be about four root variables and one `count` — see below                                                  |
+| **3. `auth_provider = "okta"` or `"entra"` directly**        | Yes, fully                            | You create the five groups and register the callback by hand; the seeding scripts and the demo users go away     |
+
+**Route 1 — federate your directory into the pool, which is what we recommend.** This is the arrangement
+AWS documents, it keeps one issuer, and the intake API's authorizer needs no change. It is described in
+full under [Bringing your own identity provider](#bringing-your-own-identity-provider-federate-it-into-the-pool),
+including the two values your identity team will ask for (the ACS URL and the SP entity ID), the `email`
+attribute mapping that is a prerequisite, the three ways to get group memberships into the token, and the
+one code edit that is unavoidable because `infra/modules/console-auth` contains no
+`aws_cognito_identity_provider` and no variable that creates one. Read that section before choosing this
+route; the rest of this list assumes you have.
+
+**Route 2 — an existing user pool: not supported today, and the gap is only in the Terraform.** There is
+no `existing_user_pool_id` input at any layer, and `module.console_auth` is gated only on
+`auth_provider == "cognito"` — so choosing Cognito *always* creates a pool, a hosted-UI domain, an app
+client and five groups. What makes this worth stating precisely is that **everything below the Terraform
+boundary already works against someone else's pool**: the BFF derives the issuer arithmetically from
+region and pool id (`cognitoIssuer` in `chatbot-app/frontend/src/lib/api-auth.ts`), reads
+`COGNITO_USER_POOL_ID` and `COGNITO_CLIENT_ID` from its environment, and has no idea who created the
+pool. Only the root's wiring assumes it. Closing the gap means four `cognito_existing_*` variables
+defaulting to `""`, a `count` on `module.console_auth`, and a local that prefers the supplied values at
+the seven places the root reads the module's outputs (the intake authorizer's issuer and audience, the
+console task's environment, the deploy-actions callback grant, the callback-patch invocation, the outputs
+and checklist, and the group-name resolution). Two details a change like that must get right, and they
+are the ones that would otherwise ship a silent authorization hole: the five **groups must not** be
+created in a pool you do not own, and `enable_cognito_callback_patch` should default to `false` for an
+existing pool, because the sample should not hold `cognito-idp:UpdateUserPoolClient` on someone else's
+client.
+
+**Route 3 — Okta or Entra directly.** Fully supported and nothing has come to assume Cognito: the intake
+API's authorizer takes only an issuer and an audience, the callback patch is count-gated off and the
+deploy actor receives an empty pool ARN so no Cognito statement is rendered at all, and the group claim
+resolves to `groups` rather than `cognito:groups`. What you gain is a single corporate directory with no
+shadow user store, no Cognito MAU bill, group membership maintained where your identity team already
+maintains it, and no globally-unique hosted-UI name to claim. Three named losses:
+
+1. **The five groups are not created for you**, and nothing in this repo can create a group in an
+   external tenant. You create them in your tenant and release them in the token.
+2. **A blank access group means _open_, not _closed_.** Under Cognito a blank resolves to a real, empty
+   group and therefore denies; under Okta and Entra it stays `""`, and in a recon-only console that means
+   every authenticated user. The stack compensates by refusing the plan when `enable_deal_pipeline = true`
+   and either access group is blank — but that validation exempts Cognito, on the premise that the pool
+   created the groups. **Set all five group variables explicitly** and the difference stops mattering.
+3. **`scripts/create_dev_users.py` becomes inert** (it exits naming `auth_provider`), and with it the
+   whole "five demonstration operators" story and the `cognito_first_user_commands` output. You also
+   register the CloudFront callback by hand, from the `okta_redirect_uri_to_register` output.
+
+#### AWS IAM Identity Center
+
+If IAM Identity Center is your workforce directory — as it is for many AWS customers — the pattern is
+**Identity Center in front of Cognito as a SAML 2.0 identity provider**, with the Cognito pool as the
+SAML service provider. You register a customer managed SAML 2.0 application in Identity Center, give
+Cognito its metadata URL, and add a `SAML`-type `aws_cognito_identity_provider` to the pool. AWS
+publishes this pattern in both directions:
+
+- [How to implement trusted identity propagation for applications protected by Amazon Cognito](https://aws.amazon.com/blogs/security/how-to-implement-trusted-identity-propagation-for-applications-protected-by-amazon-cognito/)
+  — its Step 3 is creating exactly this SAML federation trust.
+- [Innovation Sandbox on AWS — Authentication mechanism](https://docs.aws.amazon.com/solutions/latest/innovation-sandbox-on-aws/authentication-mechanism.html)
+  — an AWS Solution that "authenticates web UI users with Amazon Cognito, which federates to the Single
+  Sign-On service from AWS IAM Identity Center using the SAML 2.0 protocol".
+
+The Cognito half is the same as any third-party SAML IdP, so the ACS URL and SP entity ID in
+[Bringing your own identity provider](#bringing-your-own-identity-provider-federate-it-into-the-pool)
+are what Identity Center needs.
+
+⚠️ **For the group claim, Identity Center is harder than a generic Okta or Entra federation, not the
+same.** Identity Center's custom-SAML attribute mapping is defined over **user** attributes: the
+supported list in
+[Attribute mappings](https://docs.aws.amazon.com/singlesignon/latest/userguide/attributemappingsconcept.html)
+is `userName`, names, emails, addresses, `title`, `department` and the like — **group memberships are not
+in it**. So the attribute-mapping remedy has nothing to map from, and you cannot solve this with
+mappings alone. AWS's own solution demonstrates the consequence: Innovation Sandbox uses this very
+Identity Center → Cognito trust and then adds "a Cognito Pre Token Generation trigger [that] resolves
+your IAM Identity Center group memberships and adds the corresponding solution roles ... to the token" —
+a Lambda that calls the Identity Store API, written precisely because the assertion does not carry the
+groups.
+
+For this sample that means an Identity Center customer needs three things, of which only the last exists
+today: the SAML provider resource (§8 route 1), a pre token generation or inbound federation Lambda that
+resolves Identity Center group memberships to the five console group names, and `auth_groups_claim` set to
+whatever claim that Lambda writes — which is already a root variable, and one whose per-provider
+resolution yields to an explicit value.
+
+#### The `cognito:groups` gap, for every federated route
+
+This is the single failure mode most likely to cost you an afternoon, so it is worth stating once more on
+its own, because **nothing logs it and nothing looks broken**: a federated user signs in successfully,
+the token verifies, the group list comes back empty or full of names the console has never heard of, and
+they land on the no-access page.
+
+`cognito:groups` carries only groups that exist **in the user pool** — the five this stack creates, plus
+the one Cognito creates automatically per federated provider. An upstream Okta group, an Entra security
+group, an Identity Center group **does not appear in it**. And under `auth_provider = "cognito"` a blank
+group variable silently falls back to the pool's own default names, so a federated user in a group that is
+not one of those five is authenticated and entitled to nothing.
+
+Three habits make this survivable:
+
+1. **Set all five group variables explicitly** — `recon_access_group`, `recon_admin_group`,
+   `pipeline_access_group`, `pipeline_admin_group`, `console_admin_group` — rather than inheriting the
+   pool's defaults, so the names the console checks are names you chose.
+2. **Set `auth_groups_claim` explicitly** to whichever claim actually carries the groups: `cognito:groups`
+   only if something writes pool groups, otherwise the `custom:*` attribute or the claim your trigger adds.
+3. **Verify from the token, not from the plan.** The Settings screen's **Users** tab shows the console what
+   it thinks you are — subject, groups, per-app access, console admin or not — and for a console admin its
+   *check access* tool answers "which apps would a user holding this set of groups see". That is the
+   fastest way to tell an empty group claim from a misnamed group.
+
+### Other things that will surprise a governed account
+
+| Surprise                                                                                                                                                                                                        | Where                                       |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| **The apply needs a local toolchain.** Five `local-exec` provisioners run during apply; four of them shell out to `zip`, `aws s3 cp`, `aws codebuild start-build`/`batch-get-builds` in a 30-minute poll loop, a `build.sh`, and a `stage.sh` that runs `rsync -a --delete` and then `pip` with a platform/Python-version pair. `rsync` is the one a minimal image is most likely to be missing. Plan is toolchain-sensitive too, because `archive_file` reads the staged directory at plan time | `frontend-ecs`, `recon-agent`, `lambda-package` |
+| **Two privileged Docker builds.** Both CodeBuild projects set `privileged_mode = true` and run on the AWS-managed network with no `vpc_config`, because the builds need the Docker daemon and public npm and pip. A control that denies `privileged_mode` or mandates `vpc_config` on all CodeBuild projects breaks both, and the apply blocks on them — the frontend driver polls for up to 30 minutes (180 × 10 s) before failing | `frontend-ecs`, `recon-agent`               |
+| **Internet-facing by default.** With `private_vpc = false` you get a public CloudFront distribution on `*.cloudfront.net` with the default certificate, an internet-facing ALB and an internet-facing intake HTTP API. `private_vpc = true` is the documented alternative — but it requires `enable_private_networking = true`, which requires the default VPC of §1, so in an account that forbids public endpoints the only compliant topology is currently also the unreachable one | `frontend-ecs`, `intake`                    |
+| **`force_destroy` on data stores.** Five S3 buckets set `force_destroy = true` — the two `foundation` buckets, the frontend source and CloudFront-log buckets, and the pipeline's assets bucket — plus `force_delete = true` on the agent's ECR repository and `force_destroy = true` on the Athena workgroup. A `terraform destroy` empties all of them without prompting. Right for a sample being trialled; check it before anything you care about lands in them. The state bucket is the deliberate exception, at `force_destroy = false` | `foundation`, `frontend-ecs`, `deal-pipeline`, `recon-agent`, `gl-mock` |
+| **`cognito_deletion_protection` defaults to `INACTIVE`.** Deliberate, so a trial can be destroyed. Flip it to `ACTIVE` before the pool's user list matters: recreating a pool changes the token issuer and every `sub`, so the audit trail's author ids stop resolving | `console-auth`                              |
+| **A first apply may need running twice.** The gateway-target and Cedar-policy race described in [step 3](#3-deploy). CI that applies exactly once will report a failed first install                             | `recon-agent`                               |
 
 ---
 

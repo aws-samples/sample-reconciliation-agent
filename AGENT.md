@@ -259,6 +259,13 @@ The interceptor one matters most: it is the only place the provenance, evidence-
 case-transition guards are enforced, and in `log` mode all three degrade to observation while every
 call still succeeds. Confirm it reads `enforce` before you trust any of the three.
 
+**An empty recon queue is not a broken deployment, and it is the other thing the tracked tree cannot
+tell you.** A `ReconItem` reaches the items table only from the intake API or a structured feed, so a
+fresh apply has none — the Deal Pipeline seeds its own corpus at apply time and recon does not.
+`python3 scripts/seed_recon_demo_items.py --dry-run` (then without) writes six items Tier-1 decides six
+different ways; step 5 of the README's Getting Started says what each should become. Diagnose an empty
+queue by counting rows in `<name_prefix>-items` before looking at the agent tier at all.
+
 ## Where the real invariants live
 
 Don't restate a rule in a second place — these are the single owners:
