@@ -6,8 +6,18 @@
  * sent into the gap — and the reply streaming into it — with it. And a refused write looks refused:
  * when the BFF turns down save_memory or delete_memory for a caller outside the admin group, the tool
  * chip and its reason are drawn in the error colour, never as the tick a reader would take for "saved".
+ *
+ * And the session id is unguessable however it was minted. CodeQL flagged the old `Math.random()`
+ * fallback (`js/insecure-randomness`, alert 9); the branch it guarded runs wherever
+ * `crypto.randomUUID` is unavailable, which is precisely where predictable ids would matter.
  */
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage, ChatStreamEvent } from "@/lib/pipeline/types";
 
@@ -73,7 +83,9 @@ describe("ChatPanel", () => {
 
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(streamChat).toHaveBeenCalledTimes(1));
-    expect(streamChat.mock.calls[0][0]).toMatchObject({ message: "Which deals failed?" });
+    expect(streamChat.mock.calls[0][0]).toMatchObject({
+      message: "Which deals failed?",
+    });
     expect(await screen.findByText("Two deals failed.")).toBeTruthy();
     // The new turn and the loaded history are both on screen: nothing overwrote anything.
     expect(screen.getByText("Which deals failed?")).toBeTruthy();
@@ -82,7 +94,11 @@ describe("ChatPanel", () => {
 
   it("draws a tool result refused for lack of the admin group in the error style, with its reason", async () => {
     getChatHistory.mockResolvedValue([
-      { role: "user", content: "Save that as a rule.", at: "2026-08-05T13:01:00Z" },
+      {
+        role: "user",
+        content: "Save that as a rule.",
+        at: "2026-08-05T13:01:00Z",
+      },
       {
         role: "assistant",
         content: "I could not save it.",
@@ -112,7 +128,12 @@ describe("ChatPanel", () => {
     getChatHistory.mockResolvedValue([]);
     streamChat.mockImplementation(async (_body: unknown, onEvent: OnEvent) => {
       onEvent({ type: "tool_call", name: "save_memory", input: {} });
-      onEvent({ type: "tool_result", name: "save_memory", ok: false, summary: REFUSAL });
+      onEvent({
+        type: "tool_result",
+        name: "save_memory",
+        ok: false,
+        summary: REFUSAL,
+      });
       onEvent({ type: "text", delta: "I was not allowed to save that." });
       onEvent({ type: "done", session_id: "s" });
     });
@@ -127,6 +148,53 @@ describe("ChatPanel", () => {
     expect(chip).toHaveAttribute("data-tool-state", "failed");
     expect(screen.getByRole("alert")).toHaveTextContent(REFUSAL);
     expect(document.querySelector('[data-tool-state="ok"]')).toBeNull();
-    expect(await screen.findByText("I was not allowed to save that.")).toBeTruthy();
+    expect(
+      await screen.findByText("I was not allowed to save that."),
+    ).toBeTruthy();
   });
+
+  // Both branches of newSessionId(). The fallback is the one CodeQL flagged, and it is unreachable in
+  // a jsdom that provides randomUUID — so the test removes randomUUID to force it, and asserts the
+  // id both satisfies the server's SESSION_ID pattern and came from the CSPRNG rather than the clock.
+  it.each([
+    ["randomUUID is available", true],
+    ["randomUUID is missing, the branch CodeQL flagged", false],
+  ])(
+    "mints a session id from the CSPRNG when %s",
+    async (_label, hasRandomUuid) => {
+      const realUuid = crypto.randomUUID;
+      const getRandomValues = vi.spyOn(crypto, "getRandomValues");
+      if (!hasRandomUuid) {
+        // Defined on the prototype in jsdom, so `delete` on the instance is a no-op; shadow it.
+        Object.defineProperty(crypto, "randomUUID", {
+          value: undefined,
+          configurable: true,
+          writable: true,
+        });
+      }
+      window.sessionStorage.clear();
+      getChatHistory.mockResolvedValue([]);
+      try {
+        render(<ChatPanel />);
+        await waitFor(() => expect(getChatHistory).toHaveBeenCalled());
+
+        const sessionId = String(getChatHistory.mock.calls[0][0]);
+        // The character set the memory API accepts, mirrored by SESSION_ID in the BFF.
+        expect(sessionId).toMatch(/^[A-Za-z0-9_-]{1,100}$/);
+        // No timestamp: Date.now() in base36 is the prefix the weak fallback used to carry.
+        expect(sessionId).not.toContain(Date.now().toString(36).slice(0, 6));
+        if (!hasRandomUuid) {
+          expect(getRandomValues).toHaveBeenCalled();
+          expect(sessionId).toMatch(/^s-[0-9a-f]{32}$/);
+        }
+      } finally {
+        Object.defineProperty(crypto, "randomUUID", {
+          value: realUuid,
+          configurable: true,
+          writable: true,
+        });
+        getRandomValues.mockRestore();
+      }
+    },
+  );
 });

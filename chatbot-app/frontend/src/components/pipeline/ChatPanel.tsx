@@ -1,7 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getChatHistory, streamChat, type ChatRequest } from "@/lib/pipelineApi";
+import {
+  getChatHistory,
+  streamChat,
+  type ChatRequest,
+} from "@/lib/pipelineApi";
 import type { ChatMessage, ChatStreamEvent } from "@/lib/pipeline/types";
 import { MarkdownLite } from "@/components/pipeline/markdownLite";
 import { formatDateTime } from "@/components/pipeline/format";
@@ -31,7 +35,10 @@ interface ToolChip {
 }
 
 /** A transcript entry as rendered. `error` is a stream failure attached to the turn it interrupted. */
-type UiMessage = Omit<ChatMessage, "tools"> & { tools?: ToolChip[]; error?: string };
+type UiMessage = Omit<ChatMessage, "tools"> & {
+  tools?: ToolChip[];
+  error?: string;
+};
 
 const STARTERS = [
   "Which deals failed their OMS upload, and why?",
@@ -50,10 +57,31 @@ function isAdminRefusal(summary: string): boolean {
   return /requires the admin group/i.test(summary);
 }
 
-/** A random id that is unique enough for a per-tab chat session. */
+/**
+ * An unguessable id for one tab's chat session.
+ *
+ * Both branches draw from the platform CSPRNG. The fallback existed for `crypto.randomUUID`, which
+ * needs a secure context, and it used to reach for `Math.random()` — flagged by CodeQL
+ * (`js/insecure-randomness`, alert 9) and correctly: the generator is seeded from the clock, so ids
+ * minted on an insecure origin were largely predictable from their own timestamp. `getRandomValues`
+ * has no such requirement, so the weak branch bought nothing.
+ *
+ * Reading another person's transcript never depended on this: `GET /chat/history` verifies the
+ * caller and passes their actor to `ListEvents` beside the session id, so a guessed id lists
+ * nothing. Unguessable ids are the second line of that defence, not the first.
+ *
+ * The output satisfies `SESSION_ID` (`lib/pipeline/server/requests.ts`, `[A-Za-z0-9_-]{1,100}`),
+ * which is also the character set the memory API accepts for a session id — hence hex rather than
+ * base64url, whose padding the pattern would reject.
+ */
 function newSessionId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
-  return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  // Read once into a typed local: `"randomUUID" in crypto` narrows the global to `never` on the
+  // else branch, which would hide `getRandomValues` from the fallback below.
+  const webCrypto: Crypto | undefined =
+    typeof crypto === "undefined" ? undefined : crypto;
+  if (typeof webCrypto?.randomUUID === "function") return webCrypto.randomUUID();
+  const bytes = webCrypto!.getRandomValues(new Uint8Array(16));
+  return `s-${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
 }
 
 /** The stored session id, creating one when the tab has none. */
@@ -128,13 +156,22 @@ export function ChatPanel({
           last.content += event.delta;
           break;
         case "tool_call":
-          last.tools = [...(last.tools ?? []), { name: event.name, ok: true, summary: "running…", pending: true }];
+          last.tools = [
+            ...(last.tools ?? []),
+            { name: event.name, ok: true, summary: "running…", pending: true },
+          ];
           break;
         case "tool_result": {
           const tools = [...(last.tools ?? [])];
           // Resolve the earliest still-pending call of that name: tool calls complete in order.
-          const idx = tools.findIndex((t) => t.pending && t.name === event.name);
-          const chip = { name: event.name, ok: event.ok, summary: event.summary };
+          const idx = tools.findIndex(
+            (t) => t.pending && t.name === event.name,
+          );
+          const chip = {
+            name: event.name,
+            ok: event.ok,
+            summary: event.summary,
+          };
           if (idx >= 0) tools[idx] = chip;
           else tools.push(chip);
           last.tools = tools;
@@ -166,7 +203,11 @@ export function ChatPanel({
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      await streamChat({ session_id: sessionId, message, context }, applyEvent, controller.signal);
+      await streamChat(
+        { session_id: sessionId, message, context },
+        applyEvent,
+        controller.signal,
+      );
       onTurnComplete?.();
     } catch (e) {
       // A Stop click aborts the fetch; that is the user's decision, not a failure to report.
@@ -197,12 +238,20 @@ export function ChatPanel({
         <div className="flex items-center gap-3">
           <Eyebrow>Assistant</Eyebrow>
           {sessionId && (
-            <span className="rc-mono truncate text-[10.5px] text-[var(--rc-ink-faint)]" title="chat session id">
+            <span
+              className="rc-mono truncate text-[10.5px] text-[var(--rc-ink-faint)]"
+              title="chat session id"
+            >
               {sessionId}
             </span>
           )}
         </div>
-        <button type="button" onClick={reset} className={BTN_LINK} disabled={!sessionId}>
+        <button
+          type="button"
+          onClick={reset}
+          className={BTN_LINK}
+          disabled={!sessionId}
+        >
           New session
         </button>
       </div>
@@ -210,9 +259,19 @@ export function ChatPanel({
       {context && (context.deal_id || context.email_id) && (
         <p className="rc-mono mt-3 rounded border border-[var(--rc-cyan)] bg-[var(--rc-panel-2)] px-3 py-2 text-[11.5px] text-[var(--rc-ink)]">
           Context attached to every message:{" "}
-          {context.deal_id && <span>deal <span className="text-[var(--rc-cyan)]">{context.deal_id}</span></span>}
+          {context.deal_id && (
+            <span>
+              deal{" "}
+              <span className="text-[var(--rc-cyan)]">{context.deal_id}</span>
+            </span>
+          )}
           {context.deal_id && context.email_id && " · "}
-          {context.email_id && <span>email <span className="text-[var(--rc-cyan)]">{context.email_id}</span></span>}
+          {context.email_id && (
+            <span>
+              email{" "}
+              <span className="text-[var(--rc-cyan)]">{context.email_id}</span>
+            </span>
+          )}
         </p>
       )}
 
@@ -228,8 +287,9 @@ export function ChatPanel({
             )}
             <Placeholder kind="empty">
               <span>
-                ◇ Ask about a deal, an upload failure or a parsing rule. The assistant can read deals,
-                emails, skills and memory, and will ask before writing anything.
+                ◇ Ask about a deal, an upload failure or a parsing rule. The
+                assistant can read deals, emails, skills and memory, and will
+                ask before writing anything.
               </span>
             </Placeholder>
             <div className="flex flex-wrap gap-2">
@@ -258,12 +318,15 @@ export function ChatPanel({
                     <div className="mb-2 flex flex-wrap gap-1.5">
                       {m.tools.map((t, j) => {
                         // A refusal is a failure whatever the flag says: the write did not happen.
-                        const failed = !t.pending && (!t.ok || isAdminRefusal(t.summary));
+                        const failed =
+                          !t.pending && (!t.ok || isAdminRefusal(t.summary));
                         return (
                           <span
                             key={`${t.name}-${j}`}
                             className="rc-chip"
-                            data-tool-state={t.pending ? "pending" : failed ? "failed" : "ok"}
+                            data-tool-state={
+                              t.pending ? "pending" : failed ? "failed" : "ok"
+                            }
                             style={{
                               color: t.pending
                                 ? "var(--rc-violet)"
@@ -297,10 +360,15 @@ export function ChatPanel({
                   {m.content ? (
                     <MarkdownLite text={m.content} />
                   ) : streaming && i === messages.length - 1 && !m.error ? (
-                    <p className="rc-mono text-[12px] text-[var(--rc-ink-faint)]">▍</p>
+                    <p className="rc-mono text-[12px] text-[var(--rc-ink-faint)]">
+                      ▍
+                    </p>
                   ) : null}
                   {m.error && (
-                    <p className="rc-mono mt-2 text-[11.5px]" style={{ color: "var(--rc-red)" }}>
+                    <p
+                      className="rc-mono mt-2 text-[11.5px]"
+                      style={{ color: "var(--rc-red)" }}
+                    >
                       ⚠ {m.error}
                     </p>
                   )}
