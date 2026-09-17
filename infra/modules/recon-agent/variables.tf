@@ -266,3 +266,15 @@ variable "deploy_actions_source_code_hash" {
   EOT
   type        = string
 }
+
+# Whether the `microsoft-graph` target exists on this gateway. It is created by
+# modules/microsoft-graph-obo (root: `module "graph"`, gated on var.graph_enabled), so this module
+# cannot infer it, and Cedar validates every action string against the gateway's LIVE tool surface.
+# Defaults to true so a deployment that has the target renders exactly the policy it rendered before
+# this variable existed; the root passes its own graph_enabled, so a deployment without the target
+# drops the two actions instead of failing the policy.
+variable "graph_tool_enabled" {
+  description = "True when the microsoft-graph gateway target is deployed, so its two actions may appear in the read policy."
+  type        = bool
+  default     = true
+}

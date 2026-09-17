@@ -745,6 +745,11 @@ module "tier1" {
 }
 
 module "recon_agent" {
+  # Keeps the Cedar read policy's action list in step with the gateway's live tool surface: the
+  # microsoft-graph target below is gated on the same variable, and naming an absent action fails the
+  # whole policy rather than narrowing it.
+  graph_tool_enabled = var.graph_enabled
+
   source = "../../modules/recon-agent"
 
   # Apply-time readiness waits (managed-KB data source, managed-kb connector target) run inside the

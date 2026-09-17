@@ -1781,7 +1781,24 @@ locals {
   # surface, so `contacts___list_templates` — the name a single combined target would have produced —
   # is not an abbreviation of the second entry; it is an unrecognized action that would put this
   # whole policy in UPDATE_FAILED and cost the agent every read.
-  cedar_reads = "permit(principal, action in [AgentCore::Action::\"general-ledger___search_ledger\", AgentCore::Action::\"notices___search_notices\", AgentCore::Action::\"managed-kb___Retrieve\", AgentCore::Action::\"correspondence-search___search_correspondence\", AgentCore::Action::\"contacts___list_contacts\", AgentCore::Action::\"templates___list_templates\", AgentCore::Action::\"microsoft-graph___listSharedMailboxMessages\", AgentCore::Action::\"microsoft-graph___sendSharedMailboxMail\"], resource == AgentCore::Gateway::\"${local.gw_arn}\");"
+  # The microsoft-graph target is created by modules/microsoft-graph-obo against THIS gateway, not
+  # here, so this module cannot see whether it exists — hence var.graph_tool_enabled. Naming an action
+  # whose target is absent does not degrade the policy, it FAILS it: the store rejects the whole
+  # document with `unrecognized action`, every read is denied, and the apply stops. That is what a
+  # default deployment did, because graph_enabled defaults to false while these two entries were
+  # unconditional.
+  cedar_read_actions = concat([
+    "general-ledger___search_ledger",
+    "notices___search_notices",
+    "managed-kb___Retrieve",
+    "correspondence-search___search_correspondence",
+    "contacts___list_contacts",
+    "templates___list_templates",
+    ], var.graph_tool_enabled ? [
+    "microsoft-graph___listSharedMailboxMessages",
+    "microsoft-graph___sendSharedMailboxMail",
+  ] : [])
+  cedar_reads = "permit(principal, action in [${join(", ", [for a in local.cedar_read_actions : "AgentCore::Action::\"${a}\""])}], resource == AgentCore::Gateway::\"${local.gw_arn}\");"
   # The gateway types `context.input.confidence` as a Cedar DECIMAL (the tool schema declares it a
   # number), so compare via the decimal extension — a bare `>= <Long>` fails validation. Guard the
   # optional attribute with `has` first. The agent passes confidence as an integer percent [0..100];

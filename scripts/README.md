@@ -36,6 +36,7 @@ byte-for-byte.
 | `push_idp_extraction_config.py`  | Install `data/idp-extraction-config/classes.json` into a live IDP configuration version. Rewrites the `classes` array only, backing up what was there; every other section of that config is the pipeline deployment's tuning and is left untouched.                       |
 | `backfill_idp_document_index.py` | Add the `idp-document-index` key attributes (and the `record_kind` discriminator) to notice rows written before that GSI existed, which would otherwise be absent from the Documents tab. Attribute-only: creates no row, copies no S3 object, touches no extracted field. |
 | `create_dev_users.py`            | Create the five demonstration operators in the console's Cognito user pool and put them in the console groups, so a fresh apply is signable-in and the per-app access model is visible in a browser. `--dry-run` first, `--delete` to clean up.                                                                                                                                                             |
+| `seed_recon_demo_items.py`       | Write six fictional `ReconItem` rows into the recon items table so a fresh apply has a queue, a dashboard and six case screens instead of nothing. Items, not cases: an item write is what runs Tier-1. `--dry-run` first, `--delete` to clean up.                                                                                                                                                       |
 
 ### `create_dev_users.py` — making a fresh deployment signable-in
 
@@ -90,6 +91,55 @@ and asserts the script's copy of the five default group names still equals the o
 
 An Okta or Entra deployment has no pool of its own, so the script exits 2 naming `auth_provider`
 rather than reporting a missing output.
+
+### `seed_recon_demo_items.py` — giving a fresh deployment something to reconcile
+
+The Deal Pipeline app seeds its own demo corpus at apply time, so it demonstrates itself. Recon does
+not: a `ReconItem` row arrives only from the intake API or a structured feed, so a first apply ends
+with an empty queue, an empty dashboard and no case to open — which is indistinguishable from a broken
+deployment. This writes six items that between them land in **six different states**.
+
+```bash
+python3 scripts/seed_recon_demo_items.py --dry-run --profile <profile>   # print the rows, write nothing
+python3 scripts/seed_recon_demo_items.py --profile <profile>             # seed all six
+python3 scripts/seed_recon_demo_items.py --scenario ledger-match         # or one at a time
+python3 scripts/seed_recon_demo_items.py --delete --dry-run              # then --delete
+```
+
+| Scenario              | Tier-1 does                            | Why                                                   |
+| --------------------- | -------------------------------------- | ----------------------------------------------------- |
+| `autoclear-interest`  | `AUTO_CLEARED` / `amount-match`        | two sides differing by 0.02, inside the 0.05 tolerance |
+| `amount-mismatch`     | `PENDING` / `tolerance_miss`           | two sides differing by 3,655.20                        |
+| `ledger-match`        | `AUTO_CLEARED` / `gl-match`            | no sides; exactly ONE mocked-ledger row matches        |
+| `ledger-ambiguous`    | `PENDING` / `gl_ambiguous`             | no sides; TWO ledger rows match, under one wire        |
+| `missing-amount`      | `PENDING` / `missing_match_attr`       | the expected side omits `amount` entirely              |
+| `unparseable-amount`  | `PENDING` / `unparseable_amount`       | the expected side says `n/a` where a number belongs    |
+
+Four things about it are decisions rather than details:
+
+- **It writes items, never cases.** `recon-<env>-items` is the platform's only stream-enabled table and
+  an item write is what opens a case, so Tier-1 decides each outcome itself and the case rows carry the
+  real `tier1_match` evidence, escalation reason and break-type hint. Writing cases directly would
+  produce six rows nothing had reasoned about, and nothing would ever dispatch the agent.
+- **Every figure comes from the mocked ledger.** The borrowers, amounts, facilities and wire references
+  are read off `data/general-ledger/gl-entries.csv`, so the two sides-less items match rows that really
+  exist and the agent's `search_ledger` calls return something. `tests/scripts/test_seed_recon_demo_items.py`
+  re-parses that CSV and runs the real `gl_lookup` over the seeded items, so a scenario cannot quietly
+  stop being the case it claims to be. The names are this repo's own fictional corpus — the agent bank
+  is the one `generate_input_notices.py` prints — and no real institution appears.
+- **Re-running is free.** The ids are derived from a fixed prefix and ordinal, with no clock and no
+  uuid, and the write is the same conditional put intake uses, so a second run reports six `SKIP` and
+  never re-fires Tier-1 for an item already in flight.
+- **`--delete` removes the items and no case row.** It deletes by exact key and refuses any id outside
+  its own prefix, so it never scans and can never remove a row an analyst or the intake API wrote. The
+  cases Tier-1 derived stay, which means "delete then re-seed" does **not** reset the demo —
+  `CaseStore.open` is conditional on the case id, which is the item id, so Tier-1 reports
+  `DUPLICATE_SKIPPED` and the console keeps the original six cases. The delete run prints the
+  `aws dynamodb delete-item` calls for those case rows if you do want to replay from scratch.
+
+With no `--items-table` it reads the `items_table` Terraform output from `infra/environments/recon`.
+That root does not re-export the output yet (`infra/modules/foundation` has it), so until it does, pass
+the name: it is `<name_prefix>-items`, e.g. `--items-table recon-dev-items`.
 
 `live_qa.py` and `capture_ui_screenshots.py` need `pip install playwright` (deliberately not in `requirements-dev.txt`: no test
 imports it, so pinning it there would make every CI run download a browser-automation stack for

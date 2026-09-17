@@ -444,3 +444,11 @@ output "pipeline_seed_push_command" {
     "python3 infra/scripts/push_editable_seeds.py",
   ]) : ""
 }
+
+# The items table, for scripts that write ReconItem rows (scripts/seed_recon_demo_items.py). The
+# other stores are reachable through the console; this one is the platform's entry point, and an
+# item write is what starts Tier-1.
+output "items_table" {
+  description = "Name of the recon items DynamoDB table (the only stream-enabled table)."
+  value       = module.foundation.items_table
+}
