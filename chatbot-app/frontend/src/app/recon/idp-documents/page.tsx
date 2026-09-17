@@ -1373,7 +1373,8 @@ export default function IdpDocumentsPage() {
           {/* Hidden from a non-admin, and that is presentation only. The route runs
               `requireReconAdmin` on every request and 403s regardless of what the browser rendered --
               this just avoids offering a button whose only outcome is a 403. `isAdmin` comes from
-              `/api/recon/me`, the same signal the nav uses to gate the Config tab. */}
+              the shell's `/api/me` (via `useReconSubject`), the same signal the nav uses to gate the
+              Config tab. */}
           {isAdmin && (
             <button
               type="button"

@@ -1,10 +1,17 @@
 /**
  * Browser-side Authorization header for the recon BFF — the client half of its deny-by-default gate.
  *
- * Exercised through the Entra/MSAL path because that is the default provider
- * (NEXT_PUBLIC_AUTH_PROVIDER is unset in tests); the Okta branch is the same shape.
+ * Exercised through the Entra/MSAL path; the Okta and Cognito branches are the same shape. The
+ * provider is now NAMED rather than implied: it used to be left unset because the default was Entra,
+ * and the default is Cognito since 2026-09-16 (`lib/auth/provider.ts`). Nothing about the Entra path
+ * changed — the assertions below are untouched — but this file has to say which path it is on.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// Before the imports below are evaluated: `lib/auth/provider.ts` reads the variable at module load.
+vi.hoisted(() => {
+  process.env.NEXT_PUBLIC_AUTH_PROVIDER = "entra";
+});
 
 const account = { homeAccountId: "acct-1" };
 const acquireTokenSilent = vi.fn();
@@ -25,6 +32,7 @@ vi.mock("@azure/msal-browser", () => ({
   },
 }));
 
+import * as shared from "@/lib/auth/client-token";
 import { authHeaders, reconFetch, reconIdToken } from "@/lib/recon-auth";
 
 describe("recon-auth", () => {
@@ -32,6 +40,13 @@ describe("recon-auth", () => {
     // The instance is cached on window across calls, so only the mocks need resetting.
     acquireTokenSilent.mockReset().mockResolvedValue({ idToken: "id-token-1" });
     getActiveAccount.mockReset().mockReturnValue(account);
+  });
+
+  it("is the shared token reader under an app-local name, not a second copy", () => {
+    // The shell, recon and the pipeline present one ID token to one verifier; a per-app copy of the
+    // Okta/MSAL reading code is how the shell ended up depending on the pipeline module.
+    expect(reconIdToken).toBe(shared.idToken);
+    expect(authHeaders).toBe(shared.authHeaders);
   });
 
   it("reads the ID token (not the access token) from the signed-in account", async () => {

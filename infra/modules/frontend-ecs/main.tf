@@ -21,14 +21,35 @@ locals {
   # the image hash: the codebuild trigger skips when a tag already exists in ECR, so a config
   # change that doesn't move the hash (e.g. switching auth_provider to okta) would otherwise
   # keep serving the old image forever.
+  #
+  # ⚠️ EVERY value passed as a --build-arg below belongs in this list. The Cognito four are here for
+  # exactly the reason the Okta ones are: they are inlined into the browser bundle, so a pool
+  # recreated with a new id would leave the image pointing at the old one, the sign-in would fail with
+  # an unregistered client, and the plan would show nothing at all -- the tag already exists, so the
+  # build is skipped.
   build_config = join("|", [
     var.region, var.recon_api_base,
     var.auth_provider, var.okta_issuer, var.okta_client_id, var.okta_redirect_uri,
+    var.cognito_user_pool_id, var.cognito_client_id, var.cognito_hosted_ui, var.cognito_redirect_uri,
   ])
   source_hash = sha1(join("", concat(
     [for f in local.frontend_files : try(filesha1("${var.frontend_dir}/${f}"), "")],
     [local.build_config],
   )))
+
+  # The Cognito hosted-UI ORIGIN as a CSP source, or "" — appended to `connect-src` in the CloudFront
+  # response-headers policy below (see the comment there for why only connect-src). The leading space
+  # is part of the value so an Okta or Entra deployment renders the directive it always rendered, with
+  # no trailing separator to distinguish it.
+  #
+  # The scheme is stripped and re-added rather than interpolated: cognito_hosted_ui is documented as a
+  # bare host but cognito-pkce.ts tolerates an `https://` prefix, and a value pasted with one would
+  # otherwise render `https://https://...` — a source the browser silently ignores, leaving exactly
+  # the failure this line exists to prevent.
+  csp_cognito_hosted_ui = trimsuffix(replace(trimspace(var.cognito_hosted_ui), "/^https?:\\/\\//", ""), "/")
+  csp_cognito_connect_src = (
+    local.csp_cognito_hosted_ui == "" ? "" : " https://${local.csp_cognito_hosted_ui}"
+  )
 }
 
 # ============================================================
@@ -243,6 +264,25 @@ resource "aws_codebuild_project" "frontend" {
       name  = "OKTA_REDIRECT_URI"
       value = var.okta_redirect_uri
     }
+    # Cognito's four. Empty for an Okta or Entra deployment, which passes them as empty build args and
+    # leaves the browser bundle with no Cognito configuration -- exactly what the Okta values do for an
+    # Entra build today.
+    environment_variable {
+      name  = "COGNITO_USER_POOL_ID"
+      value = var.cognito_user_pool_id
+    }
+    environment_variable {
+      name  = "COGNITO_CLIENT_ID"
+      value = var.cognito_client_id
+    }
+    environment_variable {
+      name  = "COGNITO_HOSTED_UI"
+      value = var.cognito_hosted_ui
+    }
+    environment_variable {
+      name  = "COGNITO_REDIRECT_URI"
+      value = var.cognito_redirect_uri
+    }
   }
 
   source {
@@ -264,6 +304,10 @@ resource "aws_codebuild_project" "frontend" {
                 --build-arg NEXT_PUBLIC_OKTA_ISSUER=$OKTA_ISSUER \
                 --build-arg NEXT_PUBLIC_OKTA_CLIENT_ID=$OKTA_CLIENT_ID \
                 --build-arg NEXT_PUBLIC_OKTA_REDIRECT_URI=$OKTA_REDIRECT_URI \
+                --build-arg NEXT_PUBLIC_COGNITO_USER_POOL_ID=$COGNITO_USER_POOL_ID \
+                --build-arg NEXT_PUBLIC_COGNITO_CLIENT_ID=$COGNITO_CLIENT_ID \
+                --build-arg NEXT_PUBLIC_COGNITO_HOSTED_UI=$COGNITO_HOSTED_UI \
+                --build-arg NEXT_PUBLIC_COGNITO_REDIRECT_URI=$COGNITO_REDIRECT_URI \
                 -t $ECR_REPO_URI:latest -t $ECR_REPO_URI:$SOURCE_HASH .
         post_build:
           commands:
@@ -340,12 +384,80 @@ resource "aws_iam_role" "ecs_task" {
   })
 }
 
+# ---------------------------------------------------------------------------------
+# Per-app wiring (var.app_wiring). An app module exports the environment its BFF reads and the
+# task-role statements that reach exactly its resources (modules/deal-pipeline: console_environment,
+# console_task_statements); this module appends both for every app whose entry is enabled and knows
+# nothing else about the app. Gathered here, in one place, so that a recon-only console -- an empty
+# map, or no enabled entry -- renders the recon environment and policy below byte-for-byte as it did
+# before the app rail existed (tests/app_wiring.tftest.hcl pins both against that rendering).
+# ---------------------------------------------------------------------------------
+locals {
+  enabled_apps = { for id, app in var.app_wiring : id => app if app.enabled }
+
+  # Every enabled app's variables in app order (map keys sort lexicographically) and then in the order
+  # the app exports them -- appended, never re-sorted. The order is part of the container definition,
+  # and the container definition IS the task definition: a console deployed while this module built
+  # the pipeline's variables itself rendered them in that module's export order, so appending an
+  # app's list untouched is what leaves that task definition's revision -- and the ECS service behind
+  # it -- unchanged across the move to app_wiring. A sort here would have been a new revision and a
+  # rolling deployment of every console with an app enabled. An app module owns its order the way it
+  # owns its names (modules/deal-pipeline/tests/console_wiring.tftest.hcl pins the pipeline's;
+  # tests/app_wiring.tftest.hcl pins that this module preserves whatever it is given). Duplicates are
+  # kept for the postcondition on the task definition to refuse; de-duplicating here would hide
+  # exactly the mistake it exists to catch.
+  app_environment = flatten([for app in local.enabled_apps : app.environment])
+
+  # App order, then each app's statements in the order it exports them -- the same rule as the
+  # environment. Statements travel jsonencode()d because IAM statements differ in shape -- some carry a
+  # Condition, Resource is a string or a list -- and no single HCL type holds them all (list(any)
+  # refuses: "all list elements must have the same type"); decoded here, they re-encode into the
+  # policy exactly as the app module wrote them.
+  app_task_statements = flatten([for app in local.enabled_apps : [for s in app.task_statements : jsondecode(s)]])
+}
+
+# ---------------------------------------------------------------------------------
+# Console-wide settings (modules/console-settings; src/lib/console/types.ts): the task-role
+# statements that let the console's Settings screens read and write the parameters under
+# console_settings_prefix. Appended whenever a prefix is configured, pipeline deployed or not -- the
+# layer sits above both apps -- and kept apart from the recon and pipeline statements so a console
+# run without the layer keeps the policy it had.
+# ---------------------------------------------------------------------------------
+locals {
+  console_settings_parameter_arn = "arn:aws:ssm:${var.region}:${var.account_id}:parameter${var.console_settings_prefix}"
+
+  console_settings_statements = [
+    {
+      # Every call the console's settings store makes, on exactly this prefix. Two resources because
+      # GetParametersByPath authorizes on the PATH ("parameter<prefix>") while Get/Put/Delete
+      # authorize on the parameters under it ("parameter<prefix>/*"). Region and account are
+      # literal, unlike the recon statement's "arn:aws:ssm:*:*:parameter/<name_prefix>/*" above,
+      # because DeleteParameter is in this list: a UI "clear" is a delete (SSM has no empty value),
+      # and a delete grant should reach no further than the parameters this console owns.
+      # PutParameter with Overwrite needs no further action.
+      Effect = "Allow"
+      Action = [
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:GetParametersByPath",
+        "ssm:PutParameter",
+        "ssm:DeleteParameter",
+      ]
+      Resource = [
+        local.console_settings_parameter_arn,
+        "${local.console_settings_parameter_arn}/*",
+      ]
+    },
+  ]
+}
+
 resource "aws_iam_role_policy" "ecs_task" {
   name = "task-policy"
   role = aws_iam_role.ecs_task.id
+
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       {
         Effect   = "Allow"
         Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
@@ -717,7 +829,12 @@ resource "aws_iam_role_policy" "ecs_task" {
         Resource  = var.assets_bucket_arn
         Condition = { StringLike = { "s3:prefix" = ["lambda-src/*"] } }
       },
-    ]
+      # App grants, for every app enabled in var.app_wiring (local.app_task_statements above),
+      # appended AFTER every recon statement so a recon-only console's policy is byte-for-byte what
+      # it was before the app rail existed. The console-settings grants follow, whenever a prefix is
+      # configured (local.console_settings_statements above).
+      ], local.app_task_statements,
+    [for s in local.console_settings_statements : s if var.console_settings_prefix != ""])
   })
 }
 
@@ -735,7 +852,10 @@ resource "aws_ecs_task_definition" "frontend" {
     image        = "${aws_ecr_repository.frontend.repository_url}:${local.source_hash}"
     essential    = true
     portMappings = [{ containerPort = 3000, protocol = "tcp" }]
-    environment = [
+    # concat() rather than one literal list: the second half exists only when the deal-pipeline app
+    # is deployed here, and it is appended AFTER every recon variable so a recon-only console's task
+    # definition keeps the same environment order it has always had.
+    environment = concat([
       { name = "NODE_ENV", value = "production" },
       { name = "AWS_REGION", value = var.region },
       { name = "PORT", value = "3000" },
@@ -826,6 +946,16 @@ resource "aws_ecs_task_definition" "frontend" {
       { name = "AUTH_PROVIDER", value = var.auth_provider },
       { name = "OKTA_ISSUER", value = var.okta_issuer },
       { name = "OKTA_CLIENT_ID", value = var.okta_client_id },
+      # Cognito's runtime pair, present and empty for an Okta or Entra deployment exactly as the two
+      # Okta names above are for an Entra one. The BFF composes the issuer from the pool id and
+      # AWS_REGION and requires the client id as the `aud`; with AUTH_PROVIDER=cognito and either of
+      # these blank it answers 503 for every /api/* request rather than accepting an unverified token.
+      # The hosted-UI host is here too, although only the browser build needs it, so that an operator
+      # reading `aws ecs describe-task-definition` can see which pool this console signs in to without
+      # cross-referencing the image's build arguments.
+      { name = "COGNITO_USER_POOL_ID", value = var.cognito_user_pool_id },
+      { name = "COGNITO_CLIENT_ID", value = var.cognito_client_id },
+      { name = "COGNITO_HOSTED_UI", value = var.cognito_hosted_ui },
       # --- Configuration-change role (src/lib/reconAdmin.ts) ---
       # Membership is an OIDC group claim from Okta/Entra, so the group itself is
       # created in the identity provider, not by Terraform. Leaving `recon_admin_group` empty is a
@@ -833,7 +963,38 @@ resource "aws_ecs_task_definition" "frontend" {
       # names a group here AND the provider is configured to release the claim.
       { name = "RECON_ADMIN_GROUP", value = var.recon_admin_group },
       { name = "AUTH_GROUPS_CLAIM", value = var.auth_groups_claim },
-    ]
+      # --- Per-app access (src/lib/auth/apps.ts) ---
+      # Always present, pipeline deployed or not: the proxy and /api/me resolve every app in the
+      # registry from these. RECON_ADMIN_GROUP above is the recon app's admin group; this is the
+      # pipeline's. Both admin groups fail closed when empty.
+      { name = "RECON_ACCESS_GROUP", value = var.recon_access_group },
+      { name = "PIPELINE_ACCESS_GROUP", value = var.pipeline_access_group },
+      { name = "PIPELINE_ADMIN_GROUP", value = var.pipeline_admin_group },
+      # Whether the pipeline app is deployed in this console at all. Exactly "false" makes the shell
+      # resolve it as inaccessible for everyone (/api/me hides it, the proxy 403s /api/pipeline/*);
+      # anything else, including unset on a developer's laptop, means enabled. Without this a
+      # recon-only console showed a Deal Pipeline entry whose pages failed with a missing-variable 500
+      # and whose Skills and Config tabs read recon's resources.
+      { name = "PIPELINE_ENABLED", value = tostring(var.pipeline_enabled) },
+      # How a BLANK access group reads. "false": open to every authenticated user, which is what every
+      # recon-only deployment had before the rail existed. "true": denied to non-admins (fail closed).
+      # Tied to pipeline_enabled because that is the moment "every authenticated user" stops meaning
+      # "every recon analyst": two populations sign in through one OIDC client, and several recon
+      # write routes are gated by the access check alone. The validation on pipeline_enabled already
+      # refuses a blank group at plan; this is the runtime backstop for the same invariant.
+      { name = "REQUIRE_ACCESS_GROUPS", value = var.pipeline_enabled ? "true" : "false" },
+      # --- Console-wide settings (src/lib/console/types.ts) ---
+      # Always present, pipeline deployed or not. CONSOLE_SETTINGS_PREFIX names the SSM path whose
+      # parameters OVERLAY the group and switch variables above (stored -> env -> default); blank
+      # disables the layer and the Settings screens render read-only. CONSOLE_ADMIN_GROUP is the one
+      # group that may edit those parameters and is deliberately environment-only -- a stored value
+      # cannot make someone a console admin -- so, like the two admin groups above, it fails closed
+      # when blank. The label is shown under the console mark until a stored value exists.
+      { name = "CONSOLE_SETTINGS_PREFIX", value = var.console_settings_prefix },
+      { name = "CONSOLE_ADMIN_GROUP", value = var.console_admin_group },
+      { name = "CONSOLE_ORGANIZATION_LABEL", value = var.console_organization_label },
+      # App BFF variables, for every app enabled in var.app_wiring (local.app_environment above).
+    ], local.app_environment)
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -843,6 +1004,17 @@ resource "aws_ecs_task_definition" "frontend" {
       }
     }
   }])
+
+  lifecycle {
+    # A duplicated name in an ECS environment is last-one-wins with no warning. The recon names above
+    # are distinct; an app module that exports one of them (ASSETS_BUCKET rather than
+    # PIPELINE_ASSETS_BUCKET), or two apps that export the same name, fail here at plan, by name. A
+    # postcondition because the check needs the rendered list, which a precondition cannot read.
+    postcondition {
+      condition     = length(distinct([for e in jsondecode(self.container_definitions)[0].environment : e.name])) == length(jsondecode(self.container_definitions)[0].environment)
+      error_message = "the console task environment names a variable more than once: ${join(", ", try(nonsensitive(distinct([for e in jsondecode(self.container_definitions)[0].environment : e.name if length([for f in jsondecode(self.container_definitions)[0].environment : f if f.name == e.name]) > 1])), distinct([for e in jsondecode(self.container_definitions)[0].environment : e.name if length([for f in jsondecode(self.container_definitions)[0].environment : f if f.name == e.name]) > 1])))}. One process holds one value per name; prefix the app's variable (see var.app_wiring)."
+    }
+  }
 
   depends_on = [null_resource.codebuild_trigger]
 }
@@ -1050,13 +1222,24 @@ resource "aws_cloudfront_response_headers_policy" "security" {
       # top-level redirect, because the iframe flow needs the provider's session cookie in a
       # third-party context — which Safari already blocks and Chrome is phasing out. Allowing the
       # frame would buy back a mechanism that fails again later, silently.
+      #
+      # The Cognito hosted UI, by contrast, DOES need a `connect-src` entry, and only that. The
+      # sign-in leg is a top-level navigation (no CSP directive governs one here), but the
+      # code-for-token POST and every silent refresh in src/lib/auth/cognito-pkce.ts are `fetch`
+      # calls to `https://<hosted-ui>/oauth2/token` — cross-origin, so `connect-src 'self'` refuses
+      # them and the browser reports it as a CSP violation, not as an auth error. Left out, sign-in
+      # cannot complete on the DEFAULT provider and the console's error screen blames an
+      # unregistered callback URL. It is derived from the variable rather than hard-coded to
+      # `*.amazoncognito.com` so a pool on a custom hosted-UI domain is covered too, and so an Okta
+      # or Entra deployment (cognito_hosted_ui = "") renders the byte-identical policy it always
+      # did. Still NO `frame-src` for it: nothing frames the hosted UI.
       content_security_policy = join("; ", [
         "default-src 'self'",
         "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
         "style-src 'self' 'unsafe-inline'",
         "font-src 'self' data:",
         "img-src 'self' data: blob:",
-        "connect-src 'self' https://*.okta.com https://login.microsoftonline.com",
+        "connect-src 'self' https://*.okta.com https://login.microsoftonline.com${local.csp_cognito_connect_src}",
         # ⚠️ `frame-src` must be stated, and `blob:` is the whole reason. Source documents are
         # fetched with the BFF's Authorization header and handed to the element as an OBJECT URL --
         # neither `<iframe src>` nor `<img src>` can carry a header, so there is no other shape this

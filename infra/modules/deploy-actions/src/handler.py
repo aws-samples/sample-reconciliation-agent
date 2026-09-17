@@ -222,11 +222,94 @@ def push_editable_seeds(*, bucket: str, seeds: dict[str, dict], **_: Any) -> dic
     return results
 
 
+def patch_cognito_callbacks(
+    *,
+    user_pool_id: str,
+    client_id: str,
+    callback_urls: list[str],
+    logout_urls: list[str],
+    **_: Any,
+) -> dict:
+    """Register the console's OAuth callback and sign-out URLs on the pool's app client.
+
+    ⚠️ WHY THIS IS AN ACTION AND NOT A TERRAFORM ATTRIBUTE
+
+    Cognito matches a redirect URL EXACTLY, so the real one has to name the console's public host —
+    and that host (the CloudFront domain) does not exist until the frontend tier has been created,
+    while the frontend tier needs this client's id as a build argument. Referencing one from the other
+    closes a cycle Terraform refuses. So the client is created with the URLs it can know and this
+    closes the loop afterwards, in the same apply. The client resource carries
+    ``lifecycle { ignore_changes = [callback_urls, logout_urls] }`` for the same reason; the two are
+    one mechanism and neither survives the other (see the invocation in
+    infra/environments/recon/main.tf).
+
+    ⚠️ UPDATE REPLACES, IT DOES NOT MERGE. ``UpdateUserPoolClient`` overwrites the WHOLE client
+    configuration with what this call sends: a request carrying only the two URL lists would silently
+    strip the auth flows, scopes, token validity and supported providers off a working client, and the
+    symptom would be a sign-in that fails days later with ``invalid_request``. So the live client is
+    read first and written back exactly as found, with only the two lists replaced. That also keeps the
+    client's configuration declared in ONE place — modules/console-auth — instead of duplicated into
+    this invocation's input, where it would drift.
+
+    The caller sends the FULL list each time, not just the new pair, for the same reason: whatever is
+    not in this call is gone.
+
+    :param user_pool_id: the pool holding the client.
+    :param client_id: the console's public PKCE app client.
+    :param callback_urls: every OAuth callback URL the client should allow, in full.
+    :param logout_urls: every sign-out redirect URL the client should allow, in full.
+    :returns: what changed, as JSON-serializable strings.
+    :raises ValueError: when either list is empty — Cognito would accept the call and leave a client
+        nobody can sign in through, which is exactly the silent pass this module refuses to make.
+    """
+    if not callback_urls or not logout_urls:
+        raise ValueError(
+            "patch_cognito_callbacks needs both a non-empty callback_urls and a non-empty "
+            f"logout_urls (got {callback_urls!r} / {logout_urls!r}); writing an empty list would "
+            "leave an app client no browser can sign in through"
+        )
+
+    idp = boto3.client("cognito-idp")
+    described = idp.describe_user_pool_client(UserPoolId=user_pool_id, ClientId=client_id)[
+        "UserPoolClient"
+    ]
+
+    # Strings and lists of strings only: Terraform reads this through aws_lambda_invocation.result, and
+    # the Describe response's datetimes are not JSON-serializable.
+    outcome = {"callback_urls": list(callback_urls), "logout_urls": list(logout_urls)}
+
+    # Order is not significant to Cognito, so compare as sets: an apply whose only difference is the
+    # order Terraform happened to render the list in should not rewrite a working client.
+    if set(described.get("CallbackURLs") or []) == set(callback_urls) and set(
+        described.get("LogoutURLs") or []
+    ) == set(logout_urls):
+        print(f"[cognito] {client_id} already lists these URLs; nothing to do")
+        return {"changed": "false", **outcome}
+
+    # Carried over by EXCLUSION, not by an allowlist. Every field Describe returns other than these is
+    # an UpdateUserPoolClient parameter, so a field Cognito adds later is preserved automatically —
+    # whereas an allowlist would silently strip anything it had not been taught about, which is the
+    # failure this whole function is written to avoid. The cost of the choice is that a new READ-ONLY
+    # field would be rejected by boto3's parameter validation and fail the apply loudly; that is the
+    # right way round for a function whose job is to not lose configuration.
+    read_only = ("UserPoolId", "ClientId", "ClientSecret", "CreationDate", "LastModifiedDate")
+    request = {key: value for key, value in described.items() if key not in read_only}
+    request["UserPoolId"] = user_pool_id
+    request["ClientId"] = client_id
+    request["CallbackURLs"] = list(callback_urls)
+    request["LogoutURLs"] = list(logout_urls)
+
+    idp.update_user_pool_client(**request)
+    print(f"[cognito] {client_id} callbacks={callback_urls} logouts={logout_urls}")
+    return {"changed": "true", **outcome}
+
+
 ACTIONS: dict[str, Callable[..., dict]] = {
     "wait_kb_data_source": wait_kb_data_source,
     "wait_gateway_target": wait_gateway_target,
     "start_kb_ingestion": start_kb_ingestion,
     "push_editable_seeds": push_editable_seeds,
+    "patch_cognito_callbacks": patch_cognito_callbacks,
 }
 
 

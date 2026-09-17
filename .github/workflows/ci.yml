@@ -101,7 +101,7 @@ jobs:
         run: npm run build
 
   terraform:
-    name: Terraform — fmt + validate
+    name: Terraform — fmt + validate + module tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -130,6 +130,21 @@ jobs:
         run: |
           terraform init -backend=false -input=false
           terraform validate
+
+      - name: Module tests
+        # Plan-only under mocked providers: no credentials, nothing created. Each module pins its
+        # providers in a versions.tf so `init` resolves the same majors the root does; the mocks
+        # still need the provider binaries for their schemas.
+        #
+        # Self-discovering: every module with a tests/ directory runs, so a new suite needs no edit
+        # here or in .gitlab-ci.yml (which runs the same loop). The deal-pipeline module is only
+        # count-gated in the recon root, so its own suite is what instantiates it in CI.
+        run: |
+          for tests in infra/modules/*/tests; do
+            module="$(dirname "$tests")"
+            echo "== $module"
+            (cd "$module" && terraform init -backend=false -input=false && terraform test) || exit 1
+          done
 
   secret-scan:
     name: Secret scan (gitleaks)

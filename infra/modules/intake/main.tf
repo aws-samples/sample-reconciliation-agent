@@ -108,10 +108,12 @@ resource "aws_apigatewayv2_api" "http" {
   protocol_type = "HTTP"
 }
 
-# A v2 JWT authorizer is not Cognito-specific: it validates any OIDC issuer, which is why this stack
-# no longer runs a user pool. Issuer and audience are derived from `auth_provider` in the root module,
-# the same way chatbot-app/frontend/src/lib/api-auth.ts derives them for the BFF — so the two verifiers
-# agree by construction rather than by someone remembering to change both.
+# A v2 JWT authorizer is not Cognito-specific: it validates WHICHEVER OIDC issuer `auth_provider`
+# selects — the console's own Cognito user pool (the default), an Okta org, or an Entra tenant — which is
+# why this module names none of them. Issuer and audience are derived from `auth_provider` in the root
+# module, the same way chatbot-app/frontend/src/lib/api-auth.ts derives them for the BFF — so the two
+# verifiers agree by construction rather than by someone remembering to change both, and this API is
+# always authorizing against the same identity provider the console signs in through.
 #
 # API Gateway fetches the provider's JWKS from AWS-managed infrastructure, NOT from this VPC. That is
 # what keeps this authorizer working in a no-NAT private deployment, and it is the reason the private

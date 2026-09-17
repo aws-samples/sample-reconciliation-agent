@@ -1,16 +1,46 @@
 // @vitest-environment node
 /**
- * Tests for `/api/recon/config`, focused on the counterparty recipient allowlist.
+ * Tests for `/api/recon/config`.
  *
- * The allowlist is not SSM-backed like the rest of this endpoint's fields — it is baked into the
- * deploy's environment and enforced by the gateway interceptor from its own copy. So the two things
- * worth pinning down are that the GET reports what is actually deployed (the panel draws its inline
- * validation from it) and that the PUT refuses to pretend it can change it.
+ * Two contracts are pinned here.
+ *
+ * 1. The counterparty recipient allowlist is not SSM-backed like the rest of this endpoint's fields —
+ *    it is baked into the deploy's environment and enforced by the gateway interceptor from its own
+ *    copy. So the GET must not report it (the panel would draw inline validation from a stale copy)
+ *    and the PUT must refuse to pretend it can change it.
+ * 2. The Parameter Store contract. GET reads exactly five parameters, named by `TIER1_ENABLED_PARAM`,
+ *    `AUTO_RESOLVE_PARAM`, `COMMENT_REQUIREMENT_PARAM`, `AGENT_BACKEND_PARAM` and `AGENT_MODEL_PARAM`,
+ *    and PUT writes each field to its own parameter as a `String` with `Overwrite` and writes nothing
+ *    else. The Tier-1 Lambda and both Tier-2 backends read those parameters by name, so a route that
+ *    wrote to the wrong one, or to an extra one, would pass every other case in this file and still
+ *    change what the agent does.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 
-process.env.TIER1_ENABLED_PARAM = "/recon-test/tier1-enabled";
-process.env.AUTO_RESOLVE_PARAM = "/recon-test/auto-resolve-threshold";
+import { ssmModule } from "../helpers/awsMocks";
+import { scopedEnv } from "../helpers/env";
+
+// The parameter names, keyed by the body field each one backs.
+const PARAMS = {
+  tier1Enabled: "/recon-test/tier1-enabled",
+  autoResolveThreshold: "/recon-test/auto-resolve-threshold",
+  commentRequirement: "/recon-test/comment-requirement",
+  agentBackend: "/recon-test/agent-backend",
+  agentModelId: "/recon-test/agent-model-id",
+} as const;
+
+// The route reads its parameter names once at module load, so they are set before the import below.
+// `EGRESS_GATEWAY_ARN` is unset explicitly: when it is present, a numeric threshold write also
+// rewrites the Cedar policies, which is `lib/reconPolicy`'s contract rather than the one pinned here.
+const env = scopedEnv({
+  TIER1_ENABLED_PARAM: PARAMS.tier1Enabled,
+  AUTO_RESOLVE_PARAM: PARAMS.autoResolveThreshold,
+  COMMENT_REQUIREMENT_PARAM: PARAMS.commentRequirement,
+  AGENT_BACKEND_PARAM: PARAMS.agentBackend,
+  AGENT_MODEL_PARAM: PARAMS.agentModelId,
+  EGRESS_GATEWAY_ARN: undefined,
+});
+afterAll(() => env.restore());
 
 const ssmSend = vi.fn();
 // PUT is admin-gated. Mocked here so these tests stay about the config contract; the gate itself is
@@ -18,17 +48,10 @@ const ssmSend = vi.fn();
 const requireReconAdmin = vi.fn();
 
 vi.mock("@/lib/reconAdmin", () => ({ requireReconAdmin }));
-vi.mock("@aws-sdk/client-ssm", () => ({
-  SSMClient: vi.fn().mockImplementation(() => ({ send: ssmSend })),
-  GetParameterCommand: vi
-    .fn()
-    .mockImplementation((i) => ({ __cmd: "Get", ...i })),
-  PutParameterCommand: vi
-    .fn()
-    .mockImplementation((i) => ({ __cmd: "Put", ...i })),
-}));
+vi.mock("@aws-sdk/client-ssm", () => ssmModule(ssmSend));
 
 const { GET, PUT } = await import("@/app/api/recon/config/route");
+const { AGENT_MODEL_IDS } = await import("@/lib/server/agentModels");
 
 function put(body: unknown) {
   return PUT(
@@ -38,6 +61,13 @@ function put(body: unknown) {
       body: JSON.stringify(body),
     }),
   );
+}
+
+/** The commands handed to the mocked client, in a stable order so a set can be compared exactly. */
+function sentCommands() {
+  return ssmSend.mock.calls
+    .map((c) => c[0] as { __cmd: string; Name: string })
+    .sort((a, b) => a.Name.localeCompare(b.Name));
 }
 
 beforeEach(() => {
@@ -50,6 +80,53 @@ beforeEach(() => {
 });
 
 describe("GET /api/recon/config", () => {
+  it("reads the five parameters by name and reports every field with its deployment default", async () => {
+    // The names are the contract with the Lambdas and agents that read the same parameters; the body
+    // keys are the contract with the Config tab and with the case screen, which reads
+    // commentRequirement to decide whether a decision needs a comment.
+    const body = await (await GET()).json();
+
+    expect(body).toEqual({
+      tier1Enabled: true,
+      autoResolveThreshold: 0.85,
+      commentRequirement: "disapprove-only",
+      agentBackend: "runtime",
+      agentModelId: null,
+      agentModelIds: AGENT_MODEL_IDS,
+    });
+    expect(ssmSend).toHaveBeenCalledTimes(5);
+    expect(sentCommands()).toEqual(
+      Object.values(PARAMS)
+        .map((Name) => ({ __cmd: "Get", Name }))
+        .sort((a, b) => a.Name.localeCompare(b.Name)),
+    );
+  });
+
+  it("maps each stored parameter onto its own field", async () => {
+    // Distinct values per parameter, so a field reading a sibling's parameter would show up.
+    const stored: Record<string, string> = {
+      [PARAMS.tier1Enabled]: "false",
+      [PARAMS.autoResolveThreshold]: "0.9",
+      [PARAMS.commentRequirement]: "required",
+      [PARAMS.agentBackend]: "harness",
+      [PARAMS.agentModelId]: "us.anthropic.claude-opus-5",
+    };
+    ssmSend.mockImplementation(async (cmd: { Name: string }) => ({
+      Parameter: { Value: stored[cmd.Name] },
+    }));
+
+    const body = await (await GET()).json();
+
+    expect(body).toEqual({
+      tier1Enabled: false,
+      autoResolveThreshold: 0.9,
+      commentRequirement: "required",
+      agentBackend: "harness",
+      agentModelId: "us.anthropic.claude-opus-5",
+      agentModelIds: AGENT_MODEL_IDS,
+    });
+  });
+
   it("never publishes the counterparty allowlist, even when one is deployed", async () => {
     // The allowlist is a GATE and the gateway request interceptor is the gate. Publishing it here let
     // three other places form an opinion about it, each reading a container env var fixed at task
@@ -90,6 +167,54 @@ describe("GET /api/recon/config", () => {
 });
 
 describe("PUT /api/recon/config", () => {
+  it("writes each field to its own parameter as a String with Overwrite, and nothing else", async () => {
+    // Every one of the five parameters is read by name by a Lambda or an agent, so the names are a
+    // contract; and a sixth write, or a write to a sibling's name, would change platform behaviour the
+    // caller never asked for. The whole set of commands is compared, not just its members.
+    ssmSend.mockResolvedValue({});
+    const change = {
+      tier1Enabled: false,
+      autoResolveThreshold: 0.9,
+      commentRequirement: "required",
+      agentBackend: "harness",
+      agentModelId: "us.anthropic.claude-sonnet-5",
+    };
+
+    const res = await put(change);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(change);
+    expect(ssmSend).toHaveBeenCalledTimes(5);
+    expect(sentCommands()).toEqual(
+      [
+        { Name: PARAMS.tier1Enabled, Value: "false" },
+        { Name: PARAMS.autoResolveThreshold, Value: "0.9" },
+        { Name: PARAMS.commentRequirement, Value: "required" },
+        { Name: PARAMS.agentBackend, Value: "harness" },
+        { Name: PARAMS.agentModelId, Value: "us.anthropic.claude-sonnet-5" },
+      ]
+        .map((p) => ({ __cmd: "Put", Type: "String", Overwrite: true, ...p }))
+        .sort((a, b) => a.Name.localeCompare(b.Name)),
+    );
+  });
+
+  it('stores a disabled threshold as the literal "off" the agent looks for', async () => {
+    ssmSend.mockResolvedValue({});
+    const res = await put({ autoResolveThreshold: null });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ autoResolveThreshold: null });
+    expect(sentCommands()).toEqual([
+      {
+        __cmd: "Put",
+        Name: PARAMS.autoResolveThreshold,
+        Value: "off",
+        Type: "String",
+        Overwrite: true,
+      },
+    ]);
+  });
+
   it("refuses a write to the allowlist instead of silently ignoring it", async () => {
     const res = await put({ counterpartyEmailDomains: ["attacker.example"] });
 
