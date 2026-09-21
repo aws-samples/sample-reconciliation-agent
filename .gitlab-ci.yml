@@ -189,7 +189,7 @@ frontend:
     - cd chatbot-app/frontend
     - npm ci
     - npx tsc --noEmit
-    # The whole suite: 62 files, 874 tests.
+    # The whole suite: 124 files, 1711 tests.
     - npx vitest run
     # The real gate — it compiles every route, catching breakage both the unit tests and tsc
     # miss. `npm run lint` is deliberately absent (ESLint is broken repo-wide), and
@@ -214,6 +214,19 @@ terraform:validate:
     # off 6.57.0, which corrupts request bodies under parallel refresh. Do not relax it.
     - terraform init -backend=false -input=false
     - terraform validate
+    # Module tests, all plan-only under mocked providers (no credentials, nothing created). Each
+    # module pins its providers in a versions.tf, which is what lets `init` here resolve the same
+    # majors the root does. The mock providers still need the binaries for their schemas.
+    #
+    # Self-discovering: every module with a tests/ directory runs, so a new suite needs no edit here
+    # or in .github/workflows/ci.yml (which runs the same loop). The deal-pipeline module is only
+    # count-gated in the recon root, so its own suite is what instantiates it in CI.
+    - |
+      for tests in "$CI_PROJECT_DIR"/infra/modules/*/tests; do
+        module="$(dirname "$tests")"
+        echo "== ${module#"$CI_PROJECT_DIR/"}"
+        (cd "$module" && terraform init -backend=false -input=false && terraform test) || exit 1
+      done
 
 secret-scan:
   stage: verify
@@ -503,18 +516,21 @@ sast-gate:
     # A backend block cannot read variables, so the state bucket name normally arrives through
     # the gitignored backend.hcl. Rebuild it from the CI variable.
     - printf 'bucket = "%s"\n' "$TF_STATE_BUCKET" > "$TF_ENV_DIR/backend.hcl"
-    # data.archive_file.lambda reads .build/staging at PLAN time, but the provisioner that
-    # fills it only runs at APPLY time and .build/ is gitignored — so a fresh clone cannot
-    # plan until the staging exists. stage.sh is the same script the provisioner calls.
+    # data.archive_file.lambda reads the module's .build/<name>/staging at PLAN time, but the
+    # provisioner that fills it only runs at APPLY time and .build/ is gitignored — so a fresh
+    # clone cannot plan until the staging exists. stage.sh is the same script the provisioner
+    # calls. The directory is the recon root's instance (the module's default name, "backend");
+    # the module's tests pin the default to this path so the two cannot drift apart.
     #
-    # The trailing arguments mirror the defaults in
-    # infra/modules/lambda-package/variables.tf (lambda_platform, lambda_python_version, then
-    # every entry of runtime_dependencies). Keep them in step with that file: a mismatch here
-    # vendors the wrong wheels into the zip instead of failing. This list was short by PyYAML
-    # for a while, and nothing caught it, because the zip only rebuilds when the sources change
-    # and the last rebuild happened to run locally where the full list is passed.
+    # The trailing arguments mirror the recon root's `module "lambda_package"` block in
+    # infra/environments/recon/main.tf (lambda_platform and lambda_python_version from the module's
+    # defaults, then every entry of that block's runtime_dependencies). Keep them in step with that
+    # file: a mismatch here vendors the wrong wheels into the zip instead of failing. This list was
+    # short by PyYAML for a while, and nothing caught it, because the zip only rebuilds when the
+    # sources change and the last rebuild happened to run locally where the full list is passed.
+    # tzdata is the deal pipeline's: the shared zip also feeds its parser and mock OMS Lambdas.
     - ./infra/modules/lambda-package/stage.sh
-      "infra/modules/lambda-package/.build/staging"
+      "infra/modules/lambda-package/.build/backend/staging"
       "$CI_PROJECT_DIR/backend"
       "manylinux2014_x86_64"
       "3.12"
@@ -523,6 +539,7 @@ sast-gate:
       "extract-msg==0.56.1"
       "reportlab==5.0.1"
       "red-black-tree-mod==1.22"
+      "tzdata==2026.3"
 
 terraform:plan:
   extends: .terraform_aws
@@ -547,6 +564,16 @@ terraform:plan:
         echo "NOTE: this plan destroys $destroy_count resource(s). terraform:apply will refuse to"
         echo "      proceed; approving means running terraform:apply:allow-destroy by hand."
         printf '%s\n' "$destroyed" | sed 's/^/  - DESTROY: /'
+      fi
+      # The apply job refuses these too (its guard explains why): memories, strategies and S3 seed
+      # objects planned for REPLACEMENT.
+      irreplaceable="$(terraform show -json recon.tfplan \
+        | jq -r '[.resource_changes[]? | select((.change.actions | index("delete")) and (.change.actions | index("create"))) | select(.type == "aws_bedrockagentcore_memory" or .type == "aws_bedrockagentcore_memory_strategy" or .type == "aws_s3_object") | .address] | .[]')"
+      irreplaceable_count="$(printf '%s' "$irreplaceable" | grep -c . || true)"
+      if [ "$irreplaceable_count" -gt 0 ]; then
+        echo "NOTE: this plan REPLACES $irreplaceable_count memory / strategy / S3 seed object(s), whose"
+        echo "      contents Terraform cannot restore. terraform:apply will refuse to proceed."
+        printf '%s\n' "$irreplaceable" | sed 's/^/  ~ REPLACE: /'
       fi
   artifacts:
     # ONLY the rendered text, never recon.tfplan. A binary plan file stores every variable
@@ -625,6 +652,32 @@ terraform:plan:
       echo "Plan: $destroy_count resource(s) destroyed, $replace_count replaced."
       if [ "$replace_count" -gt 0 ]; then
         printf '%s\n' "$replaced" | sed 's/^/  ~ replace: /'
+      fi
+      # ...EXCEPT for the resource types whose contents Terraform cannot put back. An AgentCore
+      # Memory or strategy holds records the service consolidated (recon's analyst lessons live in
+      # one); an S3 seed object may hold an analyst's UI edit (a create-only seed). Replacing either
+      # is delete+create and the contents are gone. Nothing in an ordinary apply replaces them: a
+      # planned replace means a `moved` block that missed or a changed name, key or bucket (see
+      # infra/README.md, "Plan checklist"), so it is refused exactly like a pure delete.
+      irreplaceable="$(terraform show -json apply.tfplan \
+        | jq -r '[.resource_changes[]? | select((.change.actions | index("delete")) and (.change.actions | index("create"))) | select(.type == "aws_bedrockagentcore_memory" or .type == "aws_bedrockagentcore_memory_strategy" or .type == "aws_s3_object") | .address] | .[]')"
+      irreplaceable_count="$(printf '%s' "$irreplaceable" | grep -c . || true)"
+      if [ "$irreplaceable_count" -gt 0 ]; then
+        printf '%s\n' "$irreplaceable" | sed 's/^/  ~ REPLACE, contents not recoverable: /'
+        if [ "${ALLOW_DESTROY:-no}" != "yes" ]; then
+          echo "" >&2
+          echo "ERROR: this plan REPLACES $irreplaceable_count AgentCore Memory, memory strategy or S3 seed" >&2
+          echo "       object(s), and nothing has approved that. Refusing to apply." >&2
+          echo "" >&2
+          echo "       A replace is delete+create: the memory's stored records (the recon lessons) or" >&2
+          echo "       the object's live content (an analyst's edit) would be lost. Expected cause: a" >&2
+          echo "       moved block missing or wrong after a refactor, or a changed name, key or bucket." >&2
+          echo "       Read infra/README.md, 'Plan checklist', and terraform:plan's recon.plan.txt." >&2
+          echo "       If the replacements above are intended, run the manual" >&2
+          echo "       'terraform:apply:allow-destroy' job in this same pipeline." >&2
+          exit 1
+        fi
+        echo "ALLOW_DESTROY=yes — the replacements above were approved by running this job."
       fi
       if [ "$destroy_count" -gt 0 ]; then
         printf '%s\n' "$destroyed" | sed 's/^/  - DESTROY: /'

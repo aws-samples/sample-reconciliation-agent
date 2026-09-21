@@ -1,0 +1,12 @@
+# The repository root ignores __pycache__/, *.pyc, .venv, .build/, .ruff_cache/, .pytest_cache/,
+# .DS_Store and *.egg-info/. The baseline and stray-files fixtures deliberately CONTAIN those,
+# because the tests prove they are not hashed; a nested .gitignore is the only way to keep them in
+# the repo without touching the root rules.
+!__pycache__/
+!*.pyc
+!.venv
+!.build/
+!.ruff_cache/
+!.pytest_cache/
+!.DS_Store
+!*.egg-info/

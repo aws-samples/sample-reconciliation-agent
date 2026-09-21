@@ -34,6 +34,20 @@ ARG NEXT_PUBLIC_OKTA_CLIENT_ID
 # Pins the OIDC callback URL instead of deriving it from the browser's origin, which drifts every
 # time the CloudFront domain changes (live-QA P0-1). Empty = derive it (fine for local dev).
 ARG NEXT_PUBLIC_OKTA_REDIRECT_URI
+# Cognito (the DEFAULT provider when NEXT_PUBLIC_AUTH_PROVIDER is unset). The hosted-UI host and the
+# app client id are what src/lib/auth/cognito-pkce.ts reads to decide HAS_COGNITO_CONFIG; without
+# BOTH of them the browser bundle has no way to sign in, and CognitoAuthWrapper falls back to the
+# unauthenticated pass-through meant for a laptop. None of these is a secret — the client id travels
+# in every authorize URL and the pool id is in every token's issuer.
+#
+# ⚠️ Every NEXT_PUBLIC_* --build-arg the deploy pipeline passes MUST be declared here. Docker DROPS a
+# --build-arg with no matching ARG and only warns, so a missing line here produces a green build and a
+# bundle with the value inlined as undefined. tests/infra/test_frontend_build_args.py pins the two
+# lists (this file and modules/frontend-ecs's buildspec) against each other for that reason.
+ARG NEXT_PUBLIC_COGNITO_USER_POOL_ID
+ARG NEXT_PUBLIC_COGNITO_CLIENT_ID
+ARG NEXT_PUBLIC_COGNITO_HOSTED_UI
+ARG NEXT_PUBLIC_COGNITO_REDIRECT_URI
 
 # Set environment variables for build
 ENV NEXT_PUBLIC_AWS_REGION=$NEXT_PUBLIC_AWS_REGION
@@ -49,6 +63,10 @@ ENV NEXT_PUBLIC_AUTH_PROVIDER=$NEXT_PUBLIC_AUTH_PROVIDER
 ENV NEXT_PUBLIC_OKTA_ISSUER=$NEXT_PUBLIC_OKTA_ISSUER
 ENV NEXT_PUBLIC_OKTA_CLIENT_ID=$NEXT_PUBLIC_OKTA_CLIENT_ID
 ENV NEXT_PUBLIC_OKTA_REDIRECT_URI=$NEXT_PUBLIC_OKTA_REDIRECT_URI
+ENV NEXT_PUBLIC_COGNITO_USER_POOL_ID=$NEXT_PUBLIC_COGNITO_USER_POOL_ID
+ENV NEXT_PUBLIC_COGNITO_CLIENT_ID=$NEXT_PUBLIC_COGNITO_CLIENT_ID
+ENV NEXT_PUBLIC_COGNITO_HOSTED_UI=$NEXT_PUBLIC_COGNITO_HOSTED_UI
+ENV NEXT_PUBLIC_COGNITO_REDIRECT_URI=$NEXT_PUBLIC_COGNITO_REDIRECT_URI
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -63,7 +81,10 @@ RUN echo "Build-time env vars:" \
  && echo "NEXT_PUBLIC_STREAMING_API_URL=$NEXT_PUBLIC_STREAMING_API_URL" \
  && echo "NEXT_PUBLIC_GOOGLE_MAPS_EMBED_API_KEY=${NEXT_PUBLIC_GOOGLE_MAPS_EMBED_API_KEY:0:10}..." \
  && echo "NEXT_PUBLIC_DEFAULT_KEYS=$NEXT_PUBLIC_DEFAULT_KEYS" \
- && echo "CORS_ORIGINS=$CORS_ORIGINS"
+ && echo "CORS_ORIGINS=$CORS_ORIGINS" \
+ && echo "NEXT_PUBLIC_AUTH_PROVIDER=$NEXT_PUBLIC_AUTH_PROVIDER" \
+ && echo "NEXT_PUBLIC_COGNITO_HOSTED_UI=$NEXT_PUBLIC_COGNITO_HOSTED_UI" \
+ && echo "NEXT_PUBLIC_COGNITO_CLIENT_ID=$NEXT_PUBLIC_COGNITO_CLIENT_ID"
 
 RUN npm run build
 

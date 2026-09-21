@@ -97,3 +97,20 @@ adding rigour. 5/6 = 0.833 does not. `tests/skills/` enforces this.
 These files are **live-editable from the UI** and read from S3, so the catalog can change without a
 deploy. That is also why there is deliberately no predicate DSL in the frontmatter: routing decisions
 must not be expressible in a file an operator can edit.
+
+## `deal-pipeline-agent/` — the Deal Pipeline's knowledge, not a third backend
+
+The console's second app has its own agent, and this directory is everything that agent _knows_:
+four `skills/*/SKILL.md` (core parsing rules, two email-format skills, the staging-CSV contract) and
+two prompts (`parser-system.md` for the parsing Lambda, `assistant-system.md` for the desk assistant
+in the BFF). No code — the runtime is `backend/deal_pipeline/`. Terraform seeds all six to the
+pipeline bucket, but with two different rules. The four skills and `parser-system.md` are
+**create-only** seeds (`ignore_changes` in `infra/modules/deal-pipeline/main.tf`): from the first
+apply on, the Skills tab and approved skill proposals own them in S3, and the repo file is the seed,
+not the truth. `assistant-system.md` has no UI editor and **tracks the repo** — like the
+`security-master/` CSVs and `samples/`, a change to the committed file re-uploads on the next apply,
+and an edit made only in S3 is reverted by it. Frontmatter rules and the `metadata.applies_to`
+filter the parser uses are in [`deal-pipeline-agent/README.md`](deal-pipeline-agent/README.md). It
+runs its own Lambdas rather than either recon backend above, but reads its skills through the same
+parser (`backend/recon_core/skill_meta.py`) and the same core helpers, so a SKILL.md means the same
+thing to both agents.

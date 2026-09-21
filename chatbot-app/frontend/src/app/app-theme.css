@@ -1,0 +1,270 @@
+/* ============================================================================
+   Console "instrument" theme — shared by every app.
+   A precision operations terminal: near-black surfaces, hairline rules,
+   monospaced numerics, signal-color status pills, segmented confidence meters
+   and confidence chips.
+
+   `rc-` is the historical prefix (the reconciliation app was the first tenant)
+   and is kept as the ONE shared prefix to avoid churn: tokens are `--rc-*`,
+   classes are `rc-*`. All rules are scoped under `.app-root`, which each app's
+   chrome renders, so the rest of the console is untouched. Per-app accent
+   overrides, should an app ever want one, would go under `[data-app="..."]`
+   rather than under a second prefix.
+   ============================================================================ */
+
+.app-root {
+  --rc-bg: #0a0b0d;
+  --rc-panel: #101216;
+  --rc-panel-2: #15181d;
+  --rc-line: #22262e;
+  --rc-line-soft: #1a1d23;
+  --rc-ink: #e7ebf0;
+  --rc-ink-dim: #8b93a1;
+  --rc-ink-faint: #5b626f;
+
+  /* signal palette */
+  --rc-cyan: #3ad6c5;
+  --rc-amber: #f2b45c;
+  --rc-red: #f2624f;
+  --rc-green: #57d08a;
+  --rc-violet: #9a8cf5;
+
+  --rc-font-display: var(--font-chivo), "Arial Narrow", sans-serif;
+  --rc-font-mono: var(--font-plex-mono), ui-monospace, monospace;
+
+  background: var(--rc-bg);
+  color: var(--rc-ink);
+  min-height: 100vh;
+  /* faint grid texture for atmosphere */
+  background-image:
+    linear-gradient(var(--rc-line-soft) 1px, transparent 1px),
+    linear-gradient(90deg, var(--rc-line-soft) 1px, transparent 1px);
+  background-size: 44px 44px;
+  background-position: -1px -1px;
+}
+
+.app-root ::selection {
+  background: var(--rc-cyan);
+  color: #04120f;
+}
+
+/* --- typographic helpers --- */
+.rc-mono {
+  font-family: var(--rc-font-mono);
+  font-feature-settings:
+    "tnum" 1,
+    "zero" 1;
+}
+.rc-display {
+  font-family: var(--rc-font-display);
+  letter-spacing: -0.02em;
+  text-transform: uppercase;
+}
+.rc-eyebrow {
+  font-family: var(--rc-font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--rc-ink-faint);
+}
+.rc-tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- surfaces --- */
+.rc-panel {
+  background: linear-gradient(180deg, var(--rc-panel) 0%, var(--rc-bg) 140%);
+  border: 1px solid var(--rc-line);
+  border-radius: 4px;
+}
+.rc-hairline {
+  border-color: var(--rc-line);
+}
+
+/* --- confidence meter (segmented bar) --- */
+.rc-meter {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+}
+.rc-meter-seg {
+  width: 6px;
+  height: 14px;
+  border-radius: 1px;
+  background: var(--rc-line);
+  transition:
+    background 240ms ease,
+    box-shadow 240ms ease;
+}
+.rc-meter-seg.on {
+  background: var(--rc-seg, var(--rc-cyan));
+}
+.rc-meter-seg.on.glow {
+  box-shadow: 0 0 6px 0 var(--rc-seg, var(--rc-cyan));
+}
+
+/* --- status pill --- */
+.rc-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--rc-font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+}
+.rc-pill::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 6px 0 currentColor;
+}
+
+/* --- live status pill: the dot breathes while a record is still moving --- */
+@keyframes rc-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 6px 0 currentColor;
+  }
+  50% {
+    opacity: 0.35;
+    box-shadow: 0 0 1px 0 currentColor;
+  }
+}
+.rc-pill.live::before {
+  animation: rc-pulse 1.2s ease-in-out infinite;
+}
+
+/* --- confidence chip (high / medium / low), coloured by currentColor like the pill --- */
+.rc-chip {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--rc-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+  line-height: 1.5;
+}
+
+/* --- row hover for tables --- */
+.rc-row {
+  transition:
+    background 140ms ease,
+    border-color 140ms ease;
+}
+.rc-row:hover {
+  background: var(--rc-panel-2);
+}
+
+/* --- entrance animation (staggered) --- */
+@keyframes rc-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.rc-rise {
+  animation: rc-rise 480ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* --- scan line accent on panels --- */
+.rc-scan {
+  position: relative;
+  overflow: hidden;
+}
+.rc-scan::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: linear-gradient(180deg, transparent, var(--rc-cyan), transparent);
+  opacity: 0.5;
+}
+
+/* --- line diff (skill proposals) --- */
+.rc-diff-line {
+  display: grid;
+  grid-template-columns: 1.25rem 1fr;
+  gap: 0.5rem;
+  padding: 0 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.rc-diff-line.add {
+  background: color-mix(in srgb, var(--rc-green) 14%, transparent);
+  color: var(--rc-green);
+}
+.rc-diff-line.del {
+  background: color-mix(in srgb, var(--rc-red) 14%, transparent);
+  color: var(--rc-red);
+}
+.rc-diff-line.same {
+  color: var(--rc-ink-dim);
+}
+
+/* --- chat bubbles --- */
+.rc-bubble {
+  border: 1px solid var(--rc-line);
+  border-radius: 4px;
+  padding: 10px 14px;
+  max-width: 85%;
+}
+.rc-bubble.user {
+  margin-left: auto;
+  background: var(--rc-panel-2);
+  border-color: var(--rc-cyan);
+}
+.rc-bubble.assistant {
+  margin-right: auto;
+  background: var(--rc-panel);
+}
+.rc-prose p + p,
+.rc-prose ul + p,
+.rc-prose p + ul,
+.rc-prose pre + p,
+.rc-prose p + pre {
+  margin-top: 0.6em;
+}
+.rc-prose ul {
+  list-style: disc;
+  padding-left: 1.25em;
+}
+.rc-prose ol {
+  list-style: decimal;
+  padding-left: 1.25em;
+}
+.rc-prose code {
+  font-family: var(--rc-font-mono);
+  font-size: 0.92em;
+  background: var(--rc-panel-2);
+  border: 1px solid var(--rc-line);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.rc-prose pre {
+  font-family: var(--rc-font-mono);
+  font-size: 12px;
+  background: var(--rc-panel-2);
+  border: 1px solid var(--rc-line);
+  border-radius: 3px;
+  padding: 8px 10px;
+  overflow-x: auto;
+}
+.rc-prose pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+}

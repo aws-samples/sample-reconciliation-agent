@@ -1,43 +1,19 @@
 import { NextResponse } from "next/server";
-import {
-  S3Client,
-  GetObjectCommand,
-  ListObjectsV2Command,
-  PutObjectCommand,
-} from "@aws-sdk/client-s3";
-import { parseSkill, validateSkill } from "@/lib/skillFrontmatter";
+import { validateSkill } from "@/lib/skillFrontmatter";
+import { reconSkillsStore } from "@/lib/reconSkills";
 
 // Same-origin BFF for the skills catalog. Skills are live SKILL.md objects under
 // s3://<assets>/skills/ — GET lists+parses them (metadata catalog); PUT creates a new skill.
 // The agent reads the same prefix at runtime, so edits apply without a redeploy.
+//
+// No authorization runs here: the proxy's recon access group is the gate, as it always has been
+// (docs/shared-spine-proposal.md §8a, option 1). The S3 calls are the shared store, bound to recon's
+// bucket and behaviour in lib/reconSkills.ts.
 export const runtime = "nodejs";
-
-const REGION = process.env.AWS_REGION ?? "us-east-1";
-const ASSETS_BUCKET = process.env.ASSETS_BUCKET ?? "recon-dev-assets";
-const PREFIX = process.env.SKILLS_PREFIX ?? "skills/";
-
-function s3() {
-  return new S3Client({ region: REGION });
-}
 
 export async function GET() {
   try {
-    const client = s3();
-    const listed = await client.send(
-      new ListObjectsV2Command({ Bucket: ASSETS_BUCKET, Prefix: PREFIX }),
-    );
-    const catalog = [];
-    for (const obj of listed.Contents ?? []) {
-      if (!obj.Key?.endsWith(".md")) continue;
-      const got = await client.send(
-        new GetObjectCommand({ Bucket: ASSETS_BUCKET, Key: obj.Key }),
-      );
-      const { body: _body, ...meta } = parseSkill(
-        (await got.Body?.transformToString()) ?? "",
-      );
-      catalog.push(meta);
-    }
-    return NextResponse.json(catalog);
+    return NextResponse.json(await reconSkillsStore().listSkills());
   } catch (err) {
     return NextResponse.json(
       { error: `skills list failed: ${(err as Error).message}` },
@@ -46,7 +22,8 @@ export async function GET() {
   }
 }
 
-// Create a new skill: body { name, content }. Validates frontmatter before writing.
+// Create a new skill: body { name, content }. Validates frontmatter before writing. A skill that
+// already exists is replaced — the collection PUT is create-or-replace, not create-only.
 export async function PUT(req: Request) {
   const { name, content } = (await req.json().catch(() => ({}))) as {
     name?: string;
@@ -61,14 +38,8 @@ export async function PUT(req: Request) {
   const invalid = validateSkill(content, name);
   if (invalid) return NextResponse.json({ error: invalid }, { status: 400 });
   try {
-    await s3().send(
-      new PutObjectCommand({
-        Bucket: ASSETS_BUCKET,
-        Key: `${PREFIX}${name}/SKILL.md`, // directory-per-skill layout (harness-compatible)
-        Body: content,
-        ContentType: "text/markdown",
-      }),
-    );
+    // directory-per-skill layout (harness-compatible): <prefix><name>/SKILL.md
+    await reconSkillsStore().createSkill(name, content);
     return NextResponse.json({ name });
   } catch (err) {
     return NextResponse.json(

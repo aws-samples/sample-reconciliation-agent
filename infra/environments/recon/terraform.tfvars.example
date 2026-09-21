@@ -54,12 +54,58 @@ otel_layer_account = "<12-digit-account-id>"
 # entra_client_id   = ""
 # entra_client_secret = ""   # plaintext in terraform.tfvars is OK: that file is gitignored, never committed
 
-# Okta frontend login — switches the UI from the default 'entra' provider to Okta OIDC.
-# Browser PKCE redirect flow: only issuer + client id are needed (no client secret).
-# okta_issuer is the auth-server base URL (e.g. https://<org>.okta.com/oauth2/default),
-# NOT the .well-known metadata URL. The Okta app must be SPA/PKCE-enabled and allowlist
-# https://<frontend-domain>/login/callback as a sign-in redirect URI. Changing these
-# requires a frontend image rebuild (values are baked in as NEXT_PUBLIC_* build args).
+# =====================================================================================
+# WHO SIGNS IN — auth_provider: "cognito" (the DEFAULT), "okta" or "entra".
+#
+# "cognito" means this stack creates the console's identity provider itself
+# (infra/modules/console-auth): a user pool with admin-created users only, its hosted UI, one public
+# PKCE app client, and the five console groups. Nothing external is needed, which is what makes this
+# sample deployable and demonstrable in any AWS account. The SAME pool then issues the tokens the
+# intake HTTP API's JWT authorizer validates, so there is exactly one identity provider in the
+# deployment -- unlike the pool that used to exist here purely to be that authorizer's issuer while
+# the console signed in somewhere else.
+#
+# REQUIRED for "cognito", with no default: the hosted-UI domain prefix is globally unique across all
+# AWS accounts, so it cannot be derived from name_prefix without colliding with the next person who
+# deploys this sample. Add some entropy. It may not contain "aws", "amazon" or "cognito".
+cognito_hosted_ui_prefix = "recon-dev-login-<add-entropy>"
+
+# After the first apply: the pool has NO users (self sign-up is disabled on purpose), so nobody can
+# sign in until you create one. `terraform output cognito_first_user_commands` prints the exact
+# admin-create-user and admin-add-user-to-group calls, and post_deploy_checklist repeats the point.
+#
+# Optional Cognito settings, with their defaults:
+# cognito_mfa_configuration   = "OPTIONAL"   # "ON" requires TOTP for everyone -- set it for anything real
+# cognito_deletion_protection = "INACTIVE"   # "ACTIVE" for a pool whose user list and `sub` values matter
+# cognito_local_dev_callbacks = true         # register http://localhost:3000 so `npm run dev` can sign in
+# cognito_local_dev_port      = 3000
+# Pin the callback instead of letting the browser derive it from its origin. Only needed when the
+# console is reachable on more than one host (a custom domain AS WELL AS the CloudFront domain).
+# Must end in /callback -- NOT /login/callback, which is the Okta flow's path.
+# cognito_redirect_uri        = "https://<frontend-domain>/callback"
+# Further URLs to register on the app client (a custom domain, a second environment):
+# cognito_extra_callback_urls = ["https://console.example.com/callback"]
+# cognito_extra_logout_urls   = ["https://console.example.com"]
+# FEDERATING AN ENTERPRISE IdP into the pool -- the arrangement AWS documents, and the reason
+# "cognito" is not a step down from "okta"/"entra": add an aws_cognito_identity_provider (SAML or
+# OIDC) to the pool and name it here ALONGSIDE "COGNITO". The console keeps validating one issuer --
+# this pool -- and the enterprise directory becomes an upstream of it. Dropping "COGNITO" from the
+# list disables local pool users entirely.
+# cognito_supported_identity_providers = ["COGNITO", "MyCorpSAML"]
+# The end-of-apply patch that registers THIS deployment's CloudFront callback and sign-out URLs on
+# the app client. On by default, because the CloudFront domain does not exist when the client is
+# created. Set it false to keep the deploy-time actor out of Cognito -- then register the two URLs
+# post_deploy_checklist prints by hand, or sign-in from the deployed host fails with
+# redirect_mismatch.
+# enable_cognito_callback_patch = true
+
+# Okta frontend login — switches the UI from Cognito to an EXTERNAL Okta OIDC tenant, which then
+# needs to exist before anything works. Browser PKCE redirect flow: only issuer + client id are
+# needed (no client secret). okta_issuer is the auth-server base URL
+# (e.g. https://<org>.okta.com/oauth2/default), NOT the .well-known metadata URL. The Okta app must
+# be SPA/PKCE-enabled and allowlist https://<frontend-domain>/login/callback as a sign-in redirect
+# URI. Changing these requires a frontend image rebuild (values are baked in as NEXT_PUBLIC_* build
+# args). Setting auth_provider = "okta" creates no user pool at all.
 # auth_provider  = "okta"
 # okta_issuer    = ""
 # okta_client_id = ""
@@ -70,12 +116,73 @@ otel_layer_account = "<12-digit-account-id>"
 # okta_redirect_uri = "https://<frontend-domain>/login/callback"
 
 # WHO MAY CHANGE CONFIGURATION — the auto-resolve threshold, the agent backend, the Tier-1 switch and
-# the list of addresses the platform may email. Nothing here creates the group: this deployment has no
-# AWS identity provider, so membership arrives as a claim from Okta or Entra and an operator maintains it
-# there. Empty (the default) means NOBODY: every configuration route answers 403. That is a visible,
-# one-variable-fixable state rather than a silently open one, so leave it empty until the group exists.
+# the list of addresses the platform may email.
+#
+# WHAT AN EMPTY VALUE MEANS DEPENDS ON auth_provider:
+#   * cognito -- the pool CREATES this group, so empty means "use the pool's own name for it"
+#     ("recon-admins" here, and the four below). It still fails closed in the way that matters: the
+#     group is created EMPTY, so nobody administers anything until you add a user to it. Set a value
+#     only to rename the group.
+#   * okta / entra -- nothing here can create a group; membership arrives as a claim from a tenant
+#     Terraform cannot see. Empty means NOBODY: every configuration route answers 403. That is a
+#     visible, one-variable-fixable state rather than a silently open one, so leave it empty until the
+#     group exists in the tenant.
 # recon_admin_group = "recon-admins"
-# auth_groups_claim = "groups" # Okta: groups. Entra: groups or roles, depending on the app manifest.
+#
+# THE CLAIM the group names arrive in. The default is BLANK, and blank resolves PER PROVIDER:
+# `cognito:groups` for a Cognito deployment (a reserved claim name the service will not let you
+# rename), `groups` for Okta and Entra. Leave it blank unless one of these applies:
+#   * an Entra app registration that releases app roles rather than groups -> "roles";
+#   * a FEDERATED pool whose SAML/OIDC provider maps the enterprise groups onto a custom claim ->
+#     "custom:groups" (a mapped attribute cannot be called `cognito:groups`).
+# ⚠️ Do NOT set "groups" on a Cognito deployment. Nothing maps `cognito:groups` onto that name, so
+# every token still VERIFIES and every group list comes back empty -- which denies every user every
+# app and every admin route, with nothing anywhere saying why.
+# auth_groups_claim = ""
+
+# WHO MAY USE EACH APP. The console hosts two apps behind an app rail -- Trade Reconciliation and Deal
+# Pipeline -- and the proxy checks the caller's group claim against the app a route belongs to. Same
+# rules as recon_admin_group: an IdP group, never created here. In a RECON-ONLY deployment
+# (enable_deal_pipeline = false) an access group left EMPTY keeps that app OPEN to every authenticated
+# user, which is what this deployment had before the rail, so an upgrade changes nobody's access.
+# With enable_deal_pipeline = true BOTH access groups are REQUIRED -- the plan refuses a blank one,
+# and the console fails closed on a blank group at runtime -- because two populations then sign in
+# through one OIDC client and several recon write routes are gated by the access check alone.
+# Members of an app's admin group have access implicitly. The pipeline admin group fails CLOSED like
+# recon_admin_group: empty means nobody can approve deals, edit skills, decide proposals or change
+# the pipeline's model.
+# recon_access_group    = "recon-users"
+# pipeline_access_group = "deal-desk"
+# pipeline_admin_group  = "deal-desk-admins"
+
+# CONSOLE-WIDE SETTINGS. The groups above are ALSO seeded into SSM under /<name_prefix>/console, where
+# members of console_admin_group change them from the console's Settings screen at runtime; a stored
+# value outranks the environment, and an apply never reverts it (the module ignores value changes).
+# A blank seed creates no parameter -- the UI creates one on first save -- and a seed given a value
+# AFTER the UI created its parameter fails with ParameterAlreadyExists rather than overwriting the
+# operator's value (import it, or leave the seed blank). console_admin_group is environment-only by
+# design (no stored value can grant it) and fails CLOSED like the admin groups above: empty means
+# nobody can edit console settings, and the Settings screens render read-only until it is set. The
+# label is what the rail shows under the console mark until an operator stores a different one.
+# console_admin_group        = "console-admins"
+# console_organization_label = "Agentic Operations Console"
+
+# DEAL-PIPELINE APP. Off by default; true composes infra/modules/deal-pipeline into this root under
+# the "<name_prefix>-pipeline" prefix (its bucket, tables and parameter read as this environment's,
+# beside the recon ones) and wires the console to it. REQUIRES recon_access_group and
+# pipeline_access_group above. The agent model seeds the pipeline's Config-tab parameter and is also
+# what the assistant chat invokes; the memory model is pinned separately so a Config-tab switch
+# cannot change how memories are extracted.
+# enable_deal_pipeline     = true
+# pipeline_agent_model_id  = "us.anthropic.claude-sonnet-5"
+# pipeline_memory_model_id = "us.anthropic.claude-sonnet-5"
+# The pipeline's seed push (aws_lambda_invocation.pipeline_seed_push): repo edits to its skills and
+# parser prompt reach S3 on apply the way recon's do, without `terraform taint`. OFF by default because
+# its FIRST run against a pipeline whose skills or prompt were edited in the UI before the push existed
+# fails the apply as AMBIGUOUS (no marker yet, live differs from repo). Adopt those keys first --
+# `terraform output -raw pipeline_seed_push_command` prints the by-hand run; repeat until it exits 0
+# -- then set this true. A fresh deployment can set it true from the start.
+# enable_pipeline_seed_push = true
 
 # REQUIRED. The shared mailbox every Graph message is sent FROM and read through. variables.tf
 # declares no default on purpose — a mailbox address identifies a real tenant, so it belongs here
@@ -148,4 +255,32 @@ interceptor_mode = "enforce"
 # Read assets/private-vpc-deployment.md before enabling.
 # private_vpc           = true
 # private_ingress_cidrs = ["10.0.0.0/8"]
+
+# =====================================================================================
+# TIER FLAGS — the cheap development profile.
+#
+# All five default to true, so leaving them out deploys exactly what this file deployed before they
+# existed. Turning them off applies the parts needed to exercise both console apps against REAL AWS
+# from a laptop, without the parts that cost money every hour or add half an hour to a first apply.
+# variables.tf documents precisely what each one gates and what stops working; post_deploy_checklist
+# repeats the consequence of every flag that is off, because each of them fails SILENTLY in the UI.
+#
+# A DATA-PLANE-ONLY PROFILE. Apply this, then:
+#   terraform output -raw frontend_env_local > ../../../chatbot-app/frontend/.env.local
+#   (cd ../../../chatbot-app/frontend && npm run dev)
+# enable_frontend_tier      = false   # no Fargate service, ALB, CloudFront or WAF; no container build
+# enable_private_networking = false   # no NAT gateway; Lambdas + the runtime are not VPC-attached
+# enable_knowledge_base_corpus = false # no corpus upload and no ingestion poll; the KB stays empty
+# enable_agent_evals        = false   # no judge-model spend per session; the Evals tab is empty
+# enable_observability      = false   # no runtime spans or OTEL logs delivered to CloudWatch
+#
+# STILL CREATED by that profile, because a developer needs it: the Cognito pool, every DynamoDB table
+# and S3 bucket, the SSM parameter layers, the shared Lambda zip and all the Lambdas, the intake HTTP
+# API, the deal-pipeline app's resources when enable_deal_pipeline is set -- AND the recon agent tier
+# (the AgentCore Runtime container image build, the managed harness, the tools gateway and its
+# targets, Tier-1 and Tier-2). The agent is what turns an intaken item into a case, so a console
+# without it has an empty queue; it is deliberately not behind a flag, and its CodeBuild image build
+# means even the minimal apply is not a fast one.
+#
+# private_vpc = true REQUIRES enable_private_networking = true; the plan refuses the combination.
 
