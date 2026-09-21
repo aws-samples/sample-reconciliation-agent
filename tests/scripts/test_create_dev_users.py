@@ -28,7 +28,6 @@ from scripts.create_dev_users import (
     MIN_PASSWORD_LENGTH,
     ROLES,
     delete_user,
-    generate_password,
     main,
     parse_group_override,
     password_complaint,
@@ -41,6 +40,7 @@ from scripts.create_dev_users import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONSOLE_AUTH_VARIABLES = REPO_ROOT / "infra" / "modules" / "console-auth" / "variables.tf"
+CONSOLE_AUTH_MAIN = REPO_ROOT / "infra" / "modules" / "console-auth" / "main.tf"
 
 POOL_ID = "us-east-1_EXAMPLE1"
 # The names the pool creates by default, as the script resolves them.
@@ -574,19 +574,23 @@ def test_a_password_that_fails_the_pools_policy_is_refused_locally_with_the_rule
     assert password_complaint("Aa1!Aa1!Aa1!") is None
 
 
-def test_a_generated_password_always_satisfies_the_policy():
-    """Built class by class rather than drawn at random, so it cannot fail by chance — a failure
-    would arrive as InvalidPasswordException part-way through creating five accounts.
+def test_the_length_checked_locally_is_the_length_the_pool_enforces():
+    """A drifted copy would refuse a password the pool accepts, or pass one it rejects — and the
+    rejection would arrive as InvalidPasswordException part-way through creating five accounts.
     """
-    for _ in range(200):
-        password = generate_password()
-        assert len(password) >= MIN_PASSWORD_LENGTH
-        assert password_complaint(password) is None
-    assert generate_password() != generate_password()
+    match = re.search(r"minimum_length\s*=\s*(\d+)", CONSOLE_AUTH_MAIN.read_text())
+    assert match, f"no password_policy minimum_length found in {CONSOLE_AUTH_MAIN}"
+    assert MIN_PASSWORD_LENGTH == int(match.group(1))
 
 
-def test_a_short_length_request_is_raised_to_the_policy_minimum():
-    assert len(generate_password(length=4)) == MIN_PASSWORD_LENGTH
+def test_the_script_offers_no_way_to_generate_a_password():
+    """Removed deliberately (CodeQL py/clear-text-logging-sensitive-data): a generated password is
+    only usable if it is echoed back, and stdout is scrollback, a redirect, and a CI log.
+    """
+    source = (REPO_ROOT / "scripts" / "create_dev_users.py").read_text()
+    assert "generate_password" not in source
+    assert "generate-password" not in source
+    assert "{temporary_password}" not in source
 
 
 def test_the_prompt_asks_twice_and_refuses_a_mismatch():
@@ -689,10 +693,13 @@ def test_every_group_named_on_the_command_line_skips_terraform_entirely(monkeypa
     assert main(argv) == 0
 
 
-def test_generate_password_prints_the_password_once_and_writes_no_file(
+def test_the_typed_password_reaches_the_pool_and_no_output_stream_or_file(
     monkeypatch, capsys, tmp_path
 ):
-    """The printed value is the ONLY copy. A file would be the copy that outlives the demo."""
+    """The operator's copy is the one they typed. It must reach Cognito and go nowhere else — not
+    stdout, not stderr, and not a file that outlives the demo.
+    """
+    typed = "Aa1!Aa1!Aa1!"
     client = FakeCognito()
     monkeypatch.setattr(
         "scripts.create_dev_users.terraform_outputs", lambda **_kw: _outputs(groups=GROUPS)
@@ -700,12 +707,13 @@ def test_generate_password_prints_the_password_once_and_writes_no_file(
     monkeypatch.setattr(
         "scripts.create_dev_users.boto3.Session", lambda **_kw: _FakeSession(client)
     )
+    monkeypatch.setattr("scripts.create_dev_users.prompt_password", lambda **_kw: typed)
     monkeypatch.chdir(tmp_path)
-    assert main(["--generate-password"]) == 0
-    out = capsys.readouterr().out
-    printed = client.created[0]["TemporaryPassword"]
-    assert password_complaint(printed) is None
-    assert out.count(printed) == 1
+    assert main([]) == 0
+    captured = capsys.readouterr()
+    assert [user["TemporaryPassword"] for user in client.created] == [typed] * len(DEV_USERS)
+    assert typed not in captured.out
+    assert typed not in captured.err
     assert list(tmp_path.iterdir()) == []
 
 

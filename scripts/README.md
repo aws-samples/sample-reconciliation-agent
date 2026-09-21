@@ -54,8 +54,7 @@ that gap, and they are for different people:
 ```bash
 AWS_PROFILE=<profile> python3 scripts/create_dev_users.py --dry-run           # read the pool, write nothing
 AWS_PROFILE=<profile> python3 scripts/create_dev_users.py                     # prompts for the password
-AWS_PROFILE=<profile> python3 scripts/create_dev_users.py --generate-password  # prints one instead
-AWS_PROFILE=<profile> python3 scripts/create_dev_users.py --delete --dry-run   # then --delete
+AWS_PROFILE=<profile> python3 scripts/create_dev_users.py --delete --dry-run  # then --delete
 ```
 
 With no `--user-pool-id` it reads `cognito_user_pool_id` and `cognito_group_names` from
@@ -79,10 +78,12 @@ Four things about it are decisions rather than details:
   `cognito_first_user_commands`, which takes the address as an argument for exactly that reason.
 - **No invite is sent** (`MessageAction="SUPPRESS"`). The mail would carry the temporary password to
   five undeliverable addresses, and Cognito's own sender is capped at 50 messages a day per account.
-  The password is therefore **printed** and that is the only copy — never a file, never a default,
-  never a literal in this repo. `--generate-password` generates one that satisfies the pool's policy
-  (12 characters, all four classes); otherwise the script prompts for one without echo. Every account
-  lands in `FORCE_CHANGE_PASSWORD` and sets its own password at first sign-in.
+  The operator therefore **supplies** the password: the script prompts for it twice without echo,
+  checks it against the pool's policy (12 characters, all four classes) before making any API call,
+  and then never writes it anywhere — not stdout, not a file, not a default, not a literal in this
+  repo. There is deliberately no flag that generates one, because a generated password is only usable
+  if it is echoed back, and a secret on stdout is a secret in scrollback, in a redirect, and in a CI
+  log. Every account lands in `FORCE_CHANGE_PASSWORD` and sets its own password at first sign-in.
 - **Re-running is free.** It reads each account's real state and plans from that, so a second run
   reports five `UNCHANGED` and makes no write at all — which is what makes it the recovery from a
   partial failure. A group added outside the script is left alone unless `--prune-groups` says

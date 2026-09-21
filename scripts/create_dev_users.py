@@ -33,14 +33,16 @@ real.
 NO EMAIL IS SENT (`MessageAction="SUPPRESS"`). The invite mail would carry the temporary password to
 five undeliverable addresses, and Cognito's own sender is capped at 50 messages a day per account, so
 a suppressed invite is both the only thing that can work and the only thing that does not spend the
-quota. The password is therefore PRINTED, once, by this script -- it is the only copy.
+quota. The operator supplies the temporary password instead, and so already has it.
 
-THE TEMPORARY PASSWORD is prompted for (no echo, so it stays out of shell history) or generated with
-`--generate-password`. It is never written to a file, never a default, and never embedded in this
-repo. One password serves every account this run creates: all five belong to the same operator
-demonstrating one deployment, every one of them lands in `FORCE_CHANGE_PASSWORD` and gets its own
-password at first sign-in, and the alternative -- five different passwords printed as a table -- is
-the shape that gets pasted into a scratch file to keep track of.
+THE TEMPORARY PASSWORD is prompted for, twice, without echo -- so it stays out of shell history --
+and this script never prints it, writes it to a file, defaults it, or embeds it in this repo. There is
+deliberately no flag that generates one: a generated password would have to be echoed back to be
+usable at all, and a secret on stdout is a secret in terminal scrollback, in a `tee`, and in a CI log.
+One password serves every account a run creates: all five belong to the same operator demonstrating
+one deployment, every one of them lands in `FORCE_CHANGE_PASSWORD` and gets its own password at first
+sign-in, and the alternative -- five passwords to keep track of -- is the shape that gets pasted into
+a scratch file.
 
 IDEMPOTENT. A second run reports every account as present and adds nothing; `plan_user` is what
 decides that, and it decides it from the pool's own answer rather than from a marker this script
@@ -50,11 +52,8 @@ given: the script's job is to make the demo work, not to own who is in the pool.
     # See what it would do, resolving the pool and the group names from Terraform's state.
     python3 scripts/create_dev_users.py --dry-run --profile <profile>
 
-    # Create them, prompting for the temporary password.
+    # Create them, prompting (twice, without echo) for the temporary password.
     python3 scripts/create_dev_users.py --profile <profile>
-
-    # Create them with a generated password, printed at the end and nowhere else.
-    python3 scripts/create_dev_users.py --generate-password --profile <profile>
 
     # Against a pool named explicitly, with one group renamed.
     python3 scripts/create_dev_users.py --user-pool-id us-east-1_EXAMPLE \\
@@ -70,8 +69,6 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
-import secrets
-import string
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -303,33 +300,12 @@ def password_complaint(password: str) -> str | None:
     return None
 
 
-def generate_password(*, length: int = 20) -> str:
-    """Generate a temporary password that satisfies the pool's policy.
-
-    Built from one character of each required class plus a random tail, then shuffled, so it cannot
-    fail the policy by chance -- a plain random draw over the full alphabet omits a class often enough
-    to matter at this length, and the failure would arrive from Cognito mid-run.
-
-    :param length: total length; at least :data:`MIN_PASSWORD_LENGTH`.
-    :returns: the generated password.
-    """
-    length = max(length, MIN_PASSWORD_LENGTH)
-    alphabet = string.ascii_letters + string.digits + SYMBOL_ALPHABET
-    chars = [
-        secrets.choice(string.ascii_lowercase),
-        secrets.choice(string.ascii_uppercase),
-        secrets.choice(string.digits),
-        secrets.choice(SYMBOL_ALPHABET),
-    ]
-    chars += [secrets.choice(alphabet) for _ in range(length - len(chars))]
-    # SystemRandom.shuffle, not random.shuffle: the guaranteed classes must not land in predictable
-    # positions.
-    secrets.SystemRandom().shuffle(chars)
-    return "".join(chars)
-
-
 def prompt_password(*, prompt: Any = getpass.getpass) -> str:
     """Ask for the temporary password twice, without echo, and validate it.
+
+    The only way this script obtains a password. There is deliberately no generator beside it: the
+    operator has to end up knowing the password, so a generated one would have to be written to
+    stdout, and that is a cleartext secret in scrollback, in a redirect, and in a CI log.
 
     :param prompt: the no-echo prompt to call (injected in tests).
     :returns: the confirmed password.
@@ -634,11 +610,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--profile", default=None, help="AWS profile to use")
     parser.add_argument("--region", default=None, help="AWS region the pool is in")
     parser.add_argument(
-        "--generate-password",
-        action="store_true",
-        help="generate the temporary password instead of prompting, and print it once at the end",
-    )
-    parser.add_argument(
         "--prune-groups",
         action="store_true",
         help="also revoke memberships outside each account's roles; by default a group added outside "
@@ -692,14 +663,11 @@ def main(argv: list[str] | None = None) -> int:
 
     temporary_password = ""
     if not args.dry_run:
-        if args.generate_password:
-            temporary_password = generate_password()
-        else:
-            try:
-                temporary_password = prompt_password()
-            except ValueError as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                return 2
+        try:
+            temporary_password = prompt_password()
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     mode = "dry run (nothing will be created)" if args.dry_run else "CREATING"
     print(f"[dev-users] {mode} the 5 demonstration accounts in {user_pool_id}")
@@ -721,20 +689,12 @@ def main(argv: list[str] | None = None) -> int:
         print("\n[dev-users] nothing was created. Re-run without --dry-run.")
         return 0
 
-    if args.generate_password:
-        # The ONLY copy. Printed last so it is not scrolled away by the per-account lines, and never
-        # written anywhere: no file, no log, no environment variable.
-        print(
-            f"\n[dev-users] temporary password for every account created just now: {temporary_password}"
-        )
-        print(
-            "[dev-users] it is printed here and nowhere else. Each account must change it at first sign-in."
-        )
-    else:
-        print(
-            "\n[dev-users] every new account holds the temporary password you typed, and must "
-            "change it at first sign-in."
-        )
+    # The password is never echoed back -- the operator typed it, so the only copy is the one they
+    # already have, and nothing sensitive reaches stdout, a log, a file, or the environment.
+    print(
+        "\n[dev-users] every new account holds the temporary password you typed, and must "
+        "change it at first sign-in."
+    )
     print(
         "[dev-users] sign in at the hosted UI (`terraform output -raw cognito_hosted_ui_url`), or "
         "open the console and let it redirect you."

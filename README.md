@@ -454,7 +454,7 @@ cp backend.hcl.example backend.hcl && cp terraform.tfvars.example terraform.tfva
 ../../scripts/deploy-recon.sh plan && ../../scripts/deploy-recon.sh apply
 
 # 4  create the five demonstration operators in the pool the apply just made
-python3 ../../../scripts/create_dev_users.py --dry-run          # then --generate-password
+python3 ../../../scripts/create_dev_users.py --dry-run          # then without --dry-run
 
 # 5  give recon a queue: six items Tier-1 will decide six different ways
 python3 ../../../scripts/seed_recon_demo_items.py --dry-run     # then without --dry-run
@@ -611,7 +611,7 @@ terraform output cognito_hosted_ui_url         # the sign-in page, openable dire
 
 # or five fictional accounts that demonstrate the whole access model at once
 python3 ../../../scripts/create_dev_users.py --dry-run
-python3 ../../../scripts/create_dev_users.py --generate-password
+python3 ../../../scripts/create_dev_users.py          # prompts, twice, without echo
 ```
 
 Access comes from **group membership, not from the account existing**: the pool's five groups are
@@ -631,10 +631,11 @@ cannot:
 | `console-admin@example.com`  | console admin only    | The `/console/settings` screen and **neither app** — the state that proves the console-wide layer is separate from app access |
 | `no-access@example.com`      | none                  | What an authenticated stranger gets. Under Cognito this is the **default** state of every new account, because the pool creates its groups empty |
 
-One temporary password serves all five, prompted for without echo or generated with
-`--generate-password`, printed once and stored nowhere; every account lands in
-`FORCE_CHANGE_PASSWORD` and sets its own at first sign-in. No invite mail is sent
-(`MessageAction="SUPPRESS"`) — it would carry that password to five undeliverable addresses.
+One temporary password serves all five. The script prompts for it twice, without echo, and never
+echoes it back, writes it to a file, or defaults it — the operator typed it, so the only copy is
+already theirs. Every account lands in `FORCE_CHANGE_PASSWORD` and sets its own at first sign-in. No
+invite mail is sent (`MessageAction="SUPPRESS"`) — it would carry that password to five undeliverable
+addresses.
 
 The console's own callback and sign-out URLs are registered on the app client by the apply itself
 (`enable_cognito_callback_patch`), because Cognito matches a redirect URL exactly and the CloudFront
