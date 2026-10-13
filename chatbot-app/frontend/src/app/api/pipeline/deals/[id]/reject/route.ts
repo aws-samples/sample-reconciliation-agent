@@ -27,7 +27,7 @@ export async function POST(
   if (!reason) return jsonError(400, "reason is required");
 
   try {
-    const deal = await getDeal(id);
+    const deal = await getDeal(id, { consistent: true });
     if (!deal) return jsonError(404, `deal ${id} not found`);
     if (!isOpen(deal)) {
       return jsonError(409, `deal ${id} is ${deal.status} and cannot be rejected`);

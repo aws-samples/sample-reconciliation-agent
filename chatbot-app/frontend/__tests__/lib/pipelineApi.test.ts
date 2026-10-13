@@ -22,6 +22,7 @@ import {
   listProposals,
   readSseStream,
   streamChat,
+  updateDealFields,
 } from "@/lib/pipelineApi";
 import type { ChatStreamEvent } from "@/lib/pipeline/types";
 
@@ -76,6 +77,17 @@ describe("list routes", () => {
 });
 
 describe("single-record routes", () => {
+  it("PATCHes only the changed fields, with a reason for each", async () => {
+    authedFetch.mockResolvedValue(fakeResponse(200, { deal_id: "dl_1", status: "STAGED" }));
+    await updateDealFields("dl_1", { secured_level: "First Lien" }, { secured_level: "PF TLBs are First Lien" });
+    const [url, init, label] = authedFetch.mock.calls[0];
+    expect([url, init.method, label]).toEqual(["/api/pipeline/deals/dl_1", "PATCH", "PipelineAuth"]);
+    expect(JSON.parse(init.body)).toEqual({
+      fields: { secured_level: "First Lien" },
+      reasons: { secured_level: "PF TLBs are First Lien" },
+    });
+  });
+
   it("POSTs approve with no body and returns the updated deal", async () => {
     authedFetch.mockResolvedValue(fakeResponse(200, { deal_id: "dl_1", status: "UPLOAD_FAILED" }));
     const deal = await approveDeal("dl_1");

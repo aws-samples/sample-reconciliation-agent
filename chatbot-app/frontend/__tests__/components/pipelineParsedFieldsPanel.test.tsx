@@ -4,12 +4,16 @@
  * The confidence chips are the reviewer's scan path through seventy fields, so each band must render
  * as its own colour class and the excerpt behind a value must be one click away. The in-flight and
  * failed states are pinned too, because a PARSING email is the state the demo watches longest.
+ *
+ * Overrides: with an open deal the panel shows the deal's current values and offers an inline editor
+ * per row that will not save without a changed, valid value and a reason — the reason is what the
+ * parser learns from.
  */
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ParsedFieldsPanel } from "@/components/pipeline/ParsedFieldsPanel";
 import { emptyFields } from "@/lib/pipeline/omsSchema";
-import type { EmailRecord } from "@/lib/pipeline/types";
+import type { DealRecord, EmailRecord, FieldOverride } from "@/lib/pipeline/types";
 
 vi.mock("next/link", () => ({
   default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => (
@@ -74,6 +78,43 @@ function email(over: Partial<EmailRecord> = {}): EmailRecord {
   };
 }
 
+/** The deal the email's parse staged, with `fields` overridable per test. */
+function deal(over: Partial<DealRecord> = {}): DealRecord {
+  const parse = email().parse!;
+  return {
+    deal_id: "dl_1",
+    email_id: "em_1",
+    opportunity_name: parse.fields.opportunity_name,
+    status: "STAGED",
+    fields: { ...parse.fields },
+    original_fields: { ...parse.fields },
+    evidence: parse.evidence,
+    assumptions: parse.assumptions,
+    memory_hits: parse.memory_hits,
+    skills_used: parse.skills_used,
+    enrichment: parse.enrichment,
+    csv_key: "deal-csv/dl_1.csv",
+    upload: null,
+    history: [],
+    created_at: "2026-08-05T13:59:00Z",
+    updated_at: "2026-08-05T13:59:00Z",
+    ...over,
+  };
+}
+
+const agentOverride: FieldOverride = {
+  override_id: "ov_1",
+  field: "left_agent",
+  parsed_value: "Silverline Partners",
+  previous_value: "Silverline Partners",
+  value: "Silverline",
+  reason: "The desk books the bank's short name.",
+  actor: "reviewer@example.test",
+  at: "2026-08-05T14:10:00Z",
+  stage: "review",
+  memory: { status: "sent", event_id: "ev-1" },
+};
+
 describe("ParsedFieldsPanel", () => {
   it("renders one confidence chip per evidenced field, in its band", () => {
     render(<ParsedFieldsPanel email={email()} />);
@@ -134,5 +175,77 @@ describe("ParsedFieldsPanel", () => {
   it("names the failure on a PARSE_FAILED email", () => {
     render(<ParsedFieldsPanel email={email({ status: "PARSE_FAILED", parse: null, error: "model timed out" })} />);
     expect(screen.getByText(/Parse failed — model timed out/)).toBeTruthy();
+  });
+});
+
+describe("ParsedFieldsPanel overrides", () => {
+  const overridden = () =>
+    deal({ fields: { ...deal().fields, left_agent: "Silverline" }, overrides: [agentOverride] });
+
+  it("shows the deal's current value and the override that explains it", () => {
+    render(<ParsedFieldsPanel email={email()} deal={overridden()} onOverride={vi.fn()} />);
+    expect(document.querySelector('[data-field="left_agent"]')).toHaveTextContent("Silverline");
+    expect(document.querySelector('[data-field="left_agent"]')).not.toHaveTextContent("Partners");
+    const note = document.querySelector('[data-override="left_agent"]') as HTMLElement;
+    expect(note).toHaveTextContent("overridden");
+    expect(note).toHaveTextContent("reviewer@example.test");
+    expect(note).toHaveTextContent("The desk books the bank's short name.");
+    expect(note).toHaveTextContent("lesson sent to memory");
+  });
+
+  it("saves only a changed, valid value with a reason, then closes the editor", async () => {
+    const onOverride = vi.fn().mockResolvedValue(undefined);
+    render(<ParsedFieldsPanel email={email()} deal={deal()} onOverride={onOverride} />);
+    fireEvent.click(screen.getByRole("button", { name: "Override Left Agent" }));
+    const editor = screen.getByRole("group", { name: "Override Left Agent" });
+    const save = within(editor).getByRole("button", { name: "Save override" });
+    expect(within(editor).getByText("Silverline Partners")).toBeTruthy(); // the parsed value beside it
+    expect(save).toBeDisabled(); // nothing changed yet
+
+    fireEvent.change(within(editor).getByLabelText("Left Agent"), { target: { value: "Silverline" } });
+    expect(save).toBeDisabled(); // changed, but no reason
+    fireEvent.change(within(editor).getByLabelText("Reason for overriding Left Agent"), {
+      target: { value: "  The desk books the bank's short name.  " },
+    });
+    expect(save).toBeEnabled();
+
+    await act(async () => fireEvent.click(save));
+    expect(onOverride).toHaveBeenCalledWith("left_agent", "Silverline", "The desk books the bank's short name.");
+    expect(screen.queryByRole("group", { name: "Override Left Agent" })).toBeNull();
+  });
+
+  it("names a value the OMS would reject and will not save it", () => {
+    render(<ParsedFieldsPanel email={email()} deal={deal()} onOverride={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Override Issue Size (MM)" }));
+    const editor = screen.getByRole("group", { name: "Override Issue Size (MM)" });
+    fireEvent.change(within(editor).getByLabelText("Issue Size (MM)"), { target: { value: "1295" } });
+    fireEvent.change(within(editor).getByLabelText(/Reason for overriding/), { target: { value: "r" } });
+    expect(within(editor).getByRole("alert")).toHaveTextContent(/millions/);
+    expect(within(editor).getByRole("button", { name: "Save override" })).toBeDisabled();
+  });
+
+  it("keeps the editor open with the error when the save is refused", async () => {
+    const onOverride = vi.fn().mockRejectedValue(new Error("deal dl_1 changed while this edit was in flight"));
+    render(<ParsedFieldsPanel email={email()} deal={deal()} onOverride={onOverride} />);
+    fireEvent.click(screen.getByRole("button", { name: "Override Left Agent" }));
+    const editor = screen.getByRole("group", { name: "Override Left Agent" });
+    fireEvent.change(within(editor).getByLabelText("Left Agent"), { target: { value: "Silverline" } });
+    fireEvent.change(within(editor).getByLabelText(/Reason for overriding/), { target: { value: "r" } });
+    await act(async () => fireEvent.click(within(editor).getByRole("button", { name: "Save override" })));
+    expect(within(editor).getByRole("alert")).toHaveTextContent(/changed while this edit was in flight/);
+    expect(within(editor).getByRole("button", { name: "Save override" })).toBeEnabled();
+  });
+
+  it("is read-only, and says why, when the deal can no longer be edited", () => {
+    render(<ParsedFieldsPanel email={email()} deal={{ ...overridden(), status: "UPLOADED" }} />);
+    expect(screen.getByText(/Values are read-only: the deal is uploaded/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Override / })).toBeNull();
+    // The override still explains the value it set.
+    expect(document.querySelector('[data-override="left_agent"]')).toBeTruthy();
+  });
+
+  it("offers no editor without a deal", () => {
+    render(<ParsedFieldsPanel email={email()} />);
+    expect(screen.queryByRole("button", { name: /^Override / })).toBeNull();
   });
 });

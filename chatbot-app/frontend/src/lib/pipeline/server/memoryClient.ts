@@ -20,8 +20,16 @@
  * The ids are read at call time, as every pipeline environment value is.
  */
 
-import type { ChatMessage, MemoryRecord } from "@/lib/pipeline/types";
+import type {
+  ChatMessage,
+  EmailRecord,
+  FieldEvidence,
+  FieldOverride,
+  FieldValues,
+  MemoryRecord,
+} from "@/lib/pipeline/types";
 import type { MemoryStrategyResponse } from "@/lib/memoryStrategy";
+import { fieldDef } from "@/lib/pipeline/omsSchema";
 import {
   createMemoryClient,
   type BatchDeleteOutcome,
@@ -109,6 +117,100 @@ export function createRuleEvent(
     sessionId: memorySafeId(sessionId),
     role: "USER",
     text,
+  });
+}
+
+/**
+ * The deal attributes that most often decide how a field is booked — the triggers the `edge_cases`
+ * extraction looks for. Quoted with each override lesson so the extractor can write "when <trigger>,
+ * <field> is <value>" rather than a fact about one deal. A short list on purpose: the whole record is
+ * seventy columns, and most of them are noise to a rule.
+ */
+const LESSON_CONTEXT_FIELDS = [
+  "pipeline_type",
+  "security_type",
+  "uop",
+  "fixed_floating",
+  "is_secured",
+  "secured_level",
+  "currency",
+  "maturity_terms",
+  "sp_issue_rating",
+  "left_agent",
+] as const;
+
+/** Longest stretch of the parser's evidence quoted in a lesson; the extractor needs the gist. */
+const LESSON_EXCERPT_CHARS = 400;
+
+/** What an override lesson quotes besides the override itself. */
+export interface OverrideLessonContext {
+  /** The email the deal came from, when it could be read. */
+  email: Pick<EmailRecord, "source_kind" | "subject"> | null;
+  /** The deal's fields after the override. */
+  fields: FieldValues;
+  /** The parser's evidence for the overridden field, when it recorded any. */
+  evidence?: FieldEvidence;
+}
+
+/**
+ * The event text for one override: what the parser produced, what the reviewer changed it to, why,
+ * and the deal attributes a rule could hang on.
+ *
+ * Written as a desk correction because that is one of the inputs the extraction prompt is told to
+ * treat as a rule source. A reason that does not generalise ("the notice had a typo") yields no
+ * record, which is the extractor's job, not this one's.
+ */
+export function overrideLessonText(override: FieldOverride, context: OverrideLessonContext): string {
+  const label = (key: string) => fieldDef(key)?.label ?? key;
+  const show = (v: string) => (v ? `"${v}"` : "(blank)");
+  const lines = [
+    "Deal-desk override of a parsed OMS field.",
+    `Field: ${label(override.field)}`,
+    `Parser value: ${show(override.parsed_value)}`,
+  ];
+  if (override.previous_value !== override.parsed_value) {
+    lines.push(`Value before this override: ${show(override.previous_value)}`);
+  }
+  lines.push(`Corrected value: ${show(override.value)}`, `Reviewer's reason: ${override.reason}`);
+  if (override.stage === "break") {
+    const codes = override.upload_error_codes?.length
+      ? ` (codes: ${override.upload_error_codes.join(", ")})`
+      : "";
+    lines.push(`Made to fix an OMS upload rejection${codes}.`);
+  }
+  const excerpt = context.evidence?.excerpt?.trim();
+  if (excerpt) {
+    const cut = excerpt.length > LESSON_EXCERPT_CHARS ? `${excerpt.slice(0, LESSON_EXCERPT_CHARS)}…` : excerpt;
+    lines.push(`Email text the parser read: ${cut}`);
+  }
+  if (context.evidence?.rule) lines.push(`Rule the parser applied: ${context.evidence.rule}`);
+  const attrs = LESSON_CONTEXT_FIELDS.filter((k) => k !== override.field && context.fields[k])
+    .map((k) => `${label(k)} = ${context.fields[k]}`);
+  if (attrs.length) lines.push(`Deal attributes: ${attrs.join("; ")}`);
+  if (context.email) {
+    lines.push(`Source: ${context.email.source_kind} email, subject "${context.email.subject}"`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Send one override to the knowledge memory as a lesson.
+ *
+ * Same actor as every desk rule, so the record lands in the namespace the parser recalls from. One
+ * session per deal, so the overrides of one deal reach the extractor together.
+ *
+ * @returns the event id, or null when the knowledge memory is not configured.
+ */
+export function createOverrideEvent(
+  override: FieldOverride,
+  dealId: string,
+  context: OverrideLessonContext,
+): Promise<string | null> {
+  return knowledgeMemory().createEvent({
+    actorId: KNOWLEDGE_ACTOR_ID,
+    sessionId: memorySafeId(`override-${dealId}`),
+    role: "USER",
+    text: overrideLessonText(override, context),
   });
 }
 

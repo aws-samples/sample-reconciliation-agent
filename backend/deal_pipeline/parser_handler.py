@@ -148,6 +148,8 @@ def build_deal(
                 "detail": detail,
             }
         ],
+        # Reviewers' field overrides, appended by the BFF (design section 4); none at staging.
+        "overrides": [],
         "created_at": created_at,
         "updated_at": created_at,
     }

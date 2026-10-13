@@ -76,3 +76,8 @@ export function newDealId(now: Date = new Date()): string {
 export function newProposalId(now: Date = new Date()): string {
   return `sp_${ulid(now)}`;
 }
+
+/** Field override id: `ov_<ulid>`. */
+export function newOverrideId(now: Date = new Date()): string {
+  return `ov_${ulid(now)}`;
+}

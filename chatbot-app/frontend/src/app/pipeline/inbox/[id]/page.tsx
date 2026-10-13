@@ -2,8 +2,8 @@
 
 import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { getEmail, reparseEmail } from "@/lib/pipelineApi";
-import type { EmailRecord } from "@/lib/pipeline/types";
+import { getDeal, getEmail, reparseEmail, updateDealFields } from "@/lib/pipelineApi";
+import type { DealRecord, EmailRecord } from "@/lib/pipeline/types";
 import { EmailViewer } from "@/components/pipeline/EmailViewer";
 import { ParsedFieldsPanel } from "@/components/pipeline/ParsedFieldsPanel";
 import { Placeholder } from "@/components/app-ui/ui";
@@ -12,12 +12,21 @@ import { StatusPill } from "@/components/pipeline/ui";
 /** How often to re-read the record while the parser is still running on it. */
 const POLL_MS = 3000;
 
+/** Deal statuses a reviewer can still override values in; the rest are in flight or final. */
+function overridable(deal: DealRecord): boolean {
+  return deal.status === "STAGED" || deal.status === "UPLOAD_FAILED";
+}
+
 export default function EmailDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const [email, setEmail] = useState<EmailRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reparsing, setReparsing] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  // The deal the parse staged, so the panel shows current values and can override them. Keyed by
+  // its id: after a re-parse the email names a new deal, and the old one must not be shown as it.
+  const [deal, setDeal] = useState<DealRecord | null>(null);
+  const [dealError, setDealError] = useState<string | null>(null);
 
   const load = useCallback(
     () =>
@@ -43,6 +52,30 @@ export default function EmailDetailPage({ params }: { params: Promise<{ id: stri
     const timer = setInterval(() => void load(), POLL_MS);
     return () => clearInterval(timer);
   }, [polling, load]);
+
+  const dealId = email?.deal_id ?? null;
+  useEffect(() => {
+    if (!dealId) return;
+    let live = true;
+    getDeal(dealId)
+      .then((d) => {
+        if (!live) return;
+        setDeal(d);
+        setDealError(null);
+      })
+      .catch((e) => {
+        if (live) setDealError(String(e));
+      });
+    return () => {
+      live = false;
+    };
+  }, [dealId]);
+  const shownDeal = deal && deal.deal_id === dealId ? deal : null;
+
+  const override = async (key: string, value: string, reason: string) => {
+    if (!shownDeal) return;
+    setDeal(await updateDealFields(shownDeal.deal_id, { [key]: value }, { [key]: reason }));
+  };
 
   const reparse = async () => {
     setReparsing(true);
@@ -80,10 +113,22 @@ export default function EmailDetailPage({ params }: { params: Promise<{ id: stri
       {actionError && (
         <Placeholder kind="error">Re-parse failed — {actionError}</Placeholder>
       )}
+      {dealError && dealId && (
+        <Placeholder kind="error">
+          Could not load deal {dealId}, so values are shown as parsed and cannot be overridden —{" "}
+          {dealError}
+        </Placeholder>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-2">
         <EmailViewer email={email} />
-        <ParsedFieldsPanel email={email} onReparse={reparse} reparsing={reparsing} />
+        <ParsedFieldsPanel
+          email={email}
+          deal={shownDeal}
+          onOverride={shownDeal && overridable(shownDeal) ? override : undefined}
+          onReparse={reparse}
+          reparsing={reparsing}
+        />
       </div>
     </div>
   );

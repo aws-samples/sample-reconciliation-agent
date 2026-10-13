@@ -93,6 +93,43 @@ export interface DealHistoryEntry {
   detail?: string;
 }
 
+/**
+ * Where an override was made: reviewing a freshly staged deal, or fixing a deal the OMS rejected
+ * (a "break"). The break case carries the rejection codes that named the field, so the lesson the
+ * memory extracts can say which OMS rule the correction satisfies.
+ */
+export type OverrideStage = "review" | "break";
+
+/**
+ * Whether an override reached the knowledge memory as a lesson.
+ *
+ * `pending` between the deal write and the memory write (and left there only if recording the
+ * outcome lost a race); `off` when no knowledge memory is deployed.
+ */
+export interface OverrideMemory {
+  status: "pending" | "sent" | "failed" | "off";
+  event_id?: string;
+  error?: string;
+}
+
+/** One reviewer's change to one field, with the reason they gave (design §4). Append-only. */
+export interface FieldOverride {
+  override_id: string;
+  field: string;
+  /** The parser's value (`original_fields`), for the lesson and the "as parsed" view. */
+  parsed_value: string;
+  /** The value this override replaced — the parser's, or an earlier override's. */
+  previous_value: string;
+  value: string;
+  reason: string;
+  actor: string;
+  at: string;
+  stage: OverrideStage;
+  /** Break stage only: codes of the last rejected upload that named this field. */
+  upload_error_codes?: string[];
+  memory: OverrideMemory;
+}
+
 export interface DealRecord {
   deal_id: string;
   email_id: string;
@@ -108,6 +145,8 @@ export interface DealRecord {
   csv_key: string;
   upload: UploadResult | null;
   history: DealHistoryEntry[];
+  /** Absent on deals staged before overrides existed; read it through `overridesOf`. */
+  overrides?: FieldOverride[];
   created_at: string;
   updated_at: string;
 }

@@ -125,7 +125,26 @@ evidence, assumptions, memory_hits, skills_used, enrichment   copied from ParseO
 csv_key         string   "deal-csv/<deal_id>.csv"
 upload          UploadResult | null
 history         { at, actor, action, detail? }[]   STAGED / EDITED / APPROVED / UPLOAD_ACCEPTED / UPLOAD_REJECTED / REJECTED
+overrides       FieldOverride[]   append-only; [] at staging (absent on older rows)
 created_at, updated_at
+```
+
+### FieldOverride
+
+One reviewer's change to one field, with the reason they gave. The latest override of a field
+explains its current value; earlier ones stay as that field's audit trail.
+
+```
+override_id     string   "ov_<ulid>"
+field           string   OMS field key
+parsed_value    string   original_fields[field]
+previous_value  string   the value this override replaced (the parser's, or an earlier override's)
+value           string   the new value
+reason          string   required, ≤ 2000 chars
+actor, at       string   verified caller, ISO-8601
+stage           "review" | "break"   break = made while the deal was UPLOAD_FAILED
+upload_error_codes? string[]   break only: codes of the last rejected upload naming this field
+memory          { status: "pending" | "sent" | "failed" | "off", event_id?, error? }
 ```
 
 ### UploadResult
@@ -228,9 +247,12 @@ Stream protocol (`text/event-stream`, one JSON object per `data:` line):
 - `deal_pipeline_dev_knowledge`: strategy `edge_cases`, type CUSTOM, `SEMANTIC_OVERRIDE`
   extraction prompt tuned to extract *reusable deal-parsing rules* and return an empty list for
   chatter. Namespace `deal-pipeline/edge-cases/{actorId}`; the desk uses actorId `deal-desk`.
-  Written by the assistant's `save_memory` tool and by the Memory Manager's manual add. Read by
-  the parser (`retrieve_memory_records`, query = subject + first 600 chars, top 6) and by the
-  Memory Manager panel.
+  Written by the assistant's `save_memory` tool, by the Memory Manager's manual add, and by every
+  field override (one USER event per override, sessionId `override-<deal_id>`, quoting the parser's
+  value, the correction, the reason, the parser's evidence and a few classifying deal attributes so
+  the extractor can find a trigger). Read by the parser (`retrieve_memory_records`, query = subject
+  + first 600 chars, top 6) and by the Memory Manager panel. A reason that does not generalise
+  yields no record; that filtering is the extraction prompt's job.
 - `deal_pipeline_dev_chat`: events only, 7-day expiry. actorId = user subject, sessionId =
   chat session. The assistant rebuilds history from `list_events` on load.
 
@@ -248,10 +270,10 @@ this app has no `/me` route of its own.
 | `/emails/[id]` | GET | email incl. parse |
 | `/emails/[id]/reparse` | POST | status → PARSING, re-invoke; 409 while a parser run is already in flight (the PARSING write is conditional, so two concurrent reparses start one run) |
 | `/deals` | GET | list (newest first) |
-| `/deals/[id]` | GET, PATCH | PATCH `{fields}` → validate types client-side, store, regenerate CSV, history EDITED; **admin-gated**; 409 when the status changed between read and write |
+| `/deals/[id]` | GET, PATCH | PATCH `{fields, reasons}` → a reason is required for every field whose value changes; only the changed values are validated (the OMS checks the rest on upload); regenerate CSV, one `FieldOverride` per changed field, history EDITED quoting each change and reason, then one memory lesson per override and its outcome recorded on the override; open to every user with access; 409 when the deal changed (status or `updated_at`) between read and write |
 | `/deals/[id]/csv` | GET | text/csv download |
-| `/deals/[id]/approve` | POST | status APPROVED → invoke OMS Lambda sync → UPLOADED / UPLOAD_FAILED; **admin-gated**; the APPROVED write is conditional on the status read (409 on conflict, Lambda not invoked); the post-upload reload is a strongly consistent read |
-| `/deals/[id]/reject` | POST | `{reason}`; **admin-gated**; conditional on the status read (409 on conflict) |
+| `/deals/[id]/approve` | POST | status APPROVED → invoke OMS Lambda sync → UPLOADED / UPLOAD_FAILED; **admin-gated**; the APPROVED write is conditional on the status and `updated_at` read (409 on conflict, Lambda not invoked); both reads are strongly consistent |
+| `/deals/[id]/reject` | POST | `{reason}`; **admin-gated**; conditional on the status and `updated_at` read (409 on conflict) |
 | `/chat` | POST | SSE stream (§7); body `{session_id, message, context?:{deal_id?, email_id?}}`; open to all, but `save_memory` / `delete_memory` are offered to the model and executed only for admin-group callers (same gate as `/memory` POST/DELETE) |
 | `/chat/history` | GET | `?session_id=` → messages from chat memory |
 | `/memory` | GET, POST, DELETE | records / manual add `{rule}` / `{ids}`; POST and DELETE **admin-gated** |
@@ -273,12 +295,15 @@ decides who may call any of these routes at all — unset, every authenticated u
 supplied by the console's stored layer (§14), which overlays the same environment names before
 `resolveAppAccess` reads them; nothing in this app's BFF reads that layer directly, and the
 console's own `/api/console/*` routes sit outside this prefix and belong to the shell.
-`PIPELINE_ADMIN_GROUP` gates every route that changes what the next parse does or what reaches
-the OMS: approve/reject, field edits (PATCH `/deals/[id]`), skill and parser-prompt writes,
-proposal decisions, memory add and delete (the REST routes and the assistant's `save_memory` /
-`delete_memory` tools alike), config PUT; admins implicitly have access. Reading, chatting,
-simulating an email, reparsing and proposing a skill change stay open to every user with access —
-none of them changes the OMS or the parser without an admin's decision.
+`PIPELINE_ADMIN_GROUP` gates every route that changes what reaches the OMS or rewrites what the
+parser is taught wholesale: approve/reject, skill and parser-prompt writes, proposal decisions,
+memory add and delete (the REST routes and the assistant's `save_memory` / `delete_memory` tools
+alike), config PUT; admins implicitly have access. Reading, chatting, simulating an email,
+reparsing and proposing a skill change stay open to every user with access. So do field overrides
+(PATCH `/deals/[id]`): correcting the parser is the desk's daily work, nothing reaches the OMS
+until an admin approves, and every override carries its author and reason — but each one does
+send a lesson to the knowledge memory without review, so pruning a bad lesson is an admin's
+Memory Manager delete.
 
 ## 10. Frontend
 
@@ -294,7 +319,15 @@ carries the one console-aware control in this app: **Use console default** besid
 presets, which copies the console-wide default model id into this app's own parameter through the
 same admin-gated PUT (§14); every other setting on that screen is this app's own. This app's own
 primitives are `src/components/pipeline/ui.tsx` (its `StatusPill` and `ConfidenceChip`) and its panels
-(`EmailViewer.tsx`, `DealFieldGrid.tsx`, ...). The header chrome (`AppChrome`, `AppNav`, `UserMenu`),
+(`EmailViewer.tsx`, `DealFieldGrid.tsx`, ...).
+
+Field overrides have two entry points over the one PATCH. In `inbox/[id]` the parsed panel shows
+the staged deal's current values once the parse has staged one, and while that deal is STAGED or
+UPLOAD_FAILED each row has a ✎ that opens an inline editor (`OverrideEditor.tsx`) under the row:
+new value, parsed value, required reason. Inline rather than a modal so the email stays visible
+beside it. In `deals/[id]` the bulk **Edit fields** mode ends in a dialog asking one reason per
+changed field. Both show the latest override of each field under its value (`OverrideNote`): author,
+time, reason, and whether its lesson reached the memory. The header chrome (`AppChrome`, `AppNav`, `UserMenu`),
 the column-preferences `DataTable` and the generic primitives (Panel, Pill, Modal, Notice, buttons)
 are shared with the recon app in `src/components/app-ui/`; neither app imports the other. Theme CSS:
 `src/app/app-theme.css`, shared, `rc-` prefix, scoped to `.app-root`.
