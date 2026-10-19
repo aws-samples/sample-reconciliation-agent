@@ -4,7 +4,7 @@ boto3==1.43.89
 pydantic==2.13.4
 # Gateway tool transport (gateway_mcp: streamablehttp_client + ClientSession); anyio is
 # transitive to mcp but pinned for reproducibility.
-mcp==1.28.1
+mcp==1.30.0
 anyio==4.14.2
 # SKILL.md frontmatter parsing (skills_loader -> backend/recon_core/skill_meta.py). Arrives
 # transitively via strands-agents, but pinned explicitly: a transitive pin can move on an unrelated
