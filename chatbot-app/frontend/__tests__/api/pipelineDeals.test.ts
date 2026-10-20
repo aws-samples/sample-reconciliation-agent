@@ -75,7 +75,7 @@ function expectedStatuses(): string[] {
 }
 
 /** The CreateEvent inputs sent to the knowledge memory so far. */
-function lessons(): { actorId: string; sessionId: string; text: string }[] {
+function lessons(): { actorId: string; sessionId: string; text: string; metadata: unknown }[] {
   return agentcoreSend.mock.calls
     .map((c) => c[0])
     .filter((c) => c.__cmd === "CreateEvent")
@@ -83,6 +83,7 @@ function lessons(): { actorId: string; sessionId: string; text: string }[] {
       actorId: c.actorId,
       sessionId: c.sessionId,
       text: c.payload[0].conversational.content.text,
+      metadata: c.metadata,
     }));
 }
 
@@ -333,6 +334,13 @@ describe("PATCH /api/pipeline/deals/[id]", () => {
     expect(agentLesson.text).toContain("Rule the parser applied: left lead is the first bank named");
     expect(agentLesson.text).toContain("Pipeline Type = Loan");
     expect(agentLesson.text).not.toContain("Left Agent = "); // the overridden field is not context
+    // The provenance the strategy copies onto the record: which override, who, which deal.
+    const agentOverride = overridesOf(table.dl_1).find((o) => o.field === "left_agent")!;
+    expect(agentLesson.metadata).toEqual({
+      override_id: { stringValue: agentOverride.override_id },
+      author: { stringValue: "reviewer" },
+      deal_id: { stringValue: "dl_1" },
+    });
 
     // Lessons only after the deal write that kept the overrides.
     const firstDealPut = ddbSend.mock.calls.findIndex((c) => c[0].__cmd === "PutItem");

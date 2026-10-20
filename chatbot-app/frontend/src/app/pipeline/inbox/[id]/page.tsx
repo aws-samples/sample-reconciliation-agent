@@ -2,8 +2,15 @@
 
 import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { getDeal, getEmail, reparseEmail, updateDealFields } from "@/lib/pipelineApi";
-import type { DealRecord, EmailRecord } from "@/lib/pipeline/types";
+import {
+  getDeal,
+  getEmail,
+  reparseEmail,
+  retractOverrideLesson,
+  updateDealFields,
+} from "@/lib/pipelineApi";
+import type { DealRecord, EmailRecord, FieldOverride } from "@/lib/pipeline/types";
+import { useAppSubject } from "@/hooks/useAppSubject";
 import { EmailViewer } from "@/components/pipeline/EmailViewer";
 import { ParsedFieldsPanel } from "@/components/pipeline/ParsedFieldsPanel";
 import { Placeholder } from "@/components/app-ui/ui";
@@ -19,6 +26,7 @@ function overridable(deal: DealRecord): boolean {
 
 export default function EmailDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
+  const { subject, isAdmin } = useAppSubject("pipeline");
   const [email, setEmail] = useState<EmailRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reparsing, setReparsing] = useState(false);
@@ -77,6 +85,13 @@ export default function EmailDetailPage({ params }: { params: Promise<{ id: stri
     setDeal(await updateDealFields(shownDeal.deal_id, { [key]: value }, { [key]: reason }));
   };
 
+  // The route decides; this only hides the action from viewers it would refuse.
+  const retractFor = (o: FieldOverride) =>
+    shownDeal && (isAdmin || (subject !== "" && o.actor === subject))
+      ? async (target: FieldOverride) =>
+          setDeal(await retractOverrideLesson(shownDeal.deal_id, target.override_id))
+      : undefined;
+
   const reparse = async () => {
     setReparsing(true);
     setActionError(null);
@@ -126,6 +141,7 @@ export default function EmailDetailPage({ params }: { params: Promise<{ id: stri
           email={email}
           deal={shownDeal}
           onOverride={shownDeal && overridable(shownDeal) ? override : undefined}
+          onRetract={retractFor}
           onReparse={reparse}
           reparsing={reparsing}
         />

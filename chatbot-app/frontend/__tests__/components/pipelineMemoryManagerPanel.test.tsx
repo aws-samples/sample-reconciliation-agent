@@ -159,4 +159,65 @@ describe("MemoryManagerPanel", () => {
     expect(note.tagName).toBe("P");
     expect(note).not.toHaveAttribute("data-kind");
   });
+
+  describe("lessons taught by overrides", () => {
+    const fromOverride = (id: string, author: string, overrideId: string): MemoryRecord => ({
+      id,
+      namespace: "deal-pipeline/edge-cases/deal-desk",
+      content: `${author}'s call-protection rule`,
+      createdAt: "2026-10-20T18:39:00Z",
+      metadata: { override_id: overrideId, author, deal_id: "dl_1" },
+      source: {
+        kind: "override",
+        override_id: overrideId,
+        author,
+        deal_id: "dl_1",
+        field: "call_protection",
+        opportunity_name: "Ridgeline sr secured notes",
+        reason: `${author}'s reason`,
+        at: "2026-10-20T18:38:00Z",
+      },
+    });
+
+    beforeEach(() => {
+      api.listMemory.mockResolvedValue([
+        fromOverride("mem-a", "alice", "ov_a"),
+        fromOverride("mem-b", "bob", "ov_b"),
+        RECORD,
+      ]);
+    });
+
+    it("says who taught each lesson, on which field and deal, and why", async () => {
+      render(<MemoryManagerPanel isAdmin />);
+      await screen.findByText("alice's call-protection rule");
+      const a = document.querySelector('[data-source="ov_a"]') as HTMLElement;
+      expect(a).toHaveTextContent("override by alice · Call Protection on Ridgeline sr secured notes");
+      expect(a).toHaveTextContent("alice's reason");
+      expect(within(a).getByRole("link")).toHaveAttribute("href", "/pipeline/deals/dl_1");
+      expect(document.querySelector('[data-source="other"]')).toHaveTextContent("saved by hand or by the assistant");
+    });
+
+    it("flags several lessons about one field, and filters by source, author and field", async () => {
+      render(<MemoryManagerPanel isAdmin />);
+      await screen.findByText("alice's call-protection rule");
+      expect(screen.getByRole("status")).toHaveTextContent("2 lessons about Call Protection");
+      expect(screen.getAllByText("one of 2 lessons about Call Protection — check they agree")).toHaveLength(2);
+
+      fireEvent.change(screen.getByLabelText("Filter by author"), { target: { value: "bob" } });
+      expect(screen.queryByText("alice's call-protection rule")).toBeNull();
+      expect(screen.getByText("bob's call-protection rule")).toBeTruthy();
+      expect(screen.queryByText(RECORD.content)).toBeNull();
+
+      fireEvent.change(screen.getByLabelText("Filter by author"), { target: { value: "" } });
+      fireEvent.change(screen.getByLabelText("Filter by source"), { target: { value: "other" } });
+      expect(screen.getByText(RECORD.content)).toBeTruthy();
+      expect(screen.queryByText("bob's call-protection rule")).toBeNull();
+
+      fireEvent.change(screen.getByLabelText("Filter by source"), { target: { value: "all" } });
+      fireEvent.click(within(screen.getByRole("status")).getByRole("button", { name: "Show them" }));
+      expect(screen.getByLabelText("Filter by field")).toHaveValue("call_protection");
+      expect(screen.getByText("alice's call-protection rule")).toBeTruthy();
+      expect(screen.queryByText(RECORD.content)).toBeNull();
+    });
+  });
 });

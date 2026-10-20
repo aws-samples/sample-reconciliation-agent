@@ -18,6 +18,7 @@ const MEMORY_LABEL: Record<OverrideMemory["status"], string> = {
   pending: "lesson pending",
   failed: "lesson not sent",
   off: "no memory deployed",
+  retracted: "lesson retracted",
 };
 
 const MEMORY_COLOR: Record<OverrideMemory["status"], string> = {
@@ -25,11 +26,42 @@ const MEMORY_COLOR: Record<OverrideMemory["status"], string> = {
   pending: "var(--rc-amber)",
   failed: "var(--rc-red)",
   off: "var(--rc-ink-faint)",
+  retracted: "var(--rc-ink-faint)",
 };
 
-/** The override that explains a field's current value: who, when, why, and whether memory has it. */
-export function OverrideNote({ override }: { override: FieldOverride }) {
+/**
+ * The override that explains a field's current value: who, when, why, and whether memory has it.
+ *
+ * With `onRetract` (the screen passes it to the override's author and to admins), a sent lesson can
+ * be taken back from here. The override and its value stay; only what the parser learned goes.
+ */
+export function OverrideNote({
+  override,
+  onRetract,
+}: {
+  override: FieldOverride;
+  onRetract?: (override: FieldOverride) => Promise<void>;
+}) {
   const memory = override.memory;
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const retract = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await onRetract!(override);
+      setConfirming(false);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const title =
+    memory.status === "retracted"
+      ? `retracted by ${memory.retracted_by ?? "unknown"}${memory.retracted_at ? ` · ${formatDateTime(memory.retracted_at)}` : ""}`
+      : memory.error;
   return (
     <div className="mt-1 space-y-0.5 text-[11.5px] leading-relaxed" data-override={override.field}>
       <div className="rc-mono flex flex-wrap items-baseline gap-x-2 text-[10.5px] text-[var(--rc-ink-faint)]">
@@ -40,13 +72,40 @@ export function OverrideNote({ override }: { override: FieldOverride }) {
           by {override.actor} · {formatDateTime(override.at)}
           {override.stage === "break" && " · fixing an OMS rejection"}
         </span>
-        <span style={{ color: MEMORY_COLOR[memory.status] }} title={memory.error}>
+        <span style={{ color: MEMORY_COLOR[memory.status] }} title={title}>
           {MEMORY_LABEL[memory.status]}
         </span>
+        {onRetract && memory.status === "sent" && !confirming && (
+          <button
+            type="button"
+            onClick={() => setConfirming(true)}
+            className="uppercase tracking-[0.08em] hover:text-[var(--rc-red)]"
+          >
+            retract lesson
+          </button>
+        )}
       </div>
       <p className="border-l-2 border-[var(--rc-violet)] pl-2 text-[var(--rc-ink-dim)]">
         {override.reason}
       </p>
+      {confirming && (
+        <div role="group" aria-label="Retract this lesson" className="rc-mono flex flex-wrap items-center gap-2 text-[10.5px]">
+          <span className="text-[var(--rc-ink-dim)]">
+            The parser stops recalling this lesson; the value stays on this deal.
+          </span>
+          <button type="button" onClick={retract} disabled={busy} className="uppercase tracking-[0.08em] text-[var(--rc-red)] disabled:opacity-40">
+            {busy ? "retracting…" : "retract"}
+          </button>
+          <button type="button" onClick={() => setConfirming(false)} disabled={busy} className="uppercase tracking-[0.08em] text-[var(--rc-ink-faint)] hover:text-[var(--rc-ink)]">
+            keep
+          </button>
+        </div>
+      )}
+      {error && (
+        <p role="alert" className="rc-mono text-[10.5px]" style={{ color: "var(--rc-red)" }}>
+          {error}
+        </p>
+      )}
     </div>
   );
 }

@@ -248,4 +248,41 @@ describe("ParsedFieldsPanel overrides", () => {
     render(<ParsedFieldsPanel email={email()} />);
     expect(screen.queryByRole("button", { name: /^Override / })).toBeNull();
   });
+
+  it("offers the lesson's retract only where the screen allows it, and asks first", async () => {
+    const onRetract = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(
+      <ParsedFieldsPanel email={email()} deal={overridden()} onRetract={() => onRetract} />,
+    );
+    const note = () => document.querySelector('[data-override="left_agent"]') as HTMLElement;
+    fireEvent.click(within(note()).getByRole("button", { name: "retract lesson" }));
+    const confirm = within(note()).getByRole("group", { name: "Retract this lesson" });
+    expect(confirm).toHaveTextContent("the value stays on this deal");
+    await act(async () => fireEvent.click(within(confirm).getByRole("button", { name: "retract" })));
+    expect(onRetract).toHaveBeenCalledWith(agentOverride);
+    expect(within(note()).queryByRole("group", { name: "Retract this lesson" })).toBeNull();
+
+    // Not the viewer's to retract: no action at all.
+    rerender(<ParsedFieldsPanel email={email()} deal={overridden()} onRetract={() => undefined} />);
+    expect(within(note()).queryByRole("button", { name: "retract lesson" })).toBeNull();
+
+    // A lesson already retracted says so, and who did it.
+    const gone = deal({
+      fields: { ...deal().fields, left_agent: "Silverline" },
+      overrides: [{ ...agentOverride, memory: { status: "retracted", retracted_by: "admin-1", retracted_at: "2026-08-06T10:00:00Z" } }],
+    });
+    rerender(<ParsedFieldsPanel email={email()} deal={gone} onRetract={() => onRetract} />);
+    expect(within(note()).getByText("lesson retracted").getAttribute("title")).toMatch(/^retracted by admin-1/);
+    expect(within(note()).queryByRole("button", { name: "retract lesson" })).toBeNull();
+  });
+
+  it("keeps a refused retract on screen with its reason", async () => {
+    const onRetract = vi.fn().mockRejectedValue(new Error("no lesson record carries this override yet"));
+    render(<ParsedFieldsPanel email={email()} deal={overridden()} onRetract={() => onRetract} />);
+    const note = document.querySelector('[data-override="left_agent"]') as HTMLElement;
+    fireEvent.click(within(note).getByRole("button", { name: "retract lesson" }));
+    await act(async () => fireEvent.click(within(note).getByRole("button", { name: "retract" })));
+    expect(within(note).getByRole("alert")).toHaveTextContent(/no lesson record carries this override yet/);
+    expect(within(note).getByRole("group", { name: "Retract this lesson" })).toBeTruthy();
+  });
 });

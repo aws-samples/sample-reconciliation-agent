@@ -68,6 +68,16 @@ resource "aws_bedrockagentcore_memory" "this" {
   # the resource even with no strategy attached.
   memory_execution_role_arn = local.execution_role_arn
   tags                      = var.tags
+
+  # The provenance keys must be indexed on the memory before the strategy may pass them through.
+  # Indexed keys are permanent once declared; see var.provenance_keys.
+  dynamic "indexed_key" {
+    for_each = toset(var.provenance_keys)
+    content {
+      key  = indexed_key.value
+      type = "STRING"
+    }
+  }
 }
 
 # The extraction strategy, when the caller has one. CUSTOM rather than a built-in type (SEMANTIC and
@@ -107,6 +117,25 @@ resource "aws_bedrockagentcore_memory_strategy" "this" {
       # built-in semantic extraction prompt. The service appends the output schema itself -- do not
       # restate or alter it, and keep the `language` field requirement the schema demands.
       append_to_prompt = var.strategy.extraction_prompt
+    }
+  }
+
+  # Copies each provenance key from the source event onto the extracted record unchanged
+  # (STRICTLY_CONSISTENT: passed through, never inferred by the model). Verified on a throwaway
+  # memory: every extracted record carries exactly the keys of the one event it came from, and
+  # consolidation added contradicting rules as new records rather than merging them, so a record's
+  # provenance names a single source.
+  dynamic "memory_record_schema" {
+    for_each = length(var.provenance_keys) > 0 ? [1] : []
+    content {
+      dynamic "metadata_schema" {
+        for_each = var.provenance_keys
+        content {
+          key             = metadata_schema.value
+          type            = "STRING"
+          extraction_type = "STRICTLY_CONSISTENT"
+        }
+      }
     }
   }
 }

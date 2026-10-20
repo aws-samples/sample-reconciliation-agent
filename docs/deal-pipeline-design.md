@@ -124,7 +124,7 @@ original_fields { [field_key]: string }   as parsed, for diffing
 evidence, assumptions, memory_hits, skills_used, enrichment   copied from ParseOutput
 csv_key         string   "deal-csv/<deal_id>.csv"
 upload          UploadResult | null
-history         { at, actor, action, detail? }[]   STAGED / EDITED / APPROVED / UPLOAD_ACCEPTED / UPLOAD_REJECTED / REJECTED
+history         { at, actor, action, detail? }[]   STAGED / EDITED / APPROVED / UPLOAD_ACCEPTED / UPLOAD_REJECTED / REJECTED / LESSON_RETRACTED
 overrides       FieldOverride[]   append-only; [] at staging (absent on older rows)
 created_at, updated_at
 ```
@@ -144,7 +144,8 @@ reason          string   required, ≤ 2000 chars
 actor, at       string   verified caller, ISO-8601
 stage           "review" | "break"   break = made while the deal was UPLOAD_FAILED
 upload_error_codes? string[]   break only: codes of the last rejected upload naming this field
-memory          { status: "pending" | "sent" | "failed" | "off", event_id?, error? }
+memory          { status: "pending" | "sent" | "failed" | "off" | "retracted", event_id?, error?,
+                  retracted_by?, retracted_at? }
 ```
 
 ### UploadResult
@@ -253,6 +254,27 @@ Stream protocol (`text/event-stream`, one JSON object per `data:` line):
   the extractor can find a trigger). Read by the parser (`retrieve_memory_records`, query = subject
   + first 600 chars, top 6) and by the Memory Manager panel. A reason that does not generalise
   yields no record; that filtering is the extraction prompt's job.
+- **Lesson provenance.** Each override event carries `override_id`, `author` and `deal_id` as event
+  metadata, and the strategy's record schema copies all three onto the record it extracts
+  (`STRICTLY_CONSISTENT`: passed through, never inferred). The service requires each such key to
+  also be an indexed key on the memory, allows at most three per strategy, and never lets an
+  indexed key be removed — Terraform's `provenance_keys` on the knowledge memory declares both
+  halves, and adding them is an in-place, one-way change. Verified on a throwaway memory
+  (2026-10-20): every extracted record carried exactly the keys of the one event it came from;
+  `ListMemoryRecords` filters on them server-side; and consolidation never merged — a second
+  lesson restating a rule, and a third contradicting it, each became a record of their own beside
+  the first, all three recalled by the parser. So a record's provenance names one override, a
+  retract can delete exactly that override's lesson, and two lessons about one field is the shape a
+  conflict takes; the Memory Manager surfaces it rather than leaving the parser to choose. Records
+  written before the keys existed, and rules saved by hand or by the assistant, carry none.
+- **Pruning.** Overrides teach without review, so the lesson can be taken back: by the override's
+  author or a pipeline admin from the override's note (`POST /deals/[id]/overrides/[oid]/retract`,
+  which deletes the records whose `override_id` matches), or by an admin from the Memory Manager
+  (which marks the override it came from as retracted on its deal). Either way the override and the
+  value it set stay; `memory.status` becomes `retracted` and the deal's history gains a
+  LESSON_RETRACTED row. After a delete, `GetMemoryRecord` and search drop the record at once but
+  `ListMemoryRecords` keeps returning it for up to about a minute, so the shared memory panel hides
+  what it deleted from reloads for three minutes.
 - `deal_pipeline_dev_chat`: events only, 7-day expiry. actorId = user subject, sessionId =
   chat session. The assistant rebuilds history from `list_events` on load.
 
@@ -276,7 +298,8 @@ this app has no `/me` route of its own.
 | `/deals/[id]/reject` | POST | `{reason}`; **admin-gated**; conditional on the status and `updated_at` read (409 on conflict) |
 | `/chat` | POST | SSE stream (§7); body `{session_id, message, context?:{deal_id?, email_id?}}`; open to all, but `save_memory` / `delete_memory` are offered to the model and executed only for admin-group callers (same gate as `/memory` POST/DELETE) |
 | `/chat/history` | GET | `?session_id=` → messages from chat memory |
-| `/memory` | GET, POST, DELETE | records / manual add `{rule}` / `{ids}`; POST and DELETE **admin-gated** |
+| `/deals/[id]/overrides/[oid]/retract` | POST | delete the records carrying this override's `override_id`, mark it `retracted`, history LESSON_RETRACTED; the override's **author or an admin**; 409 when there is nothing to retract (no lesson sent, already retracted, or no record yet — still extracting, or it did not generalise) |
+| `/memory` | GET, POST, DELETE | records, each override lesson with its `source` (override, author, deal, field, reason) / manual add `{rule}` / `{ids}`, which also marks the overrides those records came from as retracted; POST and DELETE **admin-gated** |
 | `/memory/strategy` | GET | GetMemory projection |
 | `/skills`, `/skills/[name]` | GET, PUT / GET, PUT, DELETE | S3 SKILL.md catalog; writes **admin-gated** |
 | `/skills/system-prompt` | GET, PUT | `prompts/parser-system.md`; PUT **admin-gated** |
@@ -327,7 +350,11 @@ UPLOAD_FAILED each row has a ✎ that opens an inline editor (`OverrideEditor.ts
 new value, parsed value, required reason. Inline rather than a modal so the email stays visible
 beside it. In `deals/[id]` the bulk **Edit fields** mode ends in a dialog asking one reason per
 changed field. Both show the latest override of each field under its value (`OverrideNote`): author,
-time, reason, and whether its lesson reached the memory. The header chrome (`AppChrome`, `AppNav`, `UserMenu`),
+time, reason, and whether its lesson reached the memory — with **retract lesson** for its author and
+for admins, on any deal status (a lesson from a finished deal can still be wrong). The Memory Manager
+says where each lesson came from (override, author, field, deal link, reason, or "saved by hand or by
+the assistant"), filters by source, author and field, and flags every field with more than one
+lesson ("check they agree"), with a link that filters to them. The header chrome (`AppChrome`, `AppNav`, `UserMenu`),
 the column-preferences `DataTable` and the generic primitives (Panel, Pill, Modal, Notice, buttons)
 are shared with the recon app in `src/components/app-ui/`; neither app imports the other. Theme CSS:
 `src/app/app-theme.css`, shared, `rc-` prefix, scoped to `.app-root`.

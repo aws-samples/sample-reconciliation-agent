@@ -109,6 +109,21 @@ export async function updateDealFields(
   );
 }
 
+/**
+ * Take back the lesson one override taught. Allowed for the override's author and pipeline admins;
+ * the override and its value stay on the deal.
+ *
+ * @returns the deal with that override's memory `retracted` and a LESSON_RETRACTED history row.
+ */
+export async function retractOverrideLesson(dealId: string, overrideId: string): Promise<DealRecord> {
+  return json(
+    await pipelineFetch(
+      `/api/pipeline/deals/${encodeURIComponent(dealId)}/overrides/${encodeURIComponent(overrideId)}/retract`,
+      { method: "POST" },
+    ),
+  );
+}
+
 /** The staging CSV as text, for the Download button. */
 export async function getDealCsv(id: string): Promise<string> {
   const resp = await pipelineFetch(`/api/pipeline/deals/${encodeURIComponent(id)}/csv`);

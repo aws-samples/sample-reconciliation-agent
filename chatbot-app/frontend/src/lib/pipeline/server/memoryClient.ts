@@ -44,6 +44,15 @@ export const KNOWLEDGE_ACTOR_ID = "deal-desk";
 /** Where the `edge_cases` strategy files consolidated records for that actor. */
 export const EDGE_CASES_NAMESPACE = `deal-pipeline/edge-cases/${KNOWLEDGE_ACTOR_ID}`;
 
+/**
+ * The provenance an override lesson carries as event metadata. The `edge_cases` strategy copies all
+ * three onto the record it extracts (Terraform: `provenance_keys` in modules/deal-pipeline/memory.tf,
+ * which must name the same keys), so a record says which override, reviewer and deal taught it, and
+ * a retract can find exactly that record. Three is the service's limit; the field and the reason are
+ * read back from the override on the deal.
+ */
+export const PROVENANCE_KEYS = { overrideId: "override_id", author: "author", dealId: "deal_id" } as const;
+
 export type { BatchDeleteOutcome };
 
 /** The process-wide SDK clients, handed to the shared client as thunks so an unset id builds none. */
@@ -93,6 +102,17 @@ export function listRecords(
   namespace: string = EDGE_CASES_NAMESPACE,
 ): Promise<MemoryRecord[]> {
   return knowledgeMemory().listRecords(namespace);
+}
+
+/**
+ * The records one override's lesson produced, found by the provenance the strategy copied onto
+ * them. Usually one; none while the lesson is still being extracted (1–3 minutes), or when it did
+ * not generalise into a rule.
+ */
+export function recordsForOverride(overrideId: string): Promise<MemoryRecord[]> {
+  return knowledgeMemory().listRecords(EDGE_CASES_NAMESPACE, {
+    [PROVENANCE_KEYS.overrideId]: overrideId,
+  });
 }
 
 /**
@@ -197,7 +217,8 @@ export function overrideLessonText(override: FieldOverride, context: OverrideLes
  * Send one override to the knowledge memory as a lesson.
  *
  * Same actor as every desk rule, so the record lands in the namespace the parser recalls from. One
- * session per deal, so the overrides of one deal reach the extractor together.
+ * session per deal, so the overrides of one deal reach the extractor together. The event carries
+ * the override's provenance (`PROVENANCE_KEYS`) for the record to inherit.
  *
  * @returns the event id, or null when the knowledge memory is not configured.
  */
@@ -211,6 +232,11 @@ export function createOverrideEvent(
     sessionId: memorySafeId(`override-${dealId}`),
     role: "USER",
     text: overrideLessonText(override, context),
+    metadata: {
+      [PROVENANCE_KEYS.overrideId]: override.override_id,
+      [PROVENANCE_KEYS.author]: override.actor,
+      [PROVENANCE_KEYS.dealId]: dealId,
+    },
   });
 }
 

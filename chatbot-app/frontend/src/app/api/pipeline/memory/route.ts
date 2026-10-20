@@ -4,28 +4,28 @@ import { requireActor } from "@/lib/api-auth";
 import { requireAppAdmin } from "@/lib/auth/app-admin";
 import { jsonError, readJsonObject, stringField } from "@/lib/server/http";
 import { newProposalId } from "@/lib/pipeline/server/ids";
-import {
-  batchDelete,
-  createRuleEvent,
-  EDGE_CASES_NAMESPACE,
-  listRecords,
-} from "@/lib/pipeline/server/memoryClient";
+import { createRuleEvent } from "@/lib/pipeline/server/memoryClient";
+import { deleteLessons, listLessons } from "@/lib/pipeline/server/lessons";
 import { parseMemoryDeleteIds } from "@/lib/server/memoryRequests";
 
 // The Memory Manager (design §8, §9): the consolidated edge-case records the parser recalls before
-// every run — list them, add a rule by hand, delete the ones an operator selects.
+// every run — list them (each override lesson with the override that taught it), add a rule by
+// hand, delete the ones an operator selects (marking the overrides they came from as retracted).
 //
 // GET is open to every authenticated user, because anyone who reviews deals is entitled to know
 // what the parser has been taught. POST and DELETE are admin-gated, because both change what the
 // next parse does.
 export const runtime = "nodejs";
 
-/** @returns `MemoryRecord[]` — `[]` when the knowledge memory is not configured. */
+/**
+ * @returns `MemoryRecord[]`, each override lesson with its `source` — `[]` when the knowledge memory
+ *   is not configured.
+ */
 export async function GET(req: Request) {
   const who = await requireActor(req);
   if ("error" in who) return who.error;
   try {
-    return NextResponse.json(await listRecords(EDGE_CASES_NAMESPACE));
+    return NextResponse.json(await listLessons());
   } catch (err) {
     return jsonError(500, `memory list failed: ${(err as Error).message}`);
   }
@@ -62,8 +62,9 @@ export async function POST(req: Request) {
  * Returns 200 with a non-empty `failed` list on a partial failure — the UI shows which records
  * survived. A blanket 500 would leave the operator unable to tell which of their selection is gone.
  *
- * @returns `{ deleted, failed }`; 400 bad body; 409 when no memory is configured (a delete that
- *   deleted nothing must not look like a success).
+ * @returns `{ deleted, failed, retracted, unmarked }` — `retracted` the override ids whose deals now
+ *   say so, `unmarked` deals that could not be updated; 400 bad body; 409 when no memory is
+ *   configured (a delete that deleted nothing must not look like a success).
  */
 export async function DELETE(req: Request) {
   const admin = await requireAppAdmin("pipeline", req);
@@ -77,7 +78,7 @@ export async function DELETE(req: Request) {
   }
 
   try {
-    const outcome = await batchDelete(ids);
+    const outcome = await deleteLessons(ids, admin.actor);
     if (outcome === null) {
       return jsonError(409, "KNOWLEDGE_MEMORY_ID is not configured, so there is no memory to delete from");
     }

@@ -18,11 +18,13 @@ const listEmails = vi.fn();
 const getEmail = vi.fn();
 const getDeal = vi.fn();
 const updateDealFields = vi.fn();
+const retractOverrideLesson = vi.fn();
 vi.mock("@/lib/pipelineApi", () => ({
   listEmails: (...a: unknown[]) => listEmails(...a),
   getEmail: (...a: unknown[]) => getEmail(...a),
   getDeal: (...a: unknown[]) => getDeal(...a),
   updateDealFields: (...a: unknown[]) => updateDealFields(...a),
+  retractOverrideLesson: (...a: unknown[]) => retractOverrideLesson(...a),
   reparseEmail: vi.fn(),
   listSamples: vi.fn(),
   createEmail: vi.fn(),
@@ -85,6 +87,7 @@ beforeEach(() => {
   getEmail.mockReset();
   getDeal.mockReset();
   updateDealFields.mockReset();
+  retractOverrideLesson.mockReset();
 });
 
 afterEach(() => {
@@ -230,5 +233,40 @@ describe("EmailDetailPage", () => {
     await tick();
     expect(screen.getByText(/Could not load deal dl_1, so values are shown as parsed/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /^Override / })).toBeNull();
+  });
+
+  it("offers to retract a lesson only to the override's author (the viewer here is not an admin)", async () => {
+    const mine = {
+      override_id: "ov_mine",
+      field: "left_agent",
+      parsed_value: "Silverline Partners",
+      previous_value: "Silverline Partners",
+      value: "Silverline",
+      reason: "short name",
+      actor: "sub-1",
+      at: "t",
+      stage: "review" as const,
+      memory: { status: "sent" as const, event_id: "ev-1" },
+    };
+    const theirs = { ...mine, override_id: "ov_theirs", field: "pipeline_type", value: "Bond", actor: "someone-else" };
+    getEmail.mockResolvedValue(parsed());
+    getDeal.mockResolvedValue(
+      stagedDeal({ fields: { ...parsedFields, left_agent: "Silverline", pipeline_type: "Bond" }, overrides: [mine, theirs] }),
+    );
+    retractOverrideLesson.mockResolvedValue(
+      stagedDeal({
+        fields: { ...parsedFields, left_agent: "Silverline", pipeline_type: "Bond" },
+        overrides: [{ ...mine, memory: { status: "retracted", retracted_by: "sub-1" } }, theirs],
+      }),
+    );
+    render(<EmailDetailPage params={params} />);
+    await tick();
+
+    const note = (f: string) => document.querySelector(`[data-override="${f}"]`) as HTMLElement;
+    expect(within(note("pipeline_type")).queryByRole("button", { name: "retract lesson" })).toBeNull();
+    fireEvent.click(within(note("left_agent")).getByRole("button", { name: "retract lesson" }));
+    await act(async () => fireEvent.click(within(note("left_agent")).getByRole("button", { name: "retract" })));
+    expect(retractOverrideLesson).toHaveBeenCalledWith("dl_1", "ov_mine");
+    expect(note("left_agent")).toHaveTextContent("lesson retracted");
   });
 });

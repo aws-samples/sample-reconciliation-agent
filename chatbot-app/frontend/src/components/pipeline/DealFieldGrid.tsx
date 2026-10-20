@@ -55,6 +55,7 @@ export function DealFieldGrid({
   editing,
   problems,
   overrides = {},
+  onRetract,
   onChange,
 }: {
   /** Current values (the draft while editing). */
@@ -67,6 +68,8 @@ export function DealFieldGrid({
   problems: Record<string, string>;
   /** The override behind each field's current value, from `latestOverrides`. */
   overrides?: Record<string, FieldOverride>;
+  /** Offered on an override's note when the viewer may retract its lesson (author or admin). */
+  onRetract?: (override: FieldOverride) => ((o: FieldOverride) => Promise<void>) | undefined;
   onChange: (key: string, value: string) => void;
 }) {
   return (
@@ -159,7 +162,7 @@ export function DealFieldGrid({
                     </div>
                     {override && (
                       <div className="col-span-full">
-                        <OverrideNote override={override} />
+                        <OverrideNote override={override} onRetract={onRetract?.(override)} />
                       </div>
                     )}
                     {ev && <EvidenceNote evidence={ev} />}

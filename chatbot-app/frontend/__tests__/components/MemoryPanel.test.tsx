@@ -307,4 +307,56 @@ describe("MemoryPanel", () => {
       screen.getByRole("checkbox", { name: "Select memory record rec-1" }),
     ).toBeChecked();
   });
+
+  it("keeps a record it deleted out of reloads while the service's list still returns it", async () => {
+    // ListMemoryRecords lags a delete by up to about a minute; a reload in that window must not
+    // bring the record back and make the delete look failed.
+    api.deleteRecords.mockResolvedValue({ deleted: ["rec-1"], failed: [] });
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    try {
+      mount({ refresh: true });
+      await deleteFirstRecord();
+      await vi.waitFor(() => expect(screen.queryByText(RECORDS[0].content)).toBeNull());
+
+      fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+      await screen.findByText(RECORDS[1].content);
+      expect(api.listRecords).toHaveBeenCalledTimes(2);
+      expect(screen.queryByText(RECORDS[0].content)).toBeNull();
+
+      // Past the window, a record the service still lists is shown: it really is still there.
+      now.mockReturnValue(1_000_000 + 4 * 60 * 1000);
+      fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+      expect(await screen.findByText(RECORDS[0].content)).toBeTruthy();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("shows only what `visible` admits, selects only those, renders the toolbar and reports the records", async () => {
+    const onRecords = vi.fn();
+    const { rerender } = mount({
+      visible: (r) => r.id === "rec-2",
+      toolbar: <div data-testid="toolbar">filters</div>,
+      onRecords,
+    });
+    expect(await screen.findByText(RECORDS[1].content)).toBeTruthy();
+    expect(screen.queryByText(RECORDS[0].content)).toBeNull();
+    expect(screen.getByTestId("toolbar")).toBeTruthy();
+    await vi.waitFor(() => expect(onRecords).toHaveBeenCalledWith(expect.arrayContaining(RECORDS)));
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select all memory records" }));
+    expect(screen.getByText("1 selected")).toBeTruthy();
+
+    rerender(
+      <MemoryPanel
+        listRecords={api.listRecords}
+        deleteRecords={api.deleteRecords}
+        getStrategy={api.getStrategy}
+        memoryIdEnvName="TEST_MEMORY_ID"
+        deleteWarning="Gone for good."
+        visible={() => false}
+      />,
+    );
+    expect(screen.getByText("No record matches the filters.")).toBeTruthy();
+  });
 });

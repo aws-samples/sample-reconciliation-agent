@@ -7,9 +7,10 @@ import {
   getDeal,
   getDealCsv,
   rejectDeal,
+  retractOverrideLesson,
   updateDealFields,
 } from "@/lib/pipelineApi";
-import type { DealRecord, FieldValues } from "@/lib/pipeline/types";
+import type { DealRecord, FieldOverride, FieldValues } from "@/lib/pipeline/types";
 import { changedKeys, fieldDef, toCsv, validateFields } from "@/lib/pipeline/omsSchema";
 import { latestOverrides, MAX_OVERRIDE_REASON_CHARS } from "@/lib/pipeline/overrides";
 import { useAppSubject } from "@/hooks/useAppSubject";
@@ -33,6 +34,7 @@ import { StatusPill } from "@/components/pipeline/ui";
 const HISTORY_COLOR: Record<string, string> = {
   STAGED: "var(--rc-cyan)",
   EDITED: "var(--rc-violet)",
+  LESSON_RETRACTED: "var(--rc-amber)",
   APPROVED: "var(--rc-violet)",
   UPLOAD_ACCEPTED: "var(--rc-green)",
   UPLOAD_REJECTED: "var(--rc-red)",
@@ -56,7 +58,7 @@ function downloadText(filename: string, text: string): void {
 
 export default function DealDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const { isAdmin } = useAppSubject("pipeline");
+  const { subject, isAdmin } = useAppSubject("pipeline");
   const [deal, setDeal] = useState<DealRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Non-null while editing. The grid edits this copy; Save sends it, Cancel drops it.
@@ -140,6 +142,12 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
       setReason("");
       return next;
     });
+
+  // The route decides; this only hides the action from viewers it would refuse.
+  const retractFor = (o: FieldOverride) =>
+    isAdmin || (subject !== "" && o.actor === subject)
+      ? async (target: FieldOverride) => setDeal(await retractOverrideLesson(id, target.override_id))
+      : undefined;
 
   const download = () =>
     run("download", async () => {
@@ -279,6 +287,7 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
             editing={editing}
             problems={problems}
             overrides={latestOverrides(deal)}
+            onRetract={retractFor}
             onChange={(key, value) => setDraft((d) => ({ ...(d ?? deal.fields), [key]: value }))}
           />
         </div>

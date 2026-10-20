@@ -271,6 +271,14 @@ rendering; `modules/frontend-ecs/tests/app_wiring.tftest.hcl` pins that the cons
 list exactly as exported, never re-sorted). A new task-definition revision in that plan means a
 name, value or position changed and the console would roll -- read it before applying.
 
+The first plan after the pipeline gained lesson provenance also shows two **in-place** updates of the
+knowledge memory: three `indexed_key` blocks (`override_id`, `author`, `deal_id`) on
+`module.deal_pipeline[0].module.knowledge_memory.aws_bedrockagentcore_memory.this`, and a
+`memory_record_schema` with the same three `STRICTLY_CONSISTENT` keys on its strategy -- `Plan: 0 to
+add, 2 to change, 0 to destroy` when targeted at that module. Expected, and safe for the stored
+lessons, but one-way: the service never lets an indexed key be removed. A **replace** of either
+resource is not expected and would delete every lesson -- do not apply it.
+
 `aws_lambda_invocation.pipeline_seed_push[0]` appears only once `enable_pipeline_seed_push = true`,
 and that variable is off by default on purpose: the reconciliation's first run against a pipeline
 whose skill or prompt objects were edited live before the push existed (an approved skill proposal,

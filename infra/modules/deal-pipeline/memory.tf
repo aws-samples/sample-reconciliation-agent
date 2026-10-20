@@ -38,6 +38,11 @@ module "knowledge_memory" {
 
   execution_role_name = "${var.name_prefix}-memory"
 
+  # Every lesson an override sends carries these as event metadata, and the strategy copies them onto
+  # the record it extracts, so the Memory Manager can say which override (and so which reviewer and
+  # deal) taught each rule, and a retract deletes exactly that rule. Permanent once applied.
+  provenance_keys = ["override_id", "author", "deal_id"]
+
   strategy = {
     name        = "edge_cases"
     namespaces  = ["deal-pipeline/edge-cases/{actorId}"]

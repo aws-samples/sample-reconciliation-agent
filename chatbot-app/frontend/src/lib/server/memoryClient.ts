@@ -56,7 +56,16 @@ export interface MemoryRecord {
   namespace: string;
   content: string;
   createdAt: string;
+  /**
+   * The app's own string metadata on the record — what a strategy with a record schema copied from
+   * the source event (the pipeline's override id, author and deal). The service's
+   * `x-amz-agentcore-memory-*` keys are left out. Absent when there is none.
+   */
+  metadata?: Record<string, string>;
 }
+
+/** Metadata keys the service sets on every record itself; not the app's provenance. */
+const SERVICE_METADATA_PREFIX = "x-amz-agentcore-memory-";
 
 /** Outcome of a batch delete, per record, so a panel can say which ones survived. */
 export interface BatchDeleteOutcome {
@@ -82,6 +91,11 @@ export interface CreateEventInput {
   sessionId: string;
   role: "USER" | "ASSISTANT";
   text: string;
+  /**
+   * String metadata stored on the event. A strategy whose record schema names a key copies it onto
+   * the records it extracts from this event; other keys stay on the event only.
+   */
+  metadata?: Record<string, string>;
 }
 
 export interface MemoryClientOptions {
@@ -117,9 +131,11 @@ export interface MemoryClient {
   /**
    * Every consolidated record in a namespace, newest first — an inventory, not a search.
    *
+   * @param where optional metadata equality filters, applied by the service; each key must be an
+   *   indexed key on the memory.
    * @returns every record across pages; `[]` when not configured.
    */
-  listRecords(namespace: string): Promise<MemoryRecord[]>;
+  listRecords(namespace: string, where?: Record<string, string>): Promise<MemoryRecord[]>;
   /**
    * Delete consolidated records by id.
    *
@@ -182,11 +198,19 @@ function toRecord(
   const content =
     r.content && "text" in r.content ? (r.content.text ?? "") : "";
   if (!content) return null;
+  const metadata: Record<string, string> = {};
+  for (const [key, value] of Object.entries(r.metadata ?? {})) {
+    if (key.startsWith(SERVICE_METADATA_PREFIX)) continue;
+    if (value && "stringValue" in value && typeof value.stringValue === "string") {
+      metadata[key] = value.stringValue;
+    }
+  }
   return {
     id: r.memoryRecordId ?? "",
     namespace: r.namespaces?.[0] ?? namespace,
     content,
     createdAt: r.createdAt ? new Date(r.createdAt).toISOString() : "",
+    ...(Object.keys(metadata).length ? { metadata } : {}),
   };
 }
 
@@ -228,6 +252,13 @@ export function createMemoryClient(options: MemoryClientOptions): MemoryClient {
             },
           },
         ],
+        ...(input.metadata && Object.keys(input.metadata).length
+          ? {
+              metadata: Object.fromEntries(
+                Object.entries(input.metadata).map(([k, v]) => [k, { stringValue: v }]),
+              ),
+            }
+          : {}),
       }),
     );
     return resp.event?.eventId ?? "";
@@ -251,8 +282,15 @@ export function createMemoryClient(options: MemoryClientOptions): MemoryClient {
         .filter((r): r is MemoryRecord => r !== null);
     },
 
-    async listRecords(namespace) {
+    async listRecords(namespace, where) {
       if (!configured) return [];
+      const metadataFilters = where
+        ? Object.entries(where).map(([key, value]) => ({
+            left: { metadataKey: key },
+            operator: "EQUALS_TO" as const,
+            right: { metadataValue: { stringValue: value } },
+          }))
+        : undefined;
       const out: MemoryRecord[] = [];
       let nextToken: string | undefined;
       do {
@@ -262,6 +300,7 @@ export function createMemoryClient(options: MemoryClientOptions): MemoryClient {
             namespace,
             maxResults: MEMORY_PAGE_SIZE,
             nextToken,
+            ...(metadataFilters?.length ? { metadataFilters } : {}),
           }),
         );
         for (const r of resp.memoryRecordSummaries ?? []) {

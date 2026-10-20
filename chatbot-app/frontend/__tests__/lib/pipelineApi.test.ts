@@ -21,6 +21,7 @@ import {
   listEmails,
   listProposals,
   readSseStream,
+  retractOverrideLesson,
   streamChat,
   updateDealFields,
 } from "@/lib/pipelineApi";
@@ -77,6 +78,16 @@ describe("list routes", () => {
 });
 
 describe("single-record routes", () => {
+  it("POSTs a retract to the override's own route", async () => {
+    authedFetch.mockResolvedValue(fakeResponse(200, { deal_id: "dl 1", status: "STAGED" }));
+    await retractOverrideLesson("dl 1", "ov_1");
+    expect(authedFetch).toHaveBeenCalledWith(
+      "/api/pipeline/deals/dl%201/overrides/ov_1/retract",
+      { method: "POST" },
+      "PipelineAuth",
+    );
+  });
+
   it("PATCHes only the changed fields, with a reason for each", async () => {
     authedFetch.mockResolvedValue(fakeResponse(200, { deal_id: "dl_1", status: "STAGED" }));
     await updateDealFields("dl_1", { secured_level: "First Lien" }, { secured_level: "PF TLBs are First Lien" });

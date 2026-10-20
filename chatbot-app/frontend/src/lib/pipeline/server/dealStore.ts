@@ -207,28 +207,18 @@ export async function applyOverrides(
 }
 
 /**
- * Record whether each new override's lesson reached the knowledge memory.
+ * Write a change to a deal's overrides back without undoing anything that landed since it was read.
  *
- * Bookkeeping after the fact, so it must not undo anything that landed since the override was
- * written: the put is conditional on the `updated_at` it builds on, and on a conflict the outcomes
- * are re-applied once to a fresh read. A second conflict gives up and leaves those overrides
- * `pending` — the lessons were sent either way; only the record of it is missing.
- *
- * @param outcomes memory outcome per override id.
- * @returns the deal as written, or as it would have been if both attempts lost their race.
+ * The put is conditional on the `updated_at` the change builds on; on a conflict the change is
+ * re-applied once to a fresh, strongly consistent read. What happens on a second conflict is the
+ * caller's call: bookkeeping may give up (`mustLand: false`, returning the deal as it would have
+ * been), a reviewer's action may not (`mustLand: true` rethrows, and the route answers 409).
  */
-export async function recordOverrideMemory(
+async function rewriteOverrides(
   deal: DealRecord,
-  outcomes: Record<string, OverrideMemory>,
-  now: Date = new Date(),
+  apply: (d: DealRecord) => DealRecord,
+  mustLand: boolean,
 ): Promise<DealRecord> {
-  const apply = (d: DealRecord): DealRecord => ({
-    ...d,
-    overrides: overridesOf(d).map((o) =>
-      outcomes[o.override_id] ? { ...o, memory: outcomes[o.override_id] } : o,
-    ),
-    updated_at: now.toISOString(),
-  });
   const write = async (base: DealRecord): Promise<DealRecord> => {
     const next = apply(base);
     await putItem(env.dealsTable(), next, {
@@ -244,13 +234,84 @@ export async function recordOverrideMemory(
     if (!isConditionalCheckFailed(err)) throw err;
   }
   const fresh = await getDeal(deal.deal_id, { consistent: true });
-  if (!fresh) return apply(deal);
+  if (!fresh) {
+    if (mustLand) throw new Error(`deal ${deal.deal_id} no longer exists`);
+    return apply(deal);
+  }
   try {
     return await write(fresh);
   } catch (err) {
-    if (!isConditionalCheckFailed(err)) throw err;
+    if (!isConditionalCheckFailed(err) || mustLand) throw err;
     return apply(fresh);
   }
+}
+
+/**
+ * Record whether each new override's lesson reached the knowledge memory.
+ *
+ * Bookkeeping after the fact: if both attempts lose their race the overrides stay `pending` — the
+ * lessons were sent either way; only the record of it is missing.
+ *
+ * @param outcomes memory outcome per override id.
+ * @returns the deal as written, or as it would have been if both attempts lost their race.
+ */
+export function recordOverrideMemory(
+  deal: DealRecord,
+  outcomes: Record<string, OverrideMemory>,
+  now: Date = new Date(),
+): Promise<DealRecord> {
+  return rewriteOverrides(
+    deal,
+    (d) => ({
+      ...d,
+      overrides: overridesOf(d).map((o) =>
+        outcomes[o.override_id] ? { ...o, memory: outcomes[o.override_id] } : o,
+      ),
+      updated_at: now.toISOString(),
+    }),
+    false,
+  );
+}
+
+/**
+ * Mark overrides' lessons retracted after their records were deleted, with a LESSON_RETRACTED
+ * history row naming each field and how many records went.
+ *
+ * The overrides, and the values they set, stay: a retract takes back what the parser learned, not
+ * the correction to this deal. Must land — it is a reviewer's action — so a second lost race throws.
+ *
+ * @param deleted records deleted per override id; overrides not named are left alone.
+ * @throws ConditionalCheckFailedException when the deal kept changing under both attempts.
+ */
+export function markLessonsRetracted(
+  deal: DealRecord,
+  deleted: Record<string, number>,
+  actor: string,
+  now: Date = new Date(),
+): Promise<DealRecord> {
+  const at = now.toISOString();
+  return rewriteOverrides(
+    deal,
+    (d) => {
+      const retracted = overridesOf(d).filter((o) => o.override_id in deleted);
+      const detail = retracted
+        .map((o) => {
+          const n = deleted[o.override_id];
+          return `${fieldDef(o.field)?.label ?? o.field}: lesson retracted (${n} record${n === 1 ? "" : "s"} deleted)`;
+        })
+        .join("\n");
+      const next: DealRecord = {
+        ...d,
+        overrides: overridesOf(d).map((o) =>
+          o.override_id in deleted
+            ? { ...o, memory: { ...o.memory, status: "retracted", retracted_by: actor, retracted_at: at } }
+            : o,
+        ),
+      };
+      return retracted.length ? appendHistory(next, "LESSON_RETRACTED", actor, detail, now) : next;
+    },
+    true,
+  );
 }
 
 /** What the OMS upload Lambda returns; every field but `accepted` is defensively optional. */

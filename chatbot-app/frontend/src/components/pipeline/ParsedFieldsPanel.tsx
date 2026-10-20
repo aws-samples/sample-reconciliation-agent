@@ -79,12 +79,14 @@ function FieldRow({
   evidence,
   override,
   onEdit,
+  onRetract,
   editor,
 }: {
   def: OmsFieldDef;
   value: string;
   evidence: FieldEvidence | undefined;
   override?: FieldOverride;
+  onRetract?: (o: FieldOverride) => Promise<void>;
   onEdit?: () => void;
   /** The open override editor for this row, when it is the one being edited. */
   editor?: ReactNode;
@@ -128,7 +130,7 @@ function FieldRow({
           </button>
         )}
       </div>
-      {override && !editor && <OverrideNote override={override} />}
+      {override && !editor && <OverrideNote override={override} onRetract={onRetract} />}
       {editor}
     </div>
   );
@@ -138,6 +140,7 @@ export function ParsedFieldsPanel({
   email,
   deal = null,
   onOverride,
+  onRetract,
   onReparse,
   reparsing = false,
 }: {
@@ -146,6 +149,12 @@ export function ParsedFieldsPanel({
   deal?: DealRecord | null;
   /** Present while the deal can still be edited; saves one field's override with its reason. */
   onOverride?: (key: string, value: string, reason: string) => Promise<void>;
+  /**
+   * For each override, the retract action when the viewer may take its lesson back (its author or an
+   * admin), else undefined. Independent of `onOverride`: a lesson from a finished deal can still be
+   * wrong.
+   */
+  onRetract?: (override: FieldOverride) => ((o: FieldOverride) => Promise<void>) | undefined;
   onReparse?: () => void;
   reparsing?: boolean;
 }) {
@@ -284,6 +293,7 @@ export function ParsedFieldsPanel({
                         value={values[f.key] ?? ""}
                         evidence={parse.evidence[f.key]}
                         override={latest[f.key]}
+                        onRetract={latest[f.key] ? onRetract?.(latest[f.key]) : undefined}
                         onEdit={
                           onOverride
                             ? () => setEditingKey((k) => (k === f.key ? null : f.key))

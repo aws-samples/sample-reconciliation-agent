@@ -89,7 +89,8 @@ export interface DealHistoryEntry {
     | "APPROVED"
     | "UPLOAD_ACCEPTED"
     | "UPLOAD_REJECTED"
-    | "REJECTED";
+    | "REJECTED"
+    | "LESSON_RETRACTED";
   detail?: string;
 }
 
@@ -104,12 +105,16 @@ export type OverrideStage = "review" | "break";
  * Whether an override reached the knowledge memory as a lesson.
  *
  * `pending` between the deal write and the memory write (and left there only if recording the
- * outcome lost a race); `off` when no knowledge memory is deployed.
+ * outcome lost a race); `off` when no knowledge memory is deployed; `retracted` once the lesson's
+ * record was deleted — by its author or an admin, from the deal or from the Memory Manager. The
+ * override itself, and the value it set, stay.
  */
 export interface OverrideMemory {
-  status: "pending" | "sent" | "failed" | "off";
+  status: "pending" | "sent" | "failed" | "off" | "retracted";
   event_id?: string;
   error?: string;
+  retracted_by?: string;
+  retracted_at?: string;
 }
 
 /** One reviewer's change to one field, with the reason they gave (design §4). Append-only. */
@@ -175,11 +180,34 @@ export interface SkillProposal {
   decided_by?: string;
 }
 
+/**
+ * Where a lesson came from: the override whose provenance (override id, author, deal) the strategy
+ * copied onto the record, joined by the BFF with that override on its deal.
+ */
+export interface LessonSource {
+  kind: "override";
+  override_id: string;
+  author: string;
+  deal_id: string;
+  /** From the override on the deal; absent when the deal or override can no longer be read. */
+  field?: string;
+  opportunity_name?: string;
+  reason?: string;
+  at?: string;
+}
+
 export interface MemoryRecord {
   id: string;
   namespace: string;
   content: string;
   createdAt: string;
+  /** Provenance metadata on the record, as stored (see `LessonSource`). */
+  metadata?: Record<string, string>;
+  /**
+   * Present for a lesson an override taught; absent for a rule saved by hand, by the assistant, or
+   * by an override made before provenance was recorded.
+   */
+  source?: LessonSource;
 }
 
 export interface OmsFieldDef {
