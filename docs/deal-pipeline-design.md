@@ -734,3 +734,105 @@ at its contract key, a blank seed creates nothing, the two prefix shapes that br
 refused) and `infra/modules/frontend-ecs/tests/console_settings.tftest.hcl`. Nothing here creates a
 group; `console-admins` in the examples is an identity-provider group an operator maintains, like the
 four app groups.
+
+## 15. One email, several orders (design; not built)
+
+Status: designed, not implemented. The parser still stages one deal per email. Fictional samples
+for this section are in `data/deal-emails-multi-order/`. They stay out of the Simulate corpus until
+the parser can stage orders.
+
+### What arrives
+
+The desk's real notices come in three shapes. The samples reproduce the first two with invented
+names and numbers.
+
+1. **One security in several tranches.** The issuer, instrument, secured level, ratings, use of
+   proceeds, left lead and dates are shared. Currency, tenor, size, call protection and price talk
+   vary per tranche. Some values are stated relative to another tranche ("EUR: +100bps from USD"),
+   and some are not yet known ("tranche sizes TBD"). Sample m1 has five tranches across two
+   currencies.
+2. **A loan and a bond in one thread.** Even Pipeline Type and Security Type differ between the
+   orders, as do the left lead, tenor, call protection and pricing basis (spread over SOFR vs.
+   coupon talk). A facility can also split (term loan B plus a delayed-draw term loan). Sample m2
+   stages three orders.
+3. **A loan and a bond for one issuer as two separate emails.** Each email is 1:1 and needs nothing
+   here. Linking the two (same issuer, days apart) is a separate, later feature.
+
+Which fields are shared is therefore a property of the email, not of the schema. In shape 2, Pipeline
+Type itself varies.
+
+### Data model
+
+- **One deal record per order.** Each order is one OMS row, approved, uploaded, rejected and
+  overridden on its own. So it keeps everything §4 gives a deal: its own CSV, history, upload
+  result and `overrides[]`. That makes todo 1's override model apply per order unchanged. New
+  fields:
+  - `order_index`: 0-based.
+  - `order_count`.
+  - `order_label`: display only, built from what distinguishes the order, e.g. "USD 5yr", "EUR
+    8yr", "TLB", "DDTL", "Notes".
+- **The email lists its deals.** `deal_id` becomes `deal_ids: string[]`. `deal_id` stays, set to the
+  first order, until every reader has moved.
+- **The parse returns orders.** `ParseOutput` gains `orders: { label, fields, evidence,
+  assumptions }[]`, each with a complete field set, shared values repeated. The parser does not
+  declare which fields are shared; the UI computes that by comparison, so it can't be wrong in a way
+  the reviewer can't see.
+- **Derived values are evidence.** A value computed from another tranche records that in its
+  evidence `rule` ("USD 5yr talk + 100 bps"). An unknown size is blank with an assumption saying
+  why.
+- **Re-parse is unchanged.** It already supersedes every open deal of the email, not just one.
+
+### UI: Inbox parsed panel
+
+This is the layout chosen on 2026-10-07: order chips across the top, then fields split into "shared
+by all orders" and "this order". With one order the strip is hidden and everything is "this order",
+which is exactly today's 1:1 panel.
+
+```
+│ 3 orders from this email                 │
+│ [●1 · TLB] [2 · DDTL] [3 · Notes ✎2]     │   chip: label, status pill, override count
+│                                          │
+│ SHARED BY ALL ORDERS                     │   current values equal across every order
+│  Issuer        Oakline Home Services ✎   │
+│  UOP           Refinance             ✎   │
+│ THIS ORDER · 1 · TLB                     │   values that differ, or are blank in some
+│  Pipeline Type Loan                  ✎   │
+│  Issue Size    1,600.000             ✎   │
+│  Call Protect. 101 soft 6m  overridden ✎ │
+```
+
+- **Overriding a shared field** asks for its scope: *all N orders* (the default) or *this order
+  only*. "All" writes one override per order with the same reason, in one request, and sends **one**
+  lesson, not N. The first order's override owns the lesson (its `override_id` is the lesson's
+  provenance); the others record `memory: { status: "sent", lesson_of: <that id> }`. Retracting from
+  any of them retracts the one lesson and marks all of them.
+- **A value that diverges after an override** (one order changed alone) moves from "shared" to
+  "this order" on the next render, which is the truth.
+- **The evidence disclosure** shows a derived value's rule, so "EUR 5yr talk = USD + 100 bps" is
+  checkable against the USD tranche without leaving the panel.
+
+### UI: elsewhere
+
+- **Deals list:** one row per order, grouped under its email ("3 orders"), collapsed by default.
+- **Deal page:** "order 2 of 3 from email …" with links to the sibling orders. Approve and reject
+  stay per order. An admin-only "Approve all N" is a later convenience, not part of this design.
+- **Memory:** a shared-field lesson is phrased once, with the trigger the orders have in common. A
+  per-order lesson quotes that order's distinguishing attributes (currency, tenor, instrument) so
+  the extractor can tell "the EUR tranche" from "every tranche".
+
+### Contract changes
+
+| Where | Change |
+| --- | --- |
+| parser `stage_deal` tool | `orders: [...]`; the skill gains a "multi-tranche and multi-instrument notices" section on when to split and how to label |
+| `PATCH /emails/[id]/orders` (new) | `{ deal_ids, fields, reasons }` for a shared-field override across orders; per-order overrides keep `PATCH /deals/[id]` |
+| retract | follows `lesson_of` to the owning override |
+| mock OMS | unchanged: still one row per upload |
+
+### Open questions for the desk
+
+1. Does the OMS take N separate uploads for N orders (assumed here), or one file with N rows?
+2. Should a tranche whose size is "TBD" be staged blank, or held until the size is known?
+3. When a bond is mentioned in a loan launch but "launches next week", is it an order now, or later
+   when its own notice arrives?
+4. Should two emails for one issuer (shape 3) be linked in the Inbox?
