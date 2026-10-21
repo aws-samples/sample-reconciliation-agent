@@ -1,4 +1,4 @@
-import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
+import { readParam } from "@/lib/server/ssm";
 
 // Server-side helper: resolve the ACTIVE agent backend's evaluation data source.
 //
@@ -9,7 +9,6 @@ import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 // plus the backend's runtime log group together give the eval service both signals it needs
 // (spans + gen-ai event records) — same layout as the online eval configs.
 
-const REGION = process.env.AWS_REGION ?? "us-east-1";
 const SPANS_LOG_GROUP = process.env.HARNESS_LOG_GROUP ?? "aws/spans";
 const BACKEND_PARAM = process.env.AGENT_BACKEND_PARAM ?? "";
 
@@ -32,12 +31,11 @@ let _backend: { value: string; at: number } | null = null;
 export async function activeBackend(): Promise<string> {
   if (_backend && Date.now() - _backend.at < 30_000) return _backend.value;
   let value = "runtime";
+  // Every failure, not only an absent parameter, leaves the default standing: an evaluation must not
+  // fail because the selector could not be read.
   try {
     if (BACKEND_PARAM) {
-      const got = await new SSMClient({ region: REGION }).send(
-        new GetParameterCommand({ Name: BACKEND_PARAM }),
-      );
-      const v = (got.Parameter?.Value ?? "").trim().toLowerCase();
+      const v = ((await readParam(BACKEND_PARAM)) ?? "").trim().toLowerCase();
       if (v === "harness" || v === "runtime") value = v;
     }
   } catch {

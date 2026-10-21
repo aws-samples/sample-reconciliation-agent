@@ -1,10 +1,7 @@
 import { NextResponse } from "next/server";
-import {
-  SSMClient,
-  GetParameterCommand,
-  PutParameterCommand,
-} from "@aws-sdk/client-ssm";
 import { requireReconAdmin } from "@/lib/reconAdmin";
+import { AGENT_MODEL_IDS } from "@/lib/server/agentModels";
+import { readParam, writeParam } from "@/lib/server/ssm";
 
 // Same-origin BFF for platform config, backed by SSM parameters read at runtime:
 //   tier1Enabled          — deterministic Tier-1 route on/off (Tier-1 Lambda reads per batch)
@@ -38,37 +35,6 @@ const AGENT_MODEL_PARAM =
   process.env.AGENT_MODEL_PARAM ?? "/recon-dev/agent-model-id";
 const COMMENT_MODES = ["required", "optional", "disapprove-only"] as const;
 const AGENT_BACKENDS = ["runtime", "harness"] as const;
-// Selectable Tier-2 model ids, as cross-region inference profiles.
-//
-// KEEP IN SYNC with ALLOWED_MODEL_IDS in backend/recon_core/model_select.py, which enforces the same
-// list when the agent reads the parameter. There is no shared schema layer between the Python runtime
-// and this BFF, so the duplication is deliberate — but an id accepted here and rejected there is a
-// save that appears to work and then silently falls back to the deployed default.
-//
-// The `global.` variants are not a faster tier: they may route the request outside the US, which is a
-// data-residency decision and is invisible in the id. The Config tab labels it as such.
-const AGENT_MODEL_IDS = [
-  "us.anthropic.claude-opus-5",
-  "global.anthropic.claude-opus-5",
-  "us.anthropic.claude-sonnet-5",
-  "global.anthropic.claude-sonnet-5",
-  "us.anthropic.claude-fable-5-1",
-  "global.anthropic.claude-fable-5-1",
-] as const;
-
-function ssm() {
-  return new SSMClient({ region: REGION });
-}
-
-async function readParam(name: string): Promise<string | null> {
-  try {
-    const got = await ssm().send(new GetParameterCommand({ Name: name }));
-    return got.Parameter?.Value ?? null;
-  } catch (err) {
-    if ((err as { name?: string }).name === "ParameterNotFound") return null;
-    throw err;
-  }
-}
 
 function parseThreshold(raw: string | null): number | null {
   // Deployment default before the param exists. Must match the seed in
@@ -214,66 +180,27 @@ export async function PUT(req: Request) {
     const writes: Promise<unknown>[] = [];
     if (hasTier1) {
       writes.push(
-        ssm().send(
-          new PutParameterCommand({
-            Name: TIER1_PARAM,
-            Value: body.tier1Enabled ? "true" : "false",
-            Type: "String",
-            Overwrite: true,
-          }),
-        ),
+        writeParam(TIER1_PARAM, body.tier1Enabled ? "true" : "false"),
       );
     }
     if (hasAuto) {
       writes.push(
-        ssm().send(
-          new PutParameterCommand({
-            Name: AUTO_RESOLVE_PARAM,
-            Value:
-              body.autoResolveThreshold === null
-                ? "off"
-                : String(body.autoResolveThreshold),
-            Type: "String",
-            Overwrite: true,
-          }),
+        writeParam(
+          AUTO_RESOLVE_PARAM,
+          body.autoResolveThreshold === null
+            ? "off"
+            : String(body.autoResolveThreshold),
         ),
       );
     }
     if (hasComment) {
-      writes.push(
-        ssm().send(
-          new PutParameterCommand({
-            Name: COMMENT_REQ_PARAM,
-            Value: body.commentRequirement!,
-            Type: "String",
-            Overwrite: true,
-          }),
-        ),
-      );
+      writes.push(writeParam(COMMENT_REQ_PARAM, body.commentRequirement!));
     }
     if (hasBackend) {
-      writes.push(
-        ssm().send(
-          new PutParameterCommand({
-            Name: AGENT_BACKEND_PARAM,
-            Value: body.agentBackend!,
-            Type: "String",
-            Overwrite: true,
-          }),
-        ),
-      );
+      writes.push(writeParam(AGENT_BACKEND_PARAM, body.agentBackend!));
     }
     if (hasModel) {
-      writes.push(
-        ssm().send(
-          new PutParameterCommand({
-            Name: AGENT_MODEL_PARAM,
-            Value: body.agentModelId!,
-            Type: "String",
-            Overwrite: true,
-          }),
-        ),
-      );
+      writes.push(writeParam(AGENT_MODEL_PARAM, body.agentModelId!));
     }
     await Promise.all(writes);
     // The threshold is ENFORCED by AgentCore Policy on the egress gateway, so a non-null

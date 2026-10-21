@@ -1,13 +1,23 @@
 /**
- * Server-side authorization for the reconciliation BFF (`/api/recon/*`).
+ * Server-side authorization for the shell's BFF: `/api/recon/*`, `/api/pipeline/*` and `/api/me`.
  *
- * The Okta wrapper gates the UI and nothing else: the API routes underneath it read and WRITE with
- * the ECS task role, so without this an anonymous caller can PUT the agent system prompt or approve
- * a case (ledger write + outbound email) just by hitting the URL. This module is the verifier;
- * `src/proxy.ts` is the choke point that applies it to every route under `/api/recon/` before the
- * handler runs.
+ * Two applications share one Next.js server tier behind one app rail: Trade Reconciliation
+ * (`/api/recon`) and Deal Pipeline (`/api/pipeline`). Both act with the ECS task role, so an
+ * unauthenticated call to either one can read and WRITE production state. Live QA 2026-08-09 (P0-2)
+ * found exactly that on the recon BFF: an anonymous caller could PUT the agent system prompt or
+ * approve a case (ledger write + outbound email) just by hitting the URL. This module is the verifier
+ * that closed it; `src/proxy.ts` is the choke point that applies it to every matched route before the
+ * handler runs, and then layers per-app ACCESS on top (see `lib/auth/apps.ts`).
  *
- * Kept separate from the middleware so it is unit-testable without booting a Next.js server.
+ * The layers, from the outside in:
+ *  1. Authentication (this module): who is calling, and which groups the identity provider vouched
+ *     for. One token, one verification, shared by both apps, because the two apps are one OIDC client
+ *     on one origin.
+ *  2. App access (`lib/auth/apps.ts`, applied by the proxy): may this caller use THIS app at all.
+ *  3. App administration (`lib/auth/app-admin.ts`, applied inside the write routes): may
+ *     this caller change how the app behaves.
+ *
+ * Kept separate from the proxy so it is unit-testable without booting a Next.js server.
  *
  * Deliberate design points:
  *  - The browser sends its **ID token**. For an Okta OIDC app the ID token's `aud` is exactly
@@ -16,16 +26,44 @@
  *    API credential; that is acceptable here only because the BFF is this SPA's own server tier
  *    on the same origin. The hardening step is a custom Okta authorization server issuing
  *    access tokens with a dedicated audience.
- *  - A missing/incoherent configuration resolves to `misconfigured`, which the middleware turns
- *    into a **503 — never an open door**. A deploy that loses its issuer env var must break
- *    visibly rather than silently reopen the API.
+ *  - The Cognito branch verifies the same ID token against the pool that the console signs in
+ *    through, and additionally pins `token_use` — see the comment on that check for why `aud` alone
+ *    is not enough there. `cognito` is the DEFAULT provider: this is a sample customers deploy in
+ *    their own accounts, and it must be runnable without an external IdP tenant. An enterprise IdP
+ *    is added by federating SAML/OIDC INTO the pool, which changes nothing in this file — the
+ *    issuer stays the pool and the group claim is mapped there.
+ *  - A missing/incoherent configuration resolves to `misconfigured`, which the proxy turns into a
+ *    **503 — never an open door**. A deploy that loses its issuer env var must break visibly rather
+ *    than silently reopen the API.
+ *  - Anonymous mode is ONE switch for both apps. `ALLOW_ANONYMOUS_API=true` is the name; the
+ *    app-specific `RECON_ALLOW_ANONYMOUS_API` and `PIPELINE_ALLOW_ANONYMOUS_API` are still honoured
+ *    so a checkout or a dev deployment that predates the shell keeps working, but all three mean the
+ *    same thing. There is one server process, so there is no way to leave one app open and the other
+ *    verified; pretending otherwise with two switches would only invite the misconfiguration.
+ *  - Anonymous mode grants every configured app group, so a local run sees every app as an admin
+ *    (`ANONYMOUS_GROUPS` narrows that, which is how a developer previews what a restricted user
+ *    sees). Withholding the groups would buy no safety: the switch has already opened the whole BFF.
  */
 
+import { effectiveEnv } from "@/lib/console/settings";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { NextResponse } from "next/server";
 
+import { allConfiguredGroups } from "@/lib/auth/apps";
+
 /** How the BFF is configured to authorize callers. */
-export type ApiAuthMode = "okta" | "entra" | "anonymous" | "misconfigured";
+export type ApiAuthMode =
+  | "cognito"
+  | "okta"
+  | "entra"
+  | "anonymous"
+  | "misconfigured";
+
+/**
+ * The modes a request can actually be authorized under. `misconfigured` never yields `ok: true`, and
+ * saying so in the type is what lets `/api/me` hand the mode to the shell's `Viewer` without a cast.
+ */
+export type VerifiedAuthMode = Exclude<ApiAuthMode, "misconfigured">;
 
 export interface ApiAuthConfig {
   mode: ApiAuthMode;
@@ -40,33 +78,102 @@ export interface ApiAuthConfig {
 }
 
 export type AuthResult =
-  | { ok: true; mode: ApiAuthMode; subject: string; groups: string[] }
+  | { ok: true; mode: VerifiedAuthMode; subject: string; groups: string[] }
   | { ok: false; status: 401 | 503; message: string };
+
+/**
+ * The claim a provider carries group membership in when the deployment has not named one.
+ *
+ * Cognito is the odd one out and not by choice: a user pool emits group membership as
+ * `cognito:groups`, a reserved claim name it will not let you rename. Okta releases `groups` when the
+ * app is configured to, and Entra uses `groups` or `roles` depending on the app registration — both
+ * of which the previous default already covered, so neither changes.
+ */
+function defaultGroupsClaim(mode?: ApiAuthMode): string {
+  return mode === "cognito" ? "cognito:groups" : "groups";
+}
 
 /**
  * Read the caller's group memberships out of a verified token payload.
  *
- * Which claim carries them is a per-deployment fact, not a constant: Okta puts them in `groups` when
- * the app is configured to release them, Entra uses `groups` or `roles` depending on how the app
- * registration is set up, and an app that was never configured to release them at all sends none. So
- * the claim NAME comes from the environment and an absent claim yields an empty list — the caller is
- * simply in no groups, which every consumer must already handle.
+ * Which claim carries them is a per-deployment fact, not a constant: see `defaultGroupsClaim` for
+ * what each provider emits by default, and an app that was never configured to release them at all
+ * sends none. So the claim NAME can always be overridden from the environment and an absent claim
+ * yields an empty list — the caller is simply in no groups, which every consumer must already handle.
+ *
+ * `AUTH_GROUPS_CLAIM` wins over the per-provider default in every mode. That override is what a
+ * customer who federates their own IdP into the user pool needs: pool federation can map an incoming
+ * SAML/OIDC group attribute to a CUSTOM claim (`custom:groups`) rather than to `cognito:groups`,
+ * which is reserved for groups defined in the pool itself.
  *
  * Read only from a payload `jwtVerify` has already returned, never from an unverified token: a group
  * list is an authorization input, and the whole point is that the caller could not have written it.
  *
  * @param payload the verified JWT payload.
  * @param env process environment to read `AUTH_GROUPS_CLAIM` from (injected in tests).
+ * @param mode the resolved auth mode, which decides the default claim name. Omitted means the
+ *   pre-Cognito default (`groups`).
  * @returns the caller's groups, or `[]` when the claim is absent or not a list of strings.
  */
-function groupsFrom(
+export function groupsFrom(
   payload: Record<string, unknown>,
   env: Record<string, string | undefined> = process.env,
+  mode?: ApiAuthMode,
 ): string[] {
-  const claim = env.AUTH_GROUPS_CLAIM || "groups";
+  const claim = env.AUTH_GROUPS_CLAIM || defaultGroupsClaim(mode);
   const raw = payload[claim];
   if (!Array.isArray(raw)) return [];
   return raw.filter((g): g is string => typeof g === "string");
+}
+
+/**
+ * The variables that switch the BFF into anonymous mode, in the order they are documented.
+ *
+ * `ALLOW_ANONYMOUS_API` is the shell-era name. The other two are what each app used before it shared
+ * a server with the other; they stay so `.env.local` files and dev task definitions written against
+ * either app keep working unchanged. Each must be the exact string "true" — never a truthy check — so
+ * a generic `NODE_ENV`/`CI` style variable cannot flip the API open by accident.
+ */
+const ANONYMOUS_SWITCHES = [
+  "ALLOW_ANONYMOUS_API",
+  "RECON_ALLOW_ANONYMOUS_API",
+  "PIPELINE_ALLOW_ANONYMOUS_API",
+] as const;
+
+/**
+ * Whether the environment asks for anonymous mode.
+ *
+ * @param env process environment to read (injected in tests).
+ * @returns true when any of the three switches is exactly "true".
+ */
+export function isAnonymousEnabled(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return ANONYMOUS_SWITCHES.some((name) => env[name] === "true");
+}
+
+/**
+ * The groups an anonymous caller is treated as belonging to.
+ *
+ * Default is every group the app registry knows about, so a local run without an identity provider
+ * sees every app and every admin surface. `ANONYMOUS_GROUPS` (comma-separated, each name trimmed)
+ * replaces that list when it names at least one group, which is how a developer previews the shell
+ * as a restricted user: `ANONYMOUS_GROUPS=deal-desk` shows the pipeline as a plain user and hides a
+ * restricted recon app. To preview a caller in NO groups, name one that no app is configured with
+ * (`ANONYMOUS_GROUPS=nobody`); a blank value is read as "unset" because the codebase reads every
+ * other empty group variable that way too.
+ *
+ * @param env process environment to read (injected in tests).
+ * @returns the effective group list, de-duplicated.
+ */
+export function anonymousGroups(
+  env: Record<string, string | undefined> = process.env,
+): string[] {
+  const listed = (env.ANONYMOUS_GROUPS ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name !== "");
+  return listed.length > 0 ? [...new Set(listed)] : allConfiguredGroups(env);
 }
 
 /** Drop a trailing slash so `${issuer}/v1/keys` never doubles up. */
@@ -90,13 +197,54 @@ export function oktaJwksUri(issuer: string): string {
 }
 
 /**
+ * The issuer a Cognito user pool stamps into every token it mints.
+ *
+ * Fixed by the service: `https://cognito-idp.<region>.amazonaws.com/<pool-id>`. Note it is NOT the
+ * hosted UI domain the browser signs in through — a deployment that puts the login domain in
+ * `COGNITO_USER_POOL_ID` fails every verification with an issuer mismatch, which is why this is
+ * derived rather than configured.
+ */
+export function cognitoIssuer(region: string, poolId: string): string {
+  return `https://cognito-idp.${region}.amazonaws.com/${poolId}`;
+}
+
+/**
+ * The provider this deployment verifies against, and whether it was named or defaulted.
+ *
+ * `cognito` is the default (decided 2026-09-16), mirroring the browser's `lib/auth/provider.ts` so
+ * the two halves can never disagree about which provider is in play: a server defaulting to entra
+ * while the browser signs in with Cognito would 401 every call from a UI that looks signed in.
+ * Anything explicitly named is still honoured exactly as before, including an unknown value, which
+ * stays `misconfigured` rather than falling back to anything.
+ */
+function resolveProvider(env: Record<string, string | undefined>): {
+  provider: string;
+  named: boolean;
+} {
+  const raw = (
+    env.AUTH_PROVIDER ??
+    env.NEXT_PUBLIC_AUTH_PROVIDER ??
+    ""
+  ).toLowerCase();
+  return raw
+    ? { provider: raw, named: true }
+    : { provider: "cognito", named: false };
+}
+
+/**
  * Resolve the authorization configuration from the environment.
  *
  * Pure (env is injectable) so the precedence rules are unit-testable. Note these are PLAIN env
  * vars, not `NEXT_PUBLIC_*`: the Dockerfile bakes `NEXT_PUBLIC_*` into the builder stage only,
  * so the running container cannot read them — the ECS task definition supplies `AUTH_PROVIDER`
- * / `OKTA_ISSUER` / `OKTA_CLIENT_ID` at runtime. The `NEXT_PUBLIC_*` fallbacks below exist only
- * for `next dev`, which loads `.env.local` into the server process.
+ * / `COGNITO_USER_POOL_ID` / `COGNITO_CLIENT_ID` (or the OKTA_/ENTRA_ pair) at runtime. The
+ * `NEXT_PUBLIC_*` fallbacks below exist only for `next dev`, which loads `.env.local` into the
+ * server process.
+ *
+ * Precedence: the anonymous switch wins over a configured provider. A `.env.local` that names the
+ * provider the BROWSER should use (`NEXT_PUBLIC_AUTH_PROVIDER`) while opening the server for local
+ * work is the normal dev setup, not a conflict. An unset provider means `cognito`, the same default
+ * the browser applies; an unrecognised one is `misconfigured`, never a fallback.
  *
  * @param env process environment to read (injected in tests).
  * @returns the resolved config; `mode: "misconfigured"` when it cannot be trusted.
@@ -104,17 +252,51 @@ export function oktaJwksUri(issuer: string): string {
 export function resolveApiAuth(
   env: Record<string, string | undefined> = process.env,
 ): ApiAuthConfig {
-  // Explicit local-dev escape hatch. Deliberately an exact "true" match on a
-  // recon-specific name so it cannot be switched on by a generic NODE_ENV/CI variable.
-  if (env.RECON_ALLOW_ANONYMOUS_API === "true") {
+  if (isAnonymousEnabled(env)) {
     return { mode: "anonymous" };
   }
 
-  const provider = (
-    env.AUTH_PROVIDER ??
-    env.NEXT_PUBLIC_AUTH_PROVIDER ??
-    ""
-  ).toLowerCase();
+  const { provider, named } = resolveProvider(env);
+
+  if (provider === "cognito") {
+    const poolId = (
+      env.COGNITO_USER_POOL_ID ??
+      env.NEXT_PUBLIC_COGNITO_USER_POOL_ID ??
+      ""
+    ).trim();
+    const audience = (
+      env.COGNITO_CLIENT_ID ??
+      env.NEXT_PUBLIC_COGNITO_CLIENT_ID ??
+      ""
+    ).trim();
+    if (!poolId || !audience) {
+      // Both names in the message, exactly like the okta and entra branches, so the 503 body says
+      // which variable a deploy dropped. Two wordings because the two situations need different
+      // next steps: an operator who NAMED cognito has a missing variable, while a laptop that named
+      // nothing at all mostly wants to know about the anonymous switch (and would otherwise be told
+      // to configure a user pool it does not have).
+      return {
+        mode: "misconfigured",
+        reason: named
+          ? "AUTH_PROVIDER=cognito but COGNITO_USER_POOL_ID and/or COGNITO_CLIENT_ID are unset"
+          : "AUTH_PROVIDER is unset, so the default provider is cognito, but " +
+            "COGNITO_USER_POOL_ID and/or COGNITO_CLIENT_ID are unset — set them, name another " +
+            "provider, or set ALLOW_ANONYMOUS_API=true for local dev",
+      };
+    }
+    // Region the same way every other server-side reader in this app does it, NEXT_PUBLIC_ fallback
+    // included for `next dev`.
+    const region =
+      (env.AWS_REGION || env.NEXT_PUBLIC_AWS_REGION || "").trim() || "us-east-1";
+    const issuer = cognitoIssuer(region, poolId);
+    return {
+      mode: "cognito",
+      issuer,
+      // A user pool publishes its keys at the standard OIDC location under its issuer.
+      jwksUri: `${issuer}/.well-known/jwks.json`,
+      audience,
+    };
+  }
 
   if (provider === "okta") {
     const issuer = trimSlash(
@@ -152,11 +334,10 @@ export function resolveApiAuth(
     };
   }
 
+  // Only an explicitly named provider can reach here: an unset one resolved to cognito above.
   return {
     mode: "misconfigured",
-    reason: provider
-      ? `unsupported AUTH_PROVIDER "${provider}" (expected "okta" or "entra")`
-      : "AUTH_PROVIDER is unset — set it, or set RECON_ALLOW_ANONYMOUS_API=true for local dev",
+    reason: `unsupported AUTH_PROVIDER "${provider}" (expected "cognito", "okta" or "entra")`,
   };
 }
 
@@ -205,12 +386,16 @@ function statusForVerifyError(error: unknown): 401 | 503 {
 }
 
 /**
- * Authorize an inbound BFF request.
+ * Authenticate an inbound BFF request.
+ *
+ * Authentication only: the result says who is calling and which groups they hold. Whether those
+ * groups admit them to the app the path belongs to is the proxy's decision (`lib/auth/access.ts`),
+ * and whether they may administer it is each write route's (`lib/auth/app-admin.ts`).
  *
  * @param request the incoming request (only its `authorization` header is read).
  * @param config resolved auth configuration (injected in tests).
- * @returns `{ ok: true }` with the verified subject, or `{ ok: false }` with the status the
- *   middleware should return. Never throws.
+ * @returns `{ ok: true }` with the verified subject and groups, or `{ ok: false }` with the status
+ *   the proxy should return. Never throws.
  */
 export async function authorizeRequest(
   request: Request,
@@ -220,19 +405,18 @@ export async function authorizeRequest(
     return {
       ok: false,
       status: 503,
-      message: `recon API authorization is not configured: ${config.reason}`,
+      message: `API authorization is not configured: ${config.reason}`,
     };
   }
   if (config.mode === "anonymous") {
-    // `RECON_ALLOW_ANONYMOUS_API=true` already grants the whole BFF, so withholding the admin group
-    // here would only make the Config tab untestable locally without pretending to secure anything.
-    // The group is named from the environment so a local run and the deployment agree on the string.
-    const admin = process.env.RECON_ADMIN_GROUP;
+    // Groups are named from the environment overlaid with the console's stored settings, so a group
+    // renamed on the Settings screen is still held by the local anonymous identity; see
+    // `anonymousGroups` for why the default is "everything" and how to narrow it.
     return {
       ok: true,
       mode: "anonymous",
       subject: "anonymous",
-      groups: admin ? [admin] : [],
+      groups: anonymousGroups(await effectiveEnv()),
     };
   }
 
@@ -259,11 +443,33 @@ export async function authorizeRequest(
     if (!payload.sub) {
       return { ok: false, status: 401, message: "token has no sub claim" };
     }
+    // ⚠️ Cognito mints TWO kinds of token from one pool with one signing key, and they carry the
+    // app client id in different claims: an ID token puts it in `aud`, while an ACCESS token has no
+    // `aud` at all and puts it in `client_id`. This app verifies the ID token (that is what
+    // `lib/auth/client-token.ts` supplies), so the `audience` check above already rejects an access
+    // token today — a token with no `aud` cannot match one. This assertion is the belt to that
+    // braces: any signed-in user can obtain an access token for the same pool, and it is signed by
+    // the same key from the same issuer, so the ONLY thing standing between it and acceptance is the
+    // audience check. Relax that check in the future — to accept a second client id, to support a
+    // resource server audience — and an `aud`-less access token starts sailing through. `token_use`
+    // is stamped by Cognito, is inside the signature, and cannot be `"id"` on an access token, so
+    // pinning it keeps the two apart no matter what happens to the audience rule.
+    if (config.mode === "cognito" && payload.token_use !== "id") {
+      return {
+        ok: false,
+        status: 401,
+        message:
+          `token rejected: expected a Cognito ID token (token_use "id"), got ` +
+          `${JSON.stringify(payload.token_use ?? null)}`,
+      };
+    }
     return {
       ok: true,
       mode: config.mode,
       subject: payload.sub,
-      groups: groupsFrom(payload),
+      // The default claim name depends on the provider: Cognito's is `cognito:groups`. An explicit
+      // AUTH_GROUPS_CLAIM still wins for every mode.
+      groups: groupsFrom(payload, process.env, config.mode),
     };
   } catch (error) {
     const status = statusForVerifyError(error);
@@ -282,10 +488,11 @@ export async function authorizeRequest(
 /**
  * The authenticated principal for a write route, or the response explaining why there is none.
  *
- * `src/proxy.ts` has already rejected unauthenticated `/api/recon/*` by the time a handler runs, so
- * this rarely fails — it exists to NAME the actor on rows that record who changed them. Deriving that
- * name any other way (a header the client sets, a default like "operator") would produce an audit
- * trail that looks authoritative and is not, which is worse than having none.
+ * `src/proxy.ts` has already rejected unauthenticated and un-admitted `/api/recon/*` and
+ * `/api/pipeline/*` calls by the time a handler runs, so this rarely fails — it exists to NAME the
+ * actor on rows that record who changed them. Deriving that name any other way (a header the client
+ * sets, a default like "operator") would produce an audit trail that looks authoritative and is not,
+ * which is worse than having none.
  *
  * @param req - the incoming request.
  * @returns `{ actor }` on success, or `{ error }` holding the response to return unchanged.

@@ -271,7 +271,7 @@ resource "aws_iam_role_policy" "agent" {
         # Recall consolidated analyst lessons (lessons_learned strategy) before classifying.
         Effect   = "Allow"
         Action   = ["bedrock-agentcore:RetrieveMemoryRecords", "bedrock-agentcore:ListMemoryRecords"]
-        Resource = [aws_bedrockagentcore_memory.this.arn, "${aws_bedrockagentcore_memory.this.arn}/*"]
+        Resource = [module.memory.memory_arn, "${module.memory.memory_arn}/*"]
       },
       {
         # Two Config-tab values this container reads per invocation: the auto-resolve threshold and
@@ -372,47 +372,12 @@ resource "aws_iam_role_policy" "agent" {
 # AgentCore Memory
 # ---------------------------------------------------------------------------------
 
-resource "aws_bedrockagentcore_memory" "this" {
-  name                  = "${replace(var.name_prefix, "-", "_")}_memory"
-  event_expiry_duration = 30 # days
-  # AWS stores the strategy's execution role on the parent Memory resource too — must be
-  # declared here as well, or every plan wants to null it back out (permanent drift).
-  memory_execution_role_arn = aws_iam_role.memory.arn
-}
-
-# Execution role AgentCore Memory assumes to run the extraction/consolidation LLM passes for the
-# lessons-learned strategy below.
-resource "aws_iam_role" "memory" {
-  name = "${var.name_prefix}-memory"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Service = "bedrock-agentcore.amazonaws.com" }
-      Action    = "sts:AssumeRole"
-    }]
-  })
-}
-
-resource "aws_iam_role_policy" "memory" {
-  name = "${var.name_prefix}-memory-policy"
-  role = aws_iam_role.memory.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      # bedrock:InvokeModel targets runtime-selectable foundation models / cross-region
-      # inference profiles (chosen via the Config tab); scoped to every foundation-model and
-      # this account's inference-profile ARNs (not fixed model ids) so model switching still works.
-      Effect = "Allow"
-      Action = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
-      Resource = [
-        "arn:aws:bedrock:*::foundation-model/*",
-        "arn:aws:bedrock:${var.region}:${local.account_id}:inference-profile/*",
-      ]
-    }]
-  })
-}
-
+# The memory, its execution role and policy, and the lessons-learned strategy are an instance of
+# modules/agentcore-memory, shared with the deal pipeline's two memories. The four `moved` blocks
+# after the call carry the LIVE resources -- the memory holds every stored recon lesson -- to their
+# module addresses, and every argument is passed with exactly the value it had inline, so a plan
+# shows moves and nothing else (infra/README.md, "Plan checklist").
+#
 # Lessons-learned strategy. Captures how analysts decided to proceed (approvals, and disapprovals
 # with correction comments) as consolidated, retrievable memories so future reconciliations of
 # similar items are informed by prior corrections. The recon agent writes these as memory events
@@ -423,31 +388,36 @@ resource "aws_iam_role_policy" "memory" {
 # a general-purpose personal assistant — "extract meaningful information about the users". Fed a
 # reconciliation decision it produces records of the form "The user made an analyst decision for
 # reconciliation item <item_id> with a bulk status of CLOSED_NO_ACTION on <date>": an audit-trail
-# entry the DynamoDB ledger already holds, which generalizes to nothing and displaces the records
-# that would inform a future item.
+# entry the DynamoDB ledger already holds, which generalizes to nothing
+# and displaces the records that would inform a future item.
 #
 # Only EXTRACTION is overridden. Consolidation's Add/Update/Skip behaviour is already what we want,
 # and AWS is explicit that editing that prompt (e.g. renaming AddMemory) breaks the pipeline. When
-# extraction returns an empty list, nothing reaches consolidation, so this is sufficient.
-resource "aws_bedrockagentcore_memory_strategy" "lessons" {
-  memory_id                 = aws_bedrockagentcore_memory.this.id
-  name                      = "lessons_learned"
-  type                      = "CUSTOM"
-  namespaces                = ["reconciliation/lessons/{actorId}"]
-  memory_execution_role_arn = aws_iam_role.memory.arn
-  description               = "Generalizable lessons derived from analyst approve/disapprove decisions and correction comments."
+# extraction returns an empty list, nothing reaches consolidation, so this is sufficient. The module
+# also documents that `append_to_prompt` REPLACES the default instructions despite its name, which is
+# why the prompt it receives is a complete instruction set.
+module "memory" {
+  source = "../agentcore-memory"
 
-  configuration {
-    type = "SEMANTIC_OVERRIDE"
+  name              = "${replace(var.name_prefix, "-", "_")}_memory"
+  event_expiry_days = 30 # days
+  region            = var.region
+  account_id        = local.account_id
 
-    extraction {
-      model_id = var.memory_model_id
-      # NOTE: `append_to_prompt` REPLACES the default instructions despite its name (AWS: "The
-      # content of appendToPrompt replaces the default instructions in the system prompt"). This is
-      # therefore a complete instruction set, built on the documented built-in semantic extraction
-      # prompt. The service appends the output schema itself — do not restate or alter it, and keep
-      # the `language` field requirement the schema demands.
-      append_to_prompt = <<-EOT
+  # Execution role AgentCore Memory assumes to run the extraction/consolidation LLM passes for the
+  # lessons-learned strategy (the module names its policy "<role>-policy", as before).
+  execution_role_name = "${var.name_prefix}-memory"
+
+  strategy = {
+    name        = "lessons_learned"
+    namespaces  = ["reconciliation/lessons/{actorId}"]
+    description = "Generalizable lessons derived from analyst approve/disapprove decisions and correction comments."
+    model_id    = var.memory_model_id
+    # ⚠️ Byte for byte the prompt the live strategy was created with, at the SAME indentation: the
+    # `<<-` form strips the common leading whitespace, so the stored string is unchanged only while
+    # every line keeps its position. A trailing-newline or indentation change here is an in-place
+    # update of the live strategy, which the plan checklist forbids.
+    extraction_prompt = <<-EOT
         You are a long-term memory extraction agent supporting a reconciliation analyst assist
         system. Your task is to identify and extract GENERALIZABLE LESSONS from a list of messages
         describing analyst decisions on reconciliation items.
@@ -490,9 +460,29 @@ resource "aws_bedrockagentcore_memory_strategy" "lessons" {
           they do not count toward language detection.
         - If the messages are in English, respond in English.
         </language_requirement>
-      EOT
-    }
+    EOT
   }
+}
+
+# State-only moves of the resources declared inline here until 2026-09: same names, same arguments.
+moved {
+  from = aws_bedrockagentcore_memory.this
+  to   = module.memory.aws_bedrockagentcore_memory.this
+}
+
+moved {
+  from = aws_iam_role.memory
+  to   = module.memory.aws_iam_role.memory[0]
+}
+
+moved {
+  from = aws_iam_role_policy.memory
+  to   = module.memory.aws_iam_role_policy.memory[0]
+}
+
+moved {
+  from = aws_bedrockagentcore_memory_strategy.lessons
+  to   = module.memory.aws_bedrockagentcore_memory_strategy.this[0]
 }
 
 # ---------------------------------------------------------------------------------
@@ -528,7 +518,7 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
   }
 
   environment_variables = {
-    MEMORY_ID = aws_bedrockagentcore_memory.this.id
+    MEMORY_ID = module.memory.memory_id
     # No KB_ID: the container never calls Bedrock KB directly. Its knowledge-base read is an MCP
     # tool call to `managed-kb___Retrieve` over the gateway (gateway_mcp.py aliases it to the short
     # name `search_guidance`), and the knowledgeBaseId is bound admin-side on the connector target
@@ -1791,7 +1781,24 @@ locals {
   # surface, so `contacts___list_templates` — the name a single combined target would have produced —
   # is not an abbreviation of the second entry; it is an unrecognized action that would put this
   # whole policy in UPDATE_FAILED and cost the agent every read.
-  cedar_reads = "permit(principal, action in [AgentCore::Action::\"general-ledger___search_ledger\", AgentCore::Action::\"notices___search_notices\", AgentCore::Action::\"managed-kb___Retrieve\", AgentCore::Action::\"correspondence-search___search_correspondence\", AgentCore::Action::\"contacts___list_contacts\", AgentCore::Action::\"templates___list_templates\", AgentCore::Action::\"microsoft-graph___listSharedMailboxMessages\", AgentCore::Action::\"microsoft-graph___sendSharedMailboxMail\"], resource == AgentCore::Gateway::\"${local.gw_arn}\");"
+  # The microsoft-graph target is created by modules/microsoft-graph-obo against THIS gateway, not
+  # here, so this module cannot see whether it exists — hence var.graph_tool_enabled. Naming an action
+  # whose target is absent does not degrade the policy, it FAILS it: the store rejects the whole
+  # document with `unrecognized action`, every read is denied, and the apply stops. That is what a
+  # default deployment did, because graph_enabled defaults to false while these two entries were
+  # unconditional.
+  cedar_read_actions = concat([
+    "general-ledger___search_ledger",
+    "notices___search_notices",
+    "managed-kb___Retrieve",
+    "correspondence-search___search_correspondence",
+    "contacts___list_contacts",
+    "templates___list_templates",
+    ], var.graph_tool_enabled ? [
+    "microsoft-graph___listSharedMailboxMessages",
+    "microsoft-graph___sendSharedMailboxMail",
+  ] : [])
+  cedar_reads = "permit(principal, action in [${join(", ", [for a in local.cedar_read_actions : "AgentCore::Action::\"${a}\""])}], resource == AgentCore::Gateway::\"${local.gw_arn}\");"
   # The gateway types `context.input.confidence` as a Cedar DECIMAL (the tool schema declares it a
   # number), so compare via the decimal extension — a bare `>= <Long>` fails validation. Guard the
   # optional attribute with `has` first. The agent passes confidence as an integer percent [0..100];

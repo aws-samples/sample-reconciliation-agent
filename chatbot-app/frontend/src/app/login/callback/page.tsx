@@ -12,7 +12,7 @@ import { useRouter } from "next/navigation";
  * `isLoginRedirect()`, calls `handleLoginRedirect()`, and only renders its children once the
  * session is established — so by the time THIS page mounts, auth is complete and the URL has been
  * cleaned. All this component does is forward the now-authenticated user to the app landing
- * (`/` → `/recon/dashboard`).
+ * (`/` is the console landing: it opens the only accessible app or shows the chooser).
  */
 export default function LoginCallback() {
   const router = useRouter();

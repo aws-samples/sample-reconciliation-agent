@@ -10,14 +10,28 @@
  * identity provider anywhere in this deployment and so no Terraform resource that grants this: an
  * operator adds someone to the group in Okta or Entra, and the next token they get carries it.
  *
+ * This is the ADMIN half of the recon app's access model. The ACCESS half — may this caller use the
+ * app at all — is decided per request by the proxy from `RECON_ACCESS_GROUP` (see `lib/auth/apps.ts`),
+ * and the admin group named here implies access there, so an admin never needs to be in both groups.
+ * In local dev, `ALLOW_ANONYMOUS_API=true` grants this group automatically and `ANONYMOUS_GROUPS`
+ * narrows that; see `api-auth.ts`.
+ *
  * Fails closed when `RECON_ADMIN_GROUP` is unset. A deployment that loses the variable locks everyone
  * out of the Config tab, which is loud, wrong in the safe direction, and fixed by one env var — where
  * the alternative reading of "unset means unrestricted" would quietly reopen the hole this closes.
+ *
+ * The group name is read through the registry's `adminGroupFor` (trimmed, blank = unset) rather than
+ * straight from `process.env`, so this helper and `/api/me`'s `resolveAppAccess` agree byte-for-byte.
+ * Before that, a tfvars value with a trailing space made the rail show an admin chip while every
+ * write route answered 403 naming a group nobody could see the difference in.
+ *
+ * The implementation is `lib/auth/app-admin.ts`, shared with the pipeline and parameterised by app;
+ * this module keeps the recon-named entry points so the recon routes and their tests read as before.
  */
 
-import { NextResponse } from "next/server";
+import type { NextResponse } from "next/server";
 
-import { authorizeRequest } from "@/lib/api-auth";
+import { isAppAdmin, requireAppAdmin } from "@/lib/auth/app-admin";
 
 /**
  * Whether a caller's groups include the configured admin group.
@@ -30,9 +44,7 @@ export function isReconAdmin(
   groups: string[],
   env: Record<string, string | undefined> = process.env,
 ): boolean {
-  const required = env.RECON_ADMIN_GROUP;
-  if (!required) return false;
-  return groups.includes(required);
+  return isAppAdmin("recon", groups, env);
 }
 
 /**
@@ -47,32 +59,8 @@ export function isReconAdmin(
  *   unchanged — 401/503 from token verification, or 403 when the caller is authenticated but not an
  *   admin.
  */
-export async function requireReconAdmin(
+export function requireReconAdmin(
   req: Request,
 ): Promise<{ actor: string } | { error: NextResponse }> {
-  const auth = await authorizeRequest(req);
-  if (!auth.ok) {
-    return {
-      error: NextResponse.json(
-        { error: auth.message },
-        { status: auth.status },
-      ),
-    };
-  }
-  if (!isReconAdmin(auth.groups)) {
-    // The message names the group and the variable. A 403 that says only "forbidden" sends an operator
-    // to read this source to find out which group they are missing.
-    const required = process.env.RECON_ADMIN_GROUP;
-    return {
-      error: NextResponse.json(
-        {
-          error: required
-            ? `this endpoint requires membership of the "${required}" group; ${auth.subject} is not a member`
-            : "RECON_ADMIN_GROUP is not configured, so no caller can change configuration",
-        },
-        { status: 403 },
-      ),
-    };
-  }
-  return { actor: auth.subject };
+  return requireAppAdmin("recon", req);
 }

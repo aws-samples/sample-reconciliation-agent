@@ -1,24 +1,30 @@
 #!/usr/bin/env bash
-# Stage backend/ plus the vendored pip dependencies into <staging_dir>, ready for
+# Stage backend/ plus any vendored pip dependencies into <staging_dir>, ready for
 # data.archive_file.lambda to zip.
 #
 # This is a committed script rather than an inline local-exec heredoc because it has two
 # callers, and they run at different points in Terraform's lifecycle:
 #
-#   1. terraform_data.stage's local-exec (main.tf) -- at APPLY time.
-#   2. CI, and anyone planning from a fresh checkout -- BEFORE `terraform plan`.
+#   1. terraform_data.stage's local-exec (main.tf) -- at APPLY time, whenever the sources,
+#      dependency list, platform or Python version change.
+#   2. A developer rebuilding a missing staging directory BEFORE `terraform plan`.
 #
-# The second caller is the reason this must be reusable. data.archive_file.lambda reads
-# source_dir at PLAN time, but the provisioner that fills it only runs at APPLY time, and
-# .build/ is gitignored. So a checkout that has never applied (every CI runner, every new
-# git worktree) fails to plan with "could not archive missing directory" until this has run
-# once. Duplicating the logic in the pipeline would leave two copies to drift apart; calling
-# this script keeps the zip's contents defined in exactly one place.
+# The second caller exists because data.archive_file.lambda reads source_dir at PLAN time while
+# the provisioner that fills it only runs at APPLY time, and .build/ is gitignored. A checkout
+# whose state already records terraform_data.stage as current, but whose .build/ is gone
+# (`git clean -fdx`, a clone with copied state), fails to plan with "could not archive missing
+# directory" until staging is rebuilt -- either by running this script with the same arguments
+# main.tf passes, or with `terraform apply -replace=module.lambda_package.terraform_data.stage`.
+# A checkout with NO state does not hit this: the pending creation of terraform_data.stage
+# defers the archive read to apply. Keeping the logic in one script means the hand-run and the
+# provisioner cannot drift apart.
 #
 # Changing this file does NOT re-trigger staging on its own: terraform_data.stage keys on
 # local.stage_hash (backend sources + dependency set + platform + python version), not on
 # the script body. That is deliberate -- editing a comment here must not repackage and
-# redeploy every backend Lambda.
+# redeploy both Lambdas. The rsync --exclude list below IS mirrored in main.tf
+# (local.unstaged_names + local.unstaged_suffixes): a file this script does not stage must not be
+# hashed either, and a file that is hashed must be staged. Change both or neither.
 #
 # Usage:
 #   stage.sh <staging_dir> <backend_dir> <lambda_platform> <lambda_python_version> [dep...]
@@ -51,6 +57,12 @@ mkdir -p "$STAGING_DIR/backend"
 # backend/ is staged NESTED, as $STAGING_DIR/backend/, because archive_file puts a
 # directory's *contents* at the zip root. Handlers import `backend.<pkg>.<module>`, so the
 # zip root has to hold a backend/ package directory, not backend/'s contents.
+#
+# Every pattern here is name-only (no slash), so rsync matches it against each component of a path
+# and excludes the file or directory at any depth -- the same rule main.tf's hash applies. The OS
+# and tool droppings (.DS_Store, .mypy_cache, *.egg-info, .coverage, .hypothesis, *.swp) are
+# gitignored or untracked, so they are invisible to git status yet present on disk; excluding them
+# is what keeps a Finder visit or a coverage run from shipping in the zip.
 rsync -a --delete \
   --exclude '__pycache__' \
   --exclude '*.pyc' \
@@ -58,20 +70,27 @@ rsync -a --delete \
   --exclude '.build' \
   --exclude '.ruff_cache' \
   --exclude '.pytest_cache' \
+  --exclude '.mypy_cache' \
+  --exclude '.hypothesis' \
+  --exclude '.DS_Store' \
+  --exclude '.coverage' \
+  --exclude '*.egg-info' \
+  --exclude '*.swp' \
   "$BACKEND_DIR/" "$STAGING_DIR/backend/"
 
-# Vendored deps go at the staging ROOT so they are top-level importable (e.g. `pydantic`).
-# boto3/botocore are supplied by the Lambda runtime and must not be vendored.
+# Vendored deps (none today: both Lambdas are boto3 + stdlib) go at the staging ROOT so they
+# are top-level importable. boto3/botocore are supplied by the Lambda runtime and must not be
+# vendored.
 #
 # --platform/--python-version/--only-binary pin the wheels to the LAMBDA architecture rather
-# than the build host's: pydantic ships the compiled pydantic_core extension, so a macOS or
-# CI-runner wheel would not load on Lambda.
+# than the build host's: a package with a compiled extension built for a macOS or CI-runner
+# host would not load on Lambda.
 #
 # --only-binary=:all: is not a choice: pip REFUSES --platform without it, because it cannot
 # know what architecture a source distribution would compile for. The consequence is that a
 # requirement published as an sdist only cannot be installed by that command at all -- the run
-# dies with "No matching distribution found", naming a package nobody put in the list, because
-# it is a dependency of a dependency. red-black-tree-mod, which extract-msg pulls in, is one.
+# dies with "No matching distribution found", possibly naming a package nobody put in the list,
+# because it is a dependency of a dependency.
 #
 # The loop below is the escape hatch. Any listed requirement with no installable wheel gets one
 # built here, into a directory pip is then pointed at with --find-links. That is safe for

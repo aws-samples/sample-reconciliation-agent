@@ -1,5 +1,5 @@
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
-import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
+import { readParam } from "@/lib/server/ssm";
 
 // Server-side helper: resolve the system prompt the ACTIVE agent backend is really running.
 //
@@ -54,11 +54,9 @@ async function readS3Text(bucket: string, key: string): Promise<string> {
  */
 async function deployedConfigVersion(): Promise<string | null> {
   if (!CONFIG_VERSION_PARAM) return null;
+  // Every failure, not only an absent parameter, is "no version": the read is informational.
   try {
-    const got = await new SSMClient({ region: REGION }).send(
-      new GetParameterCommand({ Name: CONFIG_VERSION_PARAM }),
-    );
-    const raw = (got.Parameter?.Value ?? "").trim();
+    const raw = ((await readParam(CONFIG_VERSION_PARAM)) ?? "").trim();
     return raw.startsWith("v") ? raw : null;
   } catch {
     return null;

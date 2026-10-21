@@ -27,10 +27,10 @@ logger = logging.getLogger(__name__)
 # choice as such rather than leaving it to be read as a performance knob.
 #
 # KEEP IN SYNC with AGENT_MODEL_IDS in
-# ``chatbot-app/frontend/src/app/api/recon/config/route.ts``. There is no shared schema layer between
-# the Python runtime and the TypeScript BFF, so this duplication is deliberate and has to be
-# maintained by hand — a value this side rejects but that side accepts is a save that appears to work
-# and then silently falls back.
+# ``chatbot-app/frontend/src/lib/server/agentModels.ts``, the one allowlist both apps' config routes
+# import. There is no shared schema layer between the Python runtime and the TypeScript BFF, so this
+# duplication is deliberate and has to be maintained by hand — a value this side rejects but that side
+# accepts is a save that appears to work and then silently falls back.
 ALLOWED_MODEL_IDS: tuple[str, ...] = (
     "us.anthropic.claude-opus-5",
     "global.anthropic.claude-opus-5",

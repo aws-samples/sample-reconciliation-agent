@@ -52,7 +52,11 @@ resource "aws_iam_role_policy" "actions" {
   role = aws_iam_role.actions.id
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    # concat(): the five statements every deployment has, in the order they have always rendered,
+    # then two per additional seed bucket, then the Cognito callback patch's one when a pool ARN was
+    # passed. With no additional bucket and no pool the JSON is unchanged, byte for byte, from before
+    # either input existed — tests/policy.tftest.hcl pins that.
+    Statement = concat([
       {
         Effect   = "Allow"
         Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
@@ -102,7 +106,38 @@ resource "aws_iam_role_policy" "actions" {
         Action   = ["s3:GetObject", "s3:PutObject"]
         Resource = "${var.assets_bucket_arn}/*"
       },
-    ]
+      ], flatten([
+        # Seed reconciliation for each additional bucket (the deal pipeline's): the same two
+        # statements as above, same action-name caveat.
+        for arn in var.additional_assets_bucket_arns : [
+          {
+            Effect   = "Allow"
+            Action   = ["s3:GetEncryptionConfiguration"]
+            Resource = arn
+          },
+          {
+            Effect   = "Allow"
+            Action   = ["s3:GetObject", "s3:PutObject"]
+            Resource = "${arn}/*"
+          },
+        ]
+      ]),
+      # The Cognito callback patch (`patch_cognito_callbacks`), scoped to the ONE pool the console
+      # signs in against and appended LAST, so an Okta or Entra deployment -- user_pool_arn = "" --
+      # renders no Cognito grant of any kind.
+      #
+      # Describe AND Update, because UpdateUserPoolClient REPLACES the client's configuration instead
+      # of merging into it: the action reads the live client, changes only callback_urls and
+      # logout_urls, and writes the rest back as found. Granting Update alone would force the client's
+      # whole configuration into the invocation's input, where it would drift from the console-auth
+      # module that actually declares it.
+      var.user_pool_arn == "" ? [] : [
+        {
+          Effect   = "Allow"
+          Action   = ["cognito-idp:DescribeUserPoolClient", "cognito-idp:UpdateUserPoolClient"]
+          Resource = var.user_pool_arn
+        },
+    ])
   })
 }
 

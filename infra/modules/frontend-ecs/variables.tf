@@ -90,9 +90,9 @@ variable "recon_api_base" {
   type        = string
 }
 
-# --- Auth provider selection (Okta OIDC vs Entra) ---
+# --- Auth provider selection (Amazon Cognito, Okta OIDC, or Entra) ---
 variable "auth_provider" {
-  description = "Frontend identity provider: 'entra' (default) or 'okta'. Baked into the build."
+  description = "Frontend identity provider: 'cognito' (the default the frontend resolves when this is unset), 'okta' or 'entra'. Baked into the build AND set on the task, because the browser and the BFF must agree on which provider is in play."
   type        = string
   default     = "entra"
 }
@@ -109,6 +109,75 @@ variable "okta_client_id" {
   default     = ""
 }
 
+# ---------------------------------------------------------------------------------
+# Amazon Cognito (auth_provider = "cognito"): the console's own user pool, from modules/console-auth.
+#
+# All three default to "" and all three are rendered into the task environment unconditionally,
+# exactly as OKTA_ISSUER and OKTA_CLIENT_ID already are for an Entra deployment. That is deliberate
+# and it is the house pattern: the container always names every auth variable, and the ones the
+# selected provider does not use are empty. The alternative -- omitting the names -- reads to an
+# auditor as "this console has no Cognito configuration" when what it means is "this console is not
+# using it", and it would make the task definition's shape depend on the provider.
+#
+# Two copies of each value reach the image, and they are not redundant:
+#   * NEXT_PUBLIC_COGNITO_* are BUILD arguments. Next.js inlines them into the browser bundle at
+#     build time, so they are what the PKCE flow in src/lib/auth/cognito-pkce.ts actually reads. A
+#     running container cannot see them.
+#   * COGNITO_* are RUNTIME task variables, read by the BFF (src/lib/api-auth.ts) to derive this
+#     pool's issuer and JWKS URL and to check the `aud`. Without them every /api/* request answers
+#     503 "misconfigured" -- deliberately, never an open door.
+# Both halves are therefore required for a working Cognito deployment, which is why one variable
+# feeds both rather than there being a build-time and a runtime input to keep in step.
+# ---------------------------------------------------------------------------------
+
+variable "cognito_user_pool_id" {
+  description = "Cognito user pool id (COGNITO_USER_POOL_ID), e.g. us-east-1_ABC123def, from modules/console-auth. The BFF composes the token issuer as https://cognito-idp.<region>.amazonaws.com/<this> and fetches the JWKS under it, so a wrong value fails every verification with an issuer mismatch. Empty unless auth_provider=cognito. Not a secret."
+  type        = string
+  default     = ""
+}
+
+variable "cognito_client_id" {
+  description = "Cognito app client id of the public PKCE client (COGNITO_CLIENT_ID). It is both the `aud` the BFF requires and the client_id the browser sends to the hosted UI. Empty unless auth_provider=cognito. Not a secret: this client has no secret, and the id is in the browser bundle and in every authorize URL."
+  type        = string
+  default     = ""
+}
+
+variable "cognito_hosted_ui" {
+  description = "Hosted-UI (managed login) HOST, e.g. example-login.auth.us-east-1.amazoncognito.com — no scheme, no trailing slash (cognito-pkce.ts also tolerates an https:// prefix). This is where the browser is redirected to sign in and where it exchanges the code for tokens. Empty unless auth_provider=cognito."
+  type        = string
+  default     = ""
+}
+
+# The Cognito counterpart of okta_redirect_uri, and it exists for the same reason: left empty the
+# browser derives the redirect from its own origin, which is a generated *.cloudfront.net domain that
+# changes if the distribution is recreated. Unlike Okta, the callback is registered by THIS stack (the
+# root's Cognito callback patch), so drift self-heals on the next apply -- pinning matters when the
+# console is reachable on more than one host (a custom domain as well as the distribution domain),
+# because Cognito redirects only to a URL that is registered and the browser sends whichever origin
+# it happens to be on.
+variable "cognito_redirect_uri" {
+  description = "Pinned Cognito OAuth callback URL (NEXT_PUBLIC_COGNITO_REDIRECT_URI). Must end in /callback — the path the console serves the redirect on (cognito-pkce.ts, COGNITO_CALLBACK_PATH). Empty = derive it from the browser origin, which is right for a single-host deployment."
+  type        = string
+  default     = ""
+
+  # Deliberately the same LOOSE rule cognito-pkce.ts applies (an absolute URL ending in the callback
+  # path), so Terraform and the frontend never disagree about what is acceptable. A trailing slash is
+  # the mistake it catches: ".../callback/" does not end in "/callback", and Cognito compares exactly.
+  validation {
+    condition     = var.cognito_redirect_uri == "" || can(regex("^https?://.+/callback$", var.cognito_redirect_uri))
+    error_message = "cognito_redirect_uri must be an absolute http(s) URL ending in /callback (or empty to derive it from the browser origin). The path is fixed by the console's own route, and a trailing slash does not count: the frontend refuses the value at load rather than failing later at sign-in."
+  }
+
+  # The one confusable value, called out separately because the rule above cannot catch it: the Okta
+  # flow's callback is /login/callback and the Cognito flow's is /callback, so "…/login/callback" ends
+  # in "/callback" and passes. Copying okta_redirect_uri across is the obvious mistake, it applies
+  # cleanly, and the failure is a browser sent to a route that does not serve the Cognito redirect.
+  validation {
+    condition     = !endswith(var.cognito_redirect_uri, "/login/callback")
+    error_message = "cognito_redirect_uri looks like the OKTA callback URL (/login/callback). The Cognito flow is served at /callback — set that path, or leave this empty and let the browser derive it."
+  }
+}
+
 # The group whose members may change platform configuration — the auto-resolve threshold, the agent
 # backend, the Tier-1 switch, and the list of addresses the platform may email.
 #
@@ -123,11 +192,16 @@ variable "recon_admin_group" {
 }
 
 # Which claim carries group memberships. Okta releases them as `groups` when the app is configured to;
-# Entra uses `groups` or `roles` depending on the app registration. Wrong name means an empty group list,
-# which reads as "not an admin" rather than as a misconfiguration — so if the Config tab is missing for
-# someone who should have it, check this before checking the group name.
+# Entra uses `groups` or `roles` depending on the app registration; a Cognito user pool uses
+# `cognito:groups`, a RESERVED name the service will not let you rename. Wrong name means an empty group
+# list, which reads as "not an admin" rather than as a misconfiguration — so if the Config tab is missing
+# for someone who should have it, check this before checking the group name.
+#
+# The default stays "groups" (this module's callers have always passed a value anyway). The recon root
+# resolves it per provider in local.auth_groups_claim, so a Cognito deployment is handed
+# "cognito:groups" explicitly rather than relying on the console's own fallback.
 variable "auth_groups_claim" {
-  description = "JWT claim carrying OIDC group memberships (Okta: groups; Entra: groups or roles)."
+  description = "JWT claim carrying group memberships (Cognito: cognito:groups; Okta: groups; Entra: groups or roles)."
   type        = string
   default     = "groups"
 }
@@ -436,6 +510,129 @@ variable "intake_function_name" {
 
 variable "intake_function_arn" {
   description = "Intake Lambda ARN, for the scoped lambda:InvokeFunction grant."
+  type        = string
+  default     = ""
+}
+
+# ---------------------------------------------------------------------------------
+# Per-app access (src/lib/auth/apps.ts). One console, two apps behind an app rail.
+#
+# Each app has an ACCESS group ("may use it") and an ADMIN group ("may change its configuration and
+# approve"); admins implicitly have access. Both are OIDC group claims, like recon_admin_group above:
+# nothing here creates a group.
+#   * An unset ADMIN group means nobody administers the app, the same fail-closed reading
+#     recon_admin_group has always had.
+#   * An unset ACCESS group is open to every authenticated user ONLY in a recon-only console
+#     (pipeline_enabled = false), which is exactly what every deployment had before the rail
+#     existed, so adding the rail changes nobody's access there.
+#   * With pipeline_enabled = true both access groups are REQUIRED: the validation on that variable
+#     refuses a blank one at plan, and the task runs with REQUIRE_ACCESS_GROUPS=true so a blank
+#     group fails closed at runtime as well. Two populations then sign in through one OIDC client,
+#     and recon has write routes (system prompt, skills, harness configs, evals, case status) that
+#     the access check alone gates, so the deal desk must not inherit them by default.
+# ---------------------------------------------------------------------------------
+
+variable "recon_access_group" {
+  description = "OIDC group whose members may use the reconciliation app. Empty leaves it open to every authenticated user in a recon-only console; REQUIRED (non-blank) when pipeline_enabled is true. recon_admin_group members have access regardless."
+  type        = string
+  default     = ""
+}
+
+variable "pipeline_access_group" {
+  description = "OIDC group whose members may use the deal-pipeline app. REQUIRED (non-blank) when pipeline_enabled is true; ignored when it is false. pipeline_admin_group members have access regardless."
+  type        = string
+  default     = ""
+}
+
+variable "pipeline_admin_group" {
+  description = "OIDC group whose members may approve deals, edit skills and the parser prompt, decide skill proposals, manage memory and change the pipeline's model. Empty means nobody can."
+  type        = string
+  default     = ""
+}
+
+# ---------------------------------------------------------------------------------
+# The console-level switch for the deal-pipeline app. The app's own wiring -- its environment and its
+# task-role grants -- arrives through app_wiring below; this is what the console SHELL needs to know:
+# whether to show the app and serve or refuse /api/pipeline/* (PIPELINE_ENABLED), and whether a blank
+# access group is open or fails closed (REQUIRE_ACCESS_GROUPS). A root feeds it and
+# app_wiring["pipeline"].enabled from one variable, so the two cannot disagree.
+# ---------------------------------------------------------------------------------
+
+variable "pipeline_enabled" {
+  description = "Tell the console the deal-pipeline app is deployed here: PIPELINE_ENABLED=true and REQUIRE_ACCESS_GROUPS=true. false (the default) is the recon-only console: PIPELINE_ENABLED=false hides the app and refuses its API. true requires recon_access_group and pipeline_access_group. The app's environment and grants are app_wiring[\"pipeline\"]'s, fed from the same root variable."
+  type        = bool
+  default     = false
+
+  validation {
+    # Cross-variable validation (Terraform >= 1.9). Refused at PLAN, naming both groups, rather than
+    # deploying a console in which the whole deal desk passes recon's access check. trimspace()
+    # because a whitespace-only group is what the console treats as blank.
+    condition     = !var.pipeline_enabled || (trimspace(var.recon_access_group) != "" && trimspace(var.pipeline_access_group) != "")
+    error_message = "pipeline_enabled = true requires both recon_access_group and pipeline_access_group to be set (non-blank). With two apps behind one OIDC client, a blank access group would admit every deal-desk user to the recon app (and every recon analyst to the pipeline), including recon's access-gated write routes. Name both groups, or set pipeline_enabled = false."
+  }
+}
+
+# ---------------------------------------------------------------------------------
+# Per-app wiring. One entry per app the console hosts beside recon, keyed by app id. This module
+# appends every ENABLED entry's environment to the container and its statements to the task role,
+# and knows nothing else about the app: adding an app is one entry here, not a set of variables.
+#
+# The app module builds both from its own resources (modules/deal-pipeline: console_environment and
+# console_task_statements), so an ARN can never arrive empty and nothing here has to check for one.
+# What the app module must keep to:
+#   * Environment names must not collide with recon's (ASSETS_BUCKET, SKILLS_PREFIX,
+#     AGENT_MODEL_PARAM, ...) or with another app's: one process holds one value per name, and ECS
+#     resolves a duplicate last-one-wins with no warning. Prefix them (PIPELINE_ASSETS_BUCKET). The
+#     task definition's postcondition refuses a duplicate at plan.
+#   * task_statements are IAM statements jsonencode()d ONE PER ENTRY -- statements differ in shape
+#     (a Condition here, a string Resource there) and no single HCL type holds them all -- and they
+#     land in the policy exactly as written, after every recon statement, in app order.
+#   * enabled = false contributes nothing, whatever the lists hold: a root with a count-gated app
+#     module passes try(module.x[0].console_environment, []) and flips this from the same variable.
+# Empty (the default) is the recon-only console, whose environment and policy are byte-for-byte what
+# they were before this input existed; tests/app_wiring.tftest.hcl pins both.
+# ---------------------------------------------------------------------------------
+
+variable "app_wiring" {
+  description = "Per-app console wiring, keyed by app id: { pipeline = { enabled = bool, environment = [{ name, value }, ...], task_statements = [jsonencode(statement), ...] } }. Enabled entries are appended to the container environment and to the task-role policy after every recon variable and statement, in app order and then exactly as the app exports them (never re-sorted: the order is part of the task definition); disabled entries and the empty default contribute nothing."
+  type = map(object({
+    enabled         = bool
+    environment     = list(object({ name = string, value = string }))
+    task_statements = list(string)
+  }))
+  default = {}
+}
+
+# ---------------------------------------------------------------------------------
+# Console-wide settings (modules/console-settings; chatbot-app/frontend/src/lib/console/types.ts).
+#
+# The layer ABOVE the two apps: stored values under an SSM prefix overlay the group and switch
+# variables above (stored -> env -> default), so an operator changes who may reach which app from the
+# console's Settings screen instead of through a tfvars edit and a redeploy. All three are rendered
+# into the task environment unconditionally, pipeline deployed or not; only the task-role grant is
+# gated on a non-blank prefix, because an empty prefix would make it "parameter/*" -- every parameter
+# in the account, with DeleteParameter among the actions.
+# ---------------------------------------------------------------------------------
+
+variable "console_settings_prefix" {
+  description = "SSM path the console-wide settings live under (CONSOLE_SETTINGS_PREFIX), e.g. \"/recon-dev/console\"; pass modules/console-settings' prefix output so the seeder and the reader agree. Blank disables the stored layer: every setting resolves from the environment and the Settings screens render read-only."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.console_settings_prefix == "" || can(regex("^/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$", var.console_settings_prefix))
+    error_message = "console_settings_prefix must be blank or an absolute SSM hierarchy such as \"/recon-dev/console\" with no trailing slash: the task-role grant is built as parameter<prefix> and parameter<prefix>/*, and either mistake applies cleanly and then denies every Settings request."
+  }
+}
+
+variable "console_admin_group" {
+  description = "OIDC group whose members may edit console-wide settings (CONSOLE_ADMIN_GROUP). Environment-only by contract: no stored value can grant it, so a UI edit can never make someone a console admin. Empty means nobody can, and the Settings screens stay read-only until it is set."
+  type        = string
+  default     = ""
+}
+
+variable "console_organization_label" {
+  description = "Label shown under the console mark in the rail (CONSOLE_ORGANIZATION_LABEL) until an operator stores a different one in the Settings screen."
   type        = string
   default     = ""
 }

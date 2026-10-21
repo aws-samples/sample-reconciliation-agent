@@ -1,9 +1,11 @@
 ####################################################################################
 # Foundation module: S3 buckets, recon-flow DynamoDB tables and the SSM configuration parameters.
 #
-# No identity provider lives here. The console signs in through Okta/Entra (modules/frontend-ecs) and
-# the intake API's JWT authorizer validates that same issuer, so the Cognito user pool this module used
-# to own — which nothing authenticated against — is gone.
+# No identity provider lives here, and that is deliberate rather than incidental. This module once owned
+# a Cognito user pool that nothing ever signed in to — it existed only to issue tokens for the intake
+# API while the console signed in through Okta — and it was rightly deleted. The console's pool is back,
+# as the console's ACTUAL login, but it lives in modules/console-auth: this module is S3 + DynamoDB +
+# SSM, and the identity provider (whichever `auth_provider` selects) is somebody else's resource.
 # Classification types are NOT stored here — they live in the SKILL.md files. DynamoDB
 # holds only recon-flow state: items, cases, and the audit trail.
 ####################################################################################

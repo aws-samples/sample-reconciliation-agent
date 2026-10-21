@@ -50,7 +50,11 @@ data/input/sample-classes/
 
 # Design records, implementation plans and security-audit reports are kept local-only —
 # they are working notes, not part of the published sample, and are deliberately untracked.
-docs/
+# One exception is tracked: docs/deal-pipeline-design.md, the contract the Deal Pipeline's code
+# and tests are written against. The `docs/*` + negation pair (rather than a bare `docs/`) is what
+# lets that single file through while everything else dropped into docs/ stays ignored.
+docs/*
+!docs/deal-pipeline-design.md
 
 # Upload archives for the IDP evaluation test sets: pure derivatives of the `testsets/<FAMILY>/`
 # trees committed beside them, rebuilt by the generator (see data/input/idp-evaluation/README.md).

@@ -136,6 +136,13 @@ describe("DELETE /api/recon/memory", () => {
     expect(agentcoreSend).not.toHaveBeenCalled();
   });
 
+  it("reports a failed batch call as a 500 carrying the raw message", async () => {
+    agentcoreSend.mockRejectedValue(new Error("ThrottlingException"));
+    const resp = await del({ ids: ["rec-1"] });
+    expect(resp.status).toBe(500);
+    expect(await resp.json()).toEqual({ error: "ThrottlingException" });
+  });
+
   it("refuses with 409 when no memory is configured", async () => {
     // Deliberately NOT an empty success: telling an operator their records are gone when the request
     // never reached a memory resource is the one failure mode they cannot detect afterwards.

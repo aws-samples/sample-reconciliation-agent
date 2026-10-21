@@ -20,11 +20,17 @@ vi.mock("@/lib/recon-auth", () => ({
     }),
 }));
 
+/** A 2xx stand-in carrying the readers the shared JSON reader uses (`text()` first, `json()` on errors). */
+const okResponse = (body: unknown) => ({
+  ok: true,
+  status: 200,
+  json: async () => body,
+  text: async () => JSON.stringify(body),
+});
+
 describe("reconApi", () => {
   it("attaches the caller's ID token to every BFF call", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue({ ok: true, json: async () => ({ item_id: "i-1" }) });
+    const fetchMock = vi.fn().mockResolvedValue(okResponse({ item_id: "i-1" }));
     vi.stubGlobal("fetch", fetchMock);
     await getCase("i-1");
     expect(fetchMock).toHaveBeenCalledWith(
@@ -40,10 +46,9 @@ describe("reconApi", () => {
   it("getCase URL-encodes an item_id containing '#' and spaces", async () => {
     // Regression: ids like "idp-Borrowing_Notice_#2.pdf" must not let '#' become a URL
     // fragment, or the BFF receives a truncated id and returns not-found.
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ item_id: "idp-Borrowing_Notice_#2.pdf" }),
-    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(okResponse({ item_id: "idp-Borrowing_Notice_#2.pdf" }));
     vi.stubGlobal("fetch", fetchMock);
     await getCase("idp-Borrowing_Notice_#2.pdf");
     expect(fetchMock).toHaveBeenCalledWith(
@@ -53,10 +58,7 @@ describe("reconApi", () => {
   });
 
   it("approveCase POSTs the approve action to the same-origin case route", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ status: "APPROVED" }),
-    });
+    const fetchMock = vi.fn().mockResolvedValue(okResponse({ status: "APPROVED" }));
     vi.stubGlobal("fetch", fetchMock);
     const res = await approveCase("i-1");
     expect(res.status).toBe("APPROVED");
@@ -70,10 +72,7 @@ describe("reconApi", () => {
   });
 
   it("rejectCase sends the correction comment + outcome", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ status: "IN_PROGRESS" }),
-    });
+    const fetchMock = vi.fn().mockResolvedValue(okResponse({ status: "IN_PROGRESS" }));
     vi.stubGlobal("fetch", fetchMock);
     const res = await rejectCase("i-1", "value date is T+1", "reprocess");
     expect(res.status).toBe("IN_PROGRESS");
@@ -112,10 +111,7 @@ describe("reconApi", () => {
         },
       ],
     };
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({ ok: true, json: async () => caseJson }),
-    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(okResponse(caseJson)));
     const c = await getCase("i-1");
     expect(c.classification_reasoning).toBe("value date off by 1d");
     expect(c.confidence).toBe("0.83");
@@ -128,13 +124,12 @@ describe("reconApi", () => {
     // a 0 would render as a real self-assessment of zero, which is worse than showing nothing.
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({
+      vi.fn().mockResolvedValue(
+        okResponse({
           item_id: "i-1",
           steps: [{ skill: "record-match-review", reasoning: "amounts match" }],
         }),
-      }),
+      ),
     );
     const c = await getCase("i-1");
     expect(c.steps?.[0].confidence).toBeUndefined();
@@ -148,9 +143,7 @@ describe("reconApi", () => {
     ["agent", "/api/recon/lambda-src?src=agent"],
     ["guard", "/api/recon/lambda-src?src=guard"],
   ])("getLambdaSource(%s) requests %s", async (src, url) => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue({ ok: true, json: async () => [] });
+    const fetchMock = vi.fn().mockResolvedValue(okResponse([]));
     vi.stubGlobal("fetch", fetchMock);
     await getLambdaSource(src as "tier1" | "agent" | "guard" | undefined);
     expect(fetchMock).toHaveBeenCalledWith(url, expect.anything());

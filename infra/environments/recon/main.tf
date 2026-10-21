@@ -6,11 +6,85 @@
 data "aws_caller_identity" "current" {}
 
 # Single shared Lambda deployment package. Every Python Lambda (intake, tier1, idp-hook,
-# api BFFs) imports the backend as `from backend....`, so the zip must contain a top-level
-# backend/ package. This module builds it once; the Lambda modules reference the same zip.
+# api BFFs, and the deal pipeline's parser and mock OMS upload when enabled) imports the backend
+# as `from backend....`, so the zip must contain a top-level backend/ package. This module builds
+# it once; the Lambda modules reference the same zip.
+#
+# runtime_dependencies is spelled out here rather than defaulted in the module, because ONE zip
+# serves every Lambda this root deploys (see the module's variables.tf): the list has to be the
+# union of what all of them import.
+#   pydantic          backend/intake, recon_core -- the ReconItem model and every payload schema.
+#   PyYAML            backend/recon_core/skill_meta.py parses SKILL.md frontmatter as real YAML.
+#   extract-msg,
+#   reportlab         backend/email_preprocess reads Outlook .msg containers and renders bodies to
+#                     PDF, because neither upload destination can read an email.
+#   red-black-tree-mod  imported by nothing here. extract-msg depends on it and it is published as a
+#                     source distribution only, which the platform-pinned pip in stage.sh cannot
+#                     install; stage.sh builds a wheel for any LISTED requirement that lacks one, so
+#                     a transitive sdist-only package has to be named to be reachable. Pinned inside
+#                     extract-msg 0.56.1's own >=1.20,<=1.23 range.
+#   tzdata            backend/deal_pipeline: the IANA database Python's zoneinfo falls back to when
+#                     the Lambda image ships none, so Date Arrived is computed in the desk time zone
+#                     rather than silently in UTC. Harmless for the recon Lambdas.
+#
+# ⚠️ This list is DUPLICATED in .gitlab-ci.yml's pre-plan stage.sh call and the two must agree:
+# archive_file reads the staging directory at PLAN time, so whatever CI staged is what ships, and
+# terraform_data.stage's hash will already match at apply and not re-stage to correct it.
 module "lambda_package" {
   source      = "../../modules/lambda-package"
   backend_dir = "${path.root}/../../../backend"
+  # Every third-party wheel any Lambda this root deploys imports, because the root builds ONE zip
+  # and every Lambda runs from it. PyYAML: recon_core/skill_meta.py parses SKILL.md frontmatter as
+  # real YAML, for both apps. pydantic: recon_core/schema.py. extract-msg + reportlab:
+  # backend/email_preprocess reads Outlook .msg containers and renders bodies to PDF. tzdata:
+  # deal_pipeline resolves the desk time zone.
+  #
+  # red-black-tree-mod is listed although nothing imports it: extract-msg depends on it and it is
+  # published as a source distribution only, which the platform-pinned pip in stage.sh cannot
+  # install (--platform forces --only-binary=:all:). stage.sh builds a wheel for any LISTED
+  # requirement that lacks one and can only see what is listed, so a transitive sdist-only package
+  # has to be named here to be reachable. Pinned inside extract-msg 0.56.1's own >=1.20,<=1.23 range.
+  #
+  # ⚠️ This list is duplicated in .gitlab-ci.yml's pre-plan staging call, which passes it as
+  # arguments to stage.sh. The two MUST agree, and drift is silent: archive_file reads the staging
+  # directory at PLAN time, so whatever CI staged is what ships, and terraform_data.stage's hash
+  # already matches at apply time and will not re-stage to correct it. A dependency missing from the
+  # CI copy surfaces only as an ImportError at runtime.
+  runtime_dependencies = [
+    "pydantic==2.13.0",
+    "PyYAML==6.0.3",
+    "extract-msg==0.56.1",
+    "reportlab==5.0.1",
+    "red-black-tree-mod==1.22",
+    "tzdata==2026.3",
+  ]
+}
+
+# The deal-pipeline app's own resources (bucket, tables, memories, parser + mock OMS Lambdas),
+# composed beside the recon platform so the console serves both apps behind one app rail. Off by
+# default: an existing recon deployment is unchanged until an operator flips enable_deal_pipeline.
+#
+# name_prefix is "<recon prefix>-pipeline", NOT the design doc's "deal-pipeline-dev": the pipeline's
+# bucket, tables and parameter then read as this environment's beside the recon ones, and a
+# `deal-pipeline-dev-*` deployment that predates the composition (or belongs to another checkout)
+# in the same account cannot collide with them. This is also the prefix the deployed environment
+# already carries, so it must not change.
+#
+# The module reads region and account from its own data sources, so neither is passed. The zip is
+# the shared one above (its tzdata entry is what the parser needs). content_root is spelled out
+# rather than left to the module default so a reader sees where the S3 seeds come from.
+module "deal_pipeline" {
+  count  = var.enable_deal_pipeline ? 1 : 0
+  source = "../../modules/deal-pipeline"
+
+  name_prefix     = "${var.name_prefix}-pipeline"
+  agent_model_id  = var.pipeline_agent_model_id
+  memory_model_id = var.pipeline_memory_model_id
+
+  lambda_zip         = module.lambda_package.zip_path
+  lambda_source_hash = module.lambda_package.source_code_hash
+
+  content_root = "${path.root}/../../.."
 }
 
 # Default VPC for the ECS/ALB frontend. The frontend-ecs module creates its own 2-AZ public
@@ -28,7 +102,13 @@ resource "random_password" "email_confirmation" {
 
 # Private networking: subnets + NAT + S3/DynamoDB PrivateLink endpoints for all VPC-attached
 # compute (Lambdas + AgentCore Runtime).
+#
+# Count-gated on enable_private_networking (default true, so an existing deployment is unchanged). The
+# NAT gateway is the standing hourly charge here, and a data-plane-only apply does not need one: with
+# the tier absent every consumer receives [] and each documents that as "no VPC", so the Lambdas and
+# the runtime reach AWS over the service network instead. See the variable for the trade.
 module "network" {
+  count  = var.enable_private_networking ? 1 : 0
   source = "../../modules/network"
 
   name_prefix = var.name_prefix
@@ -39,26 +119,124 @@ module "network" {
   enable_private_endpoints = var.private_vpc
 }
 
+# State-only: the module call gained a `count`, so its resources move from module.network.* to
+# module.network[0].*. Without this a deployed environment would plan to DESTROY the whole networking
+# tier -- NAT gateway, subnets, endpoints and the security group every Lambda is attached through --
+# and create an identical one beside it.
+moved {
+  from = module.network
+  to   = module.network[0]
+}
+
 locals {
-  vpc_subnets = module.network.private_subnet_ids
-  vpc_sgs     = [module.network.security_group_id]
+  # try() rather than a conditional on the flag: with the tier gated off there is no instance to
+  # index, and every consumer's own documentation says [] means "not VPC-attached".
+  vpc_subnets = try(module.network[0].private_subnet_ids, [])
+  vpc_sgs     = try([module.network[0].security_group_id], [])
 
   # The OIDC issuer + audience the intake HTTP API's JWT authorizer validates. Derived from
   # auth_provider here, in ONE place, and deliberately the same derivation
   # chatbot-app/frontend/src/lib/api-auth.ts performs for the BFF: the API and the BFF must accept
   # exactly the same tokens, and two independent derivations would eventually disagree.
   #
-  # There is no Cognito fallback. This stack used to run a user pool that existed solely to be this
-  # issuer while the console signed in through Okta — one deployment, two identity providers, and the
-  # pool's own Hosted UI orphaned. An unset provider now fails the plan in modules/intake's variable
-  # validation rather than quietly authorizing against something nobody logs in to.
+  # ⚠️ THE COGNITO CASE IS NOT THE ARRANGEMENT THAT WAS DELETED. Read this before removing it again.
+  #
+  # A user pool used to sit in modules/foundation whose ONLY job was to be this issuer, while the
+  # console itself signed in through Okta. That was one deployment with two identity providers and a
+  # hosted UI nobody logged in to, and deleting it (upstream commit bad0cbe) was right.
+  #
+  # What "cognito" means here is the opposite of that: the pool below IS the console's login. The
+  # browser signs in against its hosted UI, the BFF verifies the tokens it mints, and this authorizer
+  # validates the same issuer and the same audience. ONE provider serves the browser, the BFF and the
+  # API -- which is precisely the property the old arrangement lacked. The Cognito branch is therefore
+  # not a fallback: it is the default, and the pool is a real participant rather than a spare issuer.
+  #
+  # An UNSET or unknown provider still fails the plan, and that property is deliberate: auth_provider
+  # is validated against the three supported values, and any provider left without its configuration
+  # yields "" here, which modules/intake's own variable validation refuses rather than building an
+  # authorizer that rejects every token (or, worse, trusts the wrong one).
   #
   # Entra: the v2.0 issuer specifically. A v1 token (`sts.windows.net`) fails this check by design,
   # matching api-auth.ts.
-  oidc_issuer = var.auth_provider == "okta" ? var.okta_issuer : (
-    var.entra_tenant_id != "" ? "https://login.microsoftonline.com/${var.entra_tenant_id}/v2.0" : ""
+  oidc_issuer = (
+    var.auth_provider == "cognito" ? try("https://${module.console_auth[0].user_pool_endpoint}", "") : (
+      var.auth_provider == "okta" ? var.okta_issuer : (
+        var.entra_tenant_id != "" ? "https://login.microsoftonline.com/${var.entra_tenant_id}/v2.0" : ""
+      )
+    )
   )
-  oidc_audience = var.auth_provider == "okta" ? var.okta_client_id : var.entra_client_id
+  oidc_audience = (
+    var.auth_provider == "cognito" ? try(module.console_auth[0].spa_client_id, "") : (
+      var.auth_provider == "okta" ? var.okta_client_id : var.entra_client_id
+    )
+  )
+
+  # ---------------------------------------------------------------------------------
+  # The five console group names, resolved ONCE and then handed to all three consumers: the user pool
+  # that creates them (module.console_auth), the console that checks them (module.frontend) and the
+  # settings layer that seeds them (module.console_settings). One resolution, so the group in the token
+  # is always the group the proxy compares against.
+  #
+  # An operator's variable wins whenever it is set. A blank one means:
+  #   * okta / entra -- exactly what it has always meant. Nothing here can create a group, so "" stays
+  #     "" and carries its existing reading (admin = nobody, access = open in a recon-only console).
+  #     These deployments are BYTE-IDENTICAL to before this local existed.
+  #   * cognito -- the pool's own name for that group, because modules/console-auth really creates it.
+  #     A blank access group is then CLOSED rather than open, which is the safer direction and the one
+  #     an operator can act on: the group exists and is empty, so access is granted by adding a user
+  #     to it rather than by editing tfvars.
+  # ---------------------------------------------------------------------------------
+  # What the operator asked for, trimmed because the console trims a group before comparing it to the
+  # claim and a padded name would render in the Settings screen as something other than what is checked.
+  #
+  # ⚠️ The trim is the ONE thing here that is not byte-identical for an existing Okta or Entra
+  # deployment, and only if its tfvars actually pads a group name -- the console task would then carry
+  # "recon-users" where it used to carry "  recon-users  ", which is a new task definition revision and
+  # one rolling restart. It is a deliberate fix rather than a side effect: modules/console-settings
+  # already trimmed its seeds, so a padded variable made the STORED group and the environment group
+  # differ by whitespace while the proxy compared a third, trimmed, value.
+  console_groups_configured = {
+    recon_access    = trimspace(var.recon_access_group)
+    recon_admin     = trimspace(var.recon_admin_group)
+    pipeline_access = trimspace(var.pipeline_access_group)
+    pipeline_admin  = trimspace(var.pipeline_admin_group)
+    console_admin   = trimspace(var.console_admin_group)
+  }
+
+  # The names the pool falls back to. Generic role names, and the SAME defaults modules/console-auth
+  # declares on its own five variables -- spelled here as well because this root passes a value for each
+  # of them, so the module's default would never be reached and a reader comparing the two would
+  # otherwise have to guess which one wins.
+  cognito_console_groups = {
+    recon_access    = "recon-users"
+    recon_admin     = "recon-admins"
+    pipeline_access = "deal-desk"
+    pipeline_admin  = "deal-desk-admins"
+    console_admin   = "console-admins"
+  }
+
+  console_groups = {
+    for role, configured in local.console_groups_configured :
+    role => configured != "" ? configured : (
+      var.auth_provider == "cognito" ? local.cognito_console_groups[role] : ""
+    )
+  }
+
+  # WHICH CLAIM the group names above are read out of, resolved here for the same reason the issuer is:
+  # the BFF and this root must agree, and there is one right answer per provider.
+  #
+  # Cognito puts group membership in `cognito:groups` and RESERVES that name -- it cannot be renamed on
+  # the pool. Okta and Entra release `groups`. Sending the wrong name is the most silent failure in this
+  # whole change: the token verifies, the claim is simply absent, the group list is empty, and every user
+  # is denied every app and every admin route with nothing logged about a claim. So an unset
+  # auth_groups_claim resolves per provider rather than defaulting to a literal.
+  #
+  # The console's own defaultGroupsClaim() makes the same choice as a backstop, and an explicit value
+  # wins in both places -- which is what a federated pool needs, since a SAML or OIDC provider mapped
+  # into the pool often lands its groups on `custom:groups` instead.
+  auth_groups_claim = trimspace(var.auth_groups_claim) != "" ? trimspace(var.auth_groups_claim) : (
+    var.auth_provider == "cognito" ? "cognito:groups" : "groups"
+  )
 
   # ADOT Python layer for the agent-worker Lambda. var.otel_layer_account is AWS's public publisher
   # for AWSOpenTelemetryDistroPython in every commercial region — a variable rather than a literal
@@ -82,7 +260,115 @@ module "foundation" {
   name_prefix = var.name_prefix
 }
 
+# ---------------------------------------------------------------------------------
+# The console's identity provider, when it is this stack's to create (auth_provider = "cognito", the
+# default). Deliberately its OWN module and not modules/foundation: the pool that used to live there
+# was deleted for good reason, and foundation stays S3 + DynamoDB + SSM with no IdP in it.
+#
+# This pool is the console's actual login, not a spare issuer -- see the oidc_* locals above for why
+# that distinction is the whole point. auth_provider = "okta" or "entra" creates nothing here and
+# leaves those deployments untouched.
+#
+# The callback URLs it can know at CREATE time: the localhost pair for the `npm run dev` workflow the
+# frontend_env_local output documents, plus anything the operator pinned or listed. The DEPLOYED host's
+# callback cannot be among them -- the CloudFront domain does not exist yet and the tier that creates
+# it needs this client's id as a build argument -- so it is added by
+# aws_lambda_invocation.cognito_callbacks at the end of this apply. The client carries a lifecycle
+# ignore for exactly that reason, which is why the same composed lists are passed to both.
+# ---------------------------------------------------------------------------------
+locals {
+  # http://localhost:<port>. Cognito accepts plain http only for localhost, and the sign-out URL is the
+  # bare ORIGIN because cognito-pkce.ts sends window.location.origin as logout_uri and Cognito compares
+  # the string exactly -- a trailing slash there does not match.
+  cognito_local_origin = "http://localhost:${var.cognito_local_dev_port}"
+
+  cognito_local_callback_urls = var.cognito_local_dev_callbacks ? ["${local.cognito_local_origin}/callback"] : []
+  cognito_local_logout_urls   = var.cognito_local_dev_callbacks ? [local.cognito_local_origin] : []
+
+  # Everything except the deployed host's pair. distinct() because a pinned cognito_redirect_uri and an
+  # entry in cognito_extra_callback_urls are easy to write twice, and Cognito rejects a duplicate.
+  cognito_static_callback_urls = distinct(concat(
+    local.cognito_local_callback_urls,
+    var.cognito_redirect_uri != "" ? [var.cognito_redirect_uri] : [],
+    var.cognito_extra_callback_urls,
+  ))
+  cognito_static_logout_urls = distinct(concat(
+    local.cognito_local_logout_urls,
+    var.cognito_extra_logout_urls,
+  ))
+}
+
+module "console_auth" {
+  count  = var.auth_provider == "cognito" ? 1 : 0
+  source = "../../modules/console-auth"
+
+  name_prefix      = var.name_prefix
+  hosted_ui_prefix = var.cognito_hosted_ui_prefix
+
+  # Cognito REFUSES a code-flow app client with no callback URL, and with cognito_local_dev_callbacks =
+  # false and nothing pinned there is none to give it: the deployed host's URL only arrives later, via
+  # the patch. So a placeholder stands in.
+  #
+  # It is deliberately `https://localhost/callback` and NOT the real `http://localhost:3000/callback`.
+  # An operator who set cognito_local_dev_callbacks = false asked for sign-in NOT to work from a laptop,
+  # and quietly registering the URL the dev server actually serves would have granted exactly what they
+  # declined. Nothing in this repo listens for https on localhost, so the placeholder is reachable by
+  # nobody; the patch replaces it with the console's own host on the same apply.
+  callback_urls = length(local.cognito_static_callback_urls) > 0 ? local.cognito_static_callback_urls : ["https://localhost/callback"]
+  logout_urls   = length(local.cognito_static_logout_urls) > 0 ? local.cognito_static_logout_urls : ["https://localhost"]
+
+  # The five groups, from the one resolution above, so the pool creates exactly the names the console
+  # checks and the settings layer seeds.
+  recon_access_group    = local.console_groups.recon_access
+  recon_admin_group     = local.console_groups.recon_admin
+  pipeline_access_group = local.console_groups.pipeline_access
+  pipeline_admin_group  = local.console_groups.pipeline_admin
+  console_admin_group   = local.console_groups.console_admin
+
+  mfa_configuration            = var.cognito_mfa_configuration
+  deletion_protection          = var.cognito_deletion_protection
+  supported_identity_providers = var.cognito_supported_identity_providers
+}
+
+# Console-wide settings: one SSM String parameter per setting under /<name_prefix>/console, seeded
+# from the same variables that feed the task's environment below and then owned by the console's
+# Settings screen (the module ignores value changes, so an apply never reverts an operator's edit).
+# Always on, unlike the pipeline: the layer sits above both apps, and a recon-only console uses it
+# to store its own access groups. The pipeline's model id doubles as the console default an app may
+# inherit; the pipeline's own parameter (/<name_prefix>-pipeline/agent-model-id) is untouched and
+# still owned by its Config tab. A parameter whose seed is blank is NOT created -- the UI creates it
+# on first save -- so a fresh recon-only deployment with no groups named creates the enablement
+# flag and the two defaults only. The task role's grant on the prefix is built by the frontend
+# module from the same string, which is why the prefix is passed as this module's output.
+module "console_settings" {
+  source = "../../modules/console-settings"
+
+  prefix = "/${var.name_prefix}/console"
+
+  # local.console_groups, not the raw variables: under Cognito a blank variable resolves to the group
+  # the pool actually created, and the stored layer has to seed the name the console will be comparing
+  # against. For Okta and Entra the local IS the raw variable (trimmed, which this module also did),
+  # so those deployments seed exactly what they seeded before.
+  recon_access_group    = local.console_groups.recon_access
+  recon_admin_group     = local.console_groups.recon_admin
+  pipeline_access_group = local.console_groups.pipeline_access
+  pipeline_admin_group  = local.console_groups.pipeline_admin
+  pipeline_enabled      = var.enable_deal_pipeline
+  default_model_id      = var.pipeline_agent_model_id
+  organization_label    = var.console_organization_label
+}
+
+# The console's serving tier. Count-gated on enable_frontend_tier (default true, so an existing
+# deployment is unchanged): the Fargate service, the ALB, CloudFront and its WAF are the hourly costs
+# in this stack, and the container build is most of a first apply's wall clock. With the tier off the
+# console runs on a laptop instead -- output frontend_env_local renders its whole .env.local from this
+# root's own values rather than from a task definition that no longer exists.
+#
+# Nothing else in this root depends on the tier's resources. modules/recon-agent names this module's
+# task role in a Cedar principal by NAMING CONVENTION rather than by reference (see platform_role_names
+# below), so with the tier absent that rule simply never matches instead of dangling.
 module "frontend" {
+  count  = var.enable_frontend_tier ? 1 : 0
   source = "../../modules/frontend-ecs"
 
   name_prefix  = var.name_prefix
@@ -94,15 +380,63 @@ module "frontend" {
   # Build-time NEXT_PUBLIC_* wiring (recon BFF base; the IdP args follow).
   recon_api_base = module.intake.api_endpoint
 
-  # Identity provider selection (Okta OIDC vs Entra) — baked into the frontend build.
+  # Identity provider selection (Cognito, Okta OIDC or Entra) — baked into the frontend build AND set
+  # on the task, because the browser half and the BFF half must agree on which provider is in play.
   auth_provider     = var.auth_provider
   okta_issuer       = var.okta_issuer
   okta_client_id    = var.okta_client_id
   okta_redirect_uri = var.okta_redirect_uri
 
-  # Who may change platform configuration. Empty means nobody — see the variable's own note.
-  recon_admin_group = var.recon_admin_group
-  auth_groups_claim = var.auth_groups_claim
+  # The console's own user pool, when this stack created one. try(..., "") because module.console_auth
+  # is count-gated: an Okta or Entra deployment has no instance to index, and all three arrive empty --
+  # which the module renders into the task environment as empty names, exactly as it already does with
+  # OKTA_ISSUER for an Entra deployment.
+  #
+  # This is the pair of copies that matters: NEXT_PUBLIC_COGNITO_* build arguments are inlined into the
+  # browser bundle for the PKCE flow, and the COGNITO_* task variables are what the BFF reads to verify
+  # the resulting tokens. One input feeds both so they cannot drift.
+  cognito_user_pool_id = try(module.console_auth[0].user_pool_id, "")
+  cognito_client_id    = try(module.console_auth[0].spa_client_id, "")
+  cognito_hosted_ui    = try(module.console_auth[0].hosted_ui_domain, "")
+  cognito_redirect_uri = var.cognito_redirect_uri
+
+  # Who may change platform configuration. Empty means nobody — see the variable's own note. Resolved
+  # through local.console_groups so a Cognito deployment checks the group the pool created.
+  recon_admin_group = local.console_groups.recon_admin
+  auth_groups_claim = local.auth_groups_claim
+
+  # Per-app access behind the app rail (chatbot-app/frontend/src/lib/auth/apps.ts). In a recon-only
+  # console an access group of "" is open to every authenticated user, which is what this deployment
+  # had before the rail. With enable_deal_pipeline both groups are required -- validated on that
+  # variable here and again on pipeline_enabled inside the module -- and the module tells the console
+  # to fail closed on a blank one (REQUIRE_ACCESS_GROUPS). The pipeline admin group fails closed like
+  # recon_admin_group.
+  recon_access_group    = local.console_groups.recon_access
+  pipeline_access_group = local.console_groups.pipeline_access
+  pipeline_admin_group  = local.console_groups.pipeline_admin
+
+  # Console-wide settings layer (module.console_settings above). The prefix is the module's output
+  # rather than the same string spelled twice, so the parameters Terraform seeds and the path the
+  # console reads (and the task role's grant) cannot drift apart. The admin group is environment-only
+  # by contract; the label is the default shown until an operator stores one.
+  console_settings_prefix    = module.console_settings.prefix
+  console_admin_group        = local.console_groups.console_admin
+  console_organization_label = var.console_organization_label
+
+  # Deal-pipeline app wiring. The module exports the environment its BFF reads and the task-role
+  # grants on its resources (console_environment, console_task_statements), so the console module
+  # knows apps only in the abstract. try(..., []) because module.deal_pipeline is count-gated: with
+  # the app off there is no instance to index, and an empty list wires nothing. pipeline_enabled is
+  # the console-level switch (PIPELINE_ENABLED, REQUIRE_ACCESS_GROUPS); both come from the one
+  # variable so they cannot disagree.
+  pipeline_enabled = var.enable_deal_pipeline
+  app_wiring = {
+    pipeline = {
+      enabled         = var.enable_deal_pipeline
+      environment     = try(module.deal_pipeline[0].console_environment, [])
+      task_statements = try(module.deal_pipeline[0].console_task_statements, [])
+    }
+  }
 
   # BFF data access (same-origin /api/recon/* routes read these via the ECS task role).
   cases_table       = module.foundation.cases_table
@@ -178,17 +512,21 @@ module "frontend" {
 
   # Config tab backend + model selectors, and the Evals tab (config-version pointer + eval/harness
   # log groups).
-  agent_backend_param           = module.foundation.agent_backend_param
-  agent_model_id_param          = module.foundation.agent_model_id_param
-  harness_config_version_param  = module.foundation.harness_config_version_param
-  eval_results_log_group_prefix = module.agent_evals.results_log_group_prefix
+  agent_backend_param          = module.foundation.agent_backend_param
+  agent_model_id_param         = module.foundation.agent_model_id_param
+  harness_config_version_param = module.foundation.harness_config_version_param
+  # try(..., "") on all three: module.agent_evals is count-gated on enable_agent_evals, and each of
+  # these inputs already documents "" as "the feature is off" -- the Evals tab shows no results and the
+  # batch route has no evaluator to map the UI's alias to, rather than pointing at a Lambda that does
+  # not exist.
+  eval_results_log_group_prefix = try(module.agent_evals[0].results_log_group_prefix, "")
   harness_log_group             = "aws/spans"
   harness_service_name          = local.backend_service_names.harness
   # Batch route maps the UI's 'analyst_agreement' alias to the real evaluator id.
-  analyst_agreement_evaluator_id = module.agent_evals.evaluator_id
+  analyst_agreement_evaluator_id = try(module.agent_evals[0].evaluator_id, "")
   # ...and the batch path invokes that evaluator's Lambda under a FAS from the task role, so the
   # role needs the ARN to grant lambda:InvokeFunction on it.
-  analyst_agreement_lambda_arn = module.agent_evals.evaluator_lambda_arn
+  analyst_agreement_lambda_arn = try(module.agent_evals[0].evaluator_lambda_arn, "")
   # Backend-aware batch/re-score data sources (same maps the online eval configs use).
   backend_service_names    = local.backend_service_names
   backend_event_log_groups = local.backend_event_log_groups
@@ -196,12 +534,23 @@ module "frontend" {
   # Private-VPC deployment (ONE flag): no CloudFront, internal ALB on private subnets, Fargate
   # with no public IP egressing via the network module's interface endpoints. False selects the
   # public CloudFront topology instead.
+  # try() for the same reason as local.vpc_subnets: the networking tier is count-gated. private_vpc
+  # itself is validated to require it, so these three are only ever read when the tier exists.
   private_vpc                   = var.private_vpc
-  private_subnet_ids            = module.network.private_subnet_ids
-  ecs_private_security_group_id = module.network.security_group_id
-  vpc_cidr                      = module.network.vpc_cidr
+  private_subnet_ids            = try(module.network[0].private_subnet_ids, [])
+  ecs_private_security_group_id = try(module.network[0].security_group_id, "")
+  vpc_cidr                      = try(module.network[0].vpc_cidr, "")
   private_ingress_cidrs         = var.private_ingress_cidrs
   email_confirmation_token      = random_password.email_confirmation.result
+}
+
+# State-only: the module call gained a `count`, so the whole frontend tier moves from module.frontend.*
+# to module.frontend[0].*. Without this a deployed console would plan to destroy and re-create its
+# distribution, ALB, service and repository -- a new CloudFront domain, and a new sign-in URL to
+# register with it.
+moved {
+  from = module.frontend
+  to   = module.frontend[0]
 }
 
 # The apply-time actor: readiness waits and one-shot API calls that have no declarative form.
@@ -211,7 +560,83 @@ module "deploy_actions" {
 
   name_prefix       = var.name_prefix
   assets_bucket_arn = module.foundation.assets_bucket_arn
+  # The pipeline's bucket too, when that app is deployed: its create-only seeds republish through
+  # the same reconciliation (aws_lambda_invocation.pipeline_seed_push below). try() rather than a
+  # conditional because module.deal_pipeline has no instance to index when the app is off; with the
+  # app off the list is empty and the module renders the policy it always has.
+  additional_assets_bucket_arns = try([module.deal_pipeline[0].assets_bucket_arn], [])
+
+  # The ONE pool whose console app client this actor may patch (aws_lambda_invocation.cognito_callbacks
+  # below). "" for an Okta or Entra deployment, which renders no Cognito statement at all -- the actor's
+  # policy is then byte for byte what it is today, which modules/deploy-actions' own test pins.
+  #
+  # This grant is the one piece of the deleted arrangement that comes back unchanged in shape, and the
+  # reason is unchanged too: Cognito compares a callback URL exactly, the console's public host is not
+  # known when the client is created, and the tier that creates that host needs the client's id as a
+  # build argument. Something has to close the loop after both exist.
+  user_pool_arn = try(module.console_auth[0].user_pool_arn, "")
 }
+
+# Register THIS deployment's public callback and sign-out URLs on the Cognito app client, once the
+# frontend tier exists. Depends only forward (console_auth -> frontend -> here), which is what breaks
+# the cycle a declarative callback_urls would close.
+#
+# ⚠️ THIS RESOURCE AND THE `lifecycle { ignore_changes = [callback_urls, logout_urls] }` ON
+# aws_cognito_user_pool_client.spa ARE ONE MECHANISM. The ignore exists because this patch writes state
+# the client resource cannot see; this patch exists because the client cannot know the host. Delete one
+# and you must delete the other: an ignore with no patch hides drift for nothing, and a patch with no
+# ignore is reverted by the next apply and breaks login with a redirect_mismatch that appears nowhere
+# in the diff.
+#
+# The URLs are the FULL list, not just the new pair, because UpdateUserPoolClient replaces rather than
+# merges -- so localhost and any pinned or extra URL are re-sent here too, which is also what keeps
+# cognito_extra_callback_urls effective after the first apply (the client resource's copy is ignored
+# from then on). The handler reads the live client first and preserves everything else about it; see the
+# user_pool_arn variable in modules/deploy-actions for why the grant is Describe + Update.
+#
+# The console's routes decide the paths, not this root: the callback is /callback and the sign-out
+# target is the bare ORIGIN, both composed by modules/frontend-ecs from its own contract with
+# chatbot-app/frontend/src/lib/auth/cognito-pkce.ts.
+#
+# The action itself is `patch_cognito_callbacks` in modules/deploy-actions/src/handler.py, and the two
+# names are pinned against each other by tests/infra/test_deploy_actions.py -- because a mismatch is an
+# apply that fails at its LAST resource, after the pool, the client, the container build, the ECS
+# service, the ALB and CloudFront have all landed.
+resource "aws_lambda_invocation" "cognito_callbacks" {
+  count = var.auth_provider == "cognito" && var.enable_frontend_tier && var.enable_cognito_callback_patch ? 1 : 0
+
+  function_name = module.deploy_actions.function_name
+
+  input = jsonencode({
+    action       = "patch_cognito_callbacks"
+    user_pool_id = module.console_auth[0].user_pool_id
+    client_id    = module.console_auth[0].spa_client_id
+
+    callback_urls = distinct(concat(
+      [module.frontend[0].cognito_callback_url],
+      local.cognito_static_callback_urls,
+    ))
+    logout_urls = distinct(concat(
+      [module.frontend[0].cognito_logout_url],
+      local.cognito_static_logout_urls,
+    ))
+
+    # Re-run when the actor's code changes, not only when the domain or the client id does.
+    handler_version = module.deploy_actions.source_code_hash
+  })
+
+  # The whole module, not just the function it invokes. Referencing `function_name` alone puts no edge
+  # between this invocation and aws_iam_role_policy.actions -- they are siblings -- so on a first apply
+  # Terraform is free to run the patch before the actor's role has been granted
+  # cognito-idp:UpdateUserPoolClient, and the apply fails with an AccessDenied that looks like a
+  # permissions bug rather than an ordering one.
+  depends_on = [module.deploy_actions]
+}
+
+# There is deliberately no `removed` block for the retired null_resource.cognito_callbacks that
+# preceded this. Upstream carried one until commit bad0cbe and then deleted it, which means every
+# environment had already forgotten that address by the time the pool itself went; re-adding the block
+# would only put a no-op back into the configuration.
 
 module "intake" {
   source = "../../modules/intake"
@@ -220,7 +645,9 @@ module "intake" {
   items_table     = module.foundation.items_table
   items_table_arn = module.foundation.items_table_arn
   # The HTTP API's JWT authorizer validates the SAME issuer the console signs in against — see the
-  # oidc_* locals above. There is no user pool behind this any more.
+  # oidc_* locals above. By default that is this deployment's own Cognito user pool
+  # (module.console_auth), so ONE identity provider serves both doors; name okta or entra in
+  # auth_provider and both follow it together.
   jwt_issuer             = local.oidc_issuer
   jwt_audience           = local.oidc_audience
   lambda_zip             = module.lambda_package.zip_path
@@ -234,7 +661,7 @@ module "intake" {
   # with SigV4. The public HTTP API is left in place — the two doors share the handler, so neither can
   # drift from the other.
   private_api_enabled         = var.private_vpc
-  execute_api_vpc_endpoint_id = module.network.execute_api_endpoint_id
+  execute_api_vpc_endpoint_id = try(module.network[0].execute_api_endpoint_id, "")
 }
 
 module "tier1" {
@@ -318,6 +745,11 @@ module "tier1" {
 }
 
 module "recon_agent" {
+  # Keeps the Cedar read policy's action list in step with the gateway's live tool surface: the
+  # microsoft-graph target below is gated on the same variable, and naming an absent action fails the
+  # whole policy rather than narrowing it.
+  graph_tool_enabled = var.graph_enabled
+
   source = "../../modules/recon-agent"
 
   # Apply-time readiness waits (managed-KB data source, managed-kb connector target) run inside the
@@ -438,7 +870,14 @@ module "recon_agent_harness" {
 }
 
 # Agent evaluations: custom analyst-agreement evaluator + online eval config.
+#
+# Count-gated on enable_agent_evals (default true, so an existing deployment is unchanged). What this
+# flag removes is a RECURRING MODEL SPEND rather than an hourly resource charge: an online eval config
+# invokes judge models on every agent session for as long as the platform runs. The console reads the
+# three inputs it takes from here as empty when the module is absent, which each already documents as
+# "disabled".
 module "agent_evals" {
+  count  = var.enable_agent_evals ? 1 : 0
   source = "../../modules/agent-evals"
 
   name_prefix            = var.name_prefix
@@ -460,6 +899,14 @@ module "agent_evals" {
   # Maintenance lever: false disables both configs, which releases the service-side lock on the
   # custom evaluator so its description/Lambda config can be updated. See the module's evaluator.
   online_evals_enabled = var.online_evals_enabled
+}
+
+# State-only: the module call gained a `count`. Without this a deployed environment would plan to
+# destroy the custom evaluator and its two online configs and create identical ones -- and the service
+# holds a lock on an evaluator referenced by an ENABLED config, so the destroy would fail partway.
+moved {
+  from = module.agent_evals
+  to   = module.agent_evals[0]
 }
 
 # OTel service.name per agent backend: AgentCore emits "<runtimeName>.DEFAULT"; the managed
@@ -499,23 +946,27 @@ locals {
 }
 
 # Seed the harness's CALLING CONTRACT to S3 (submit_proposal fields + prefixed gateway tool
-# names). The harness worker appends this after the shared policy core in system_prompt_seed below;
-# the policy itself is NOT duplicated here, so the two backends cannot drift apart.
-#
-# Create-only like the other editable objects: this resource writes the object once and never
-# overwrites the live text. Repo edits still reach S3 without a manual `aws s3 cp` —
+# names). This is appended after the shared policy core in system_prompt_seed below — the policy
+# itself is NOT duplicated here, so the two backends cannot drift apart. Create-only like the other
+# editable objects (modules/seeded-object, create_only = true: first write only, and the module's
+# header explains why it ignores more than etag/source), so this writes the object once and never
+# overwrites the live text — but repo edits do NOT need a manual `aws s3 cp`:
 # `aws_lambda_invocation.seed_push` below re-pushes every changed `local.editable_seeds` entry on
-# each apply, and fails the apply on a two-sided conflict.
-resource "aws_s3_object" "harness_system_prompt_seed" {
+# each apply, and fails the apply on a two-sided conflict. (This comment claimed the opposite until
+# 2026-09-04 and misled a planning pass.)
+module "harness_system_prompt_seed" {
+  source = "../../modules/seeded-object"
+
   bucket       = module.foundation.assets_bucket
   key          = "system-prompt-harness.md"
-  source       = local.editable_seeds["system-prompt-harness.md"]
-  etag         = filemd5(local.editable_seeds["system-prompt-harness.md"])
+  source_path  = local.editable_seeds["system-prompt-harness.md"]
   content_type = "text/markdown"
+  create_only  = true
+}
 
-  lifecycle {
-    ignore_changes = [etag, source]
-  }
+moved {
+  from = aws_s3_object.harness_system_prompt_seed
+  to   = module.harness_system_prompt_seed.aws_s3_object.create_only[0]
 }
 
 # Skills-catalog BFF only — deliberately the whole of this API's surface. The UI's queue decisions
@@ -610,7 +1061,14 @@ module "tier2_dispatch" {
 }
 
 # AgentCore runtime observability: OTEL application logs -> CloudWatch + traces -> X-Ray.
+#
+# Count-gated on enable_observability (default true, so an existing deployment is unchanged). Nothing
+# in this root reads its outputs, which makes it the cleanest of the tier flags to turn off and also the
+# most costly in insight: with the deliveries absent the agent's spans never reach CloudWatch, so the
+# Evals tab cannot score RUNTIME-backend sessions (the eval service reads content only from delivered
+# log groups) and a failed investigation has no trace to read.
 module "observability" {
+  count  = var.enable_observability ? 1 : 0
   source = "../../modules/observability"
 
   project_name  = var.name_prefix
@@ -622,6 +1080,12 @@ module "observability" {
   # sessions. Requires account-level CloudWatch Transaction Search to be enabled — that is an
   # account setting, not something this stack owns.
   enable_xray_traces = true
+}
+
+# State-only: the module call gained a `count`.
+moved {
+  from = module.observability
+  to   = module.observability[0]
 }
 
 # Upload the KB seed corpus to the assets bucket's knowledge-base/ prefix.
@@ -648,7 +1112,12 @@ locals {
 
 resource "aws_s3_object" "kb_seed" {
   # "**" walks the whole tree, so both subdirectories and the sidecars are picked up.
-  for_each = fileset(local.kb_seed_dir, "**")
+  #
+  # Gated on enable_knowledge_base_corpus by EMPTYING the set rather than by a count, so the state
+  # addresses of every object are unchanged when the flag is true (the default) and no `moved` block is
+  # needed. false destroys the uploaded corpus, which is the intent: the ingestion job that indexes it
+  # is what a managed KB charges for and what dominates a first apply.
+  for_each = var.enable_knowledge_base_corpus ? fileset(local.kb_seed_dir, "**") : toset([])
 
   bucket = module.foundation.assets_bucket
   key    = "knowledge-base/${each.value}"
@@ -682,13 +1151,19 @@ resource "aws_s3_object" "kb_seed" {
 # bytes included. So the metadata design and an S3 Vectors index are mutually exclusive: supporting
 # both would mean gutting the attribute set corpus-wide, degrading exactly the retrieval filtering
 # the sidecars exist to provide.
+#
+# Emptied when enable_knowledge_base_corpus is false, which is how the ingestion invocation below is
+# gated: it is already keyed on this map, so an empty map means no ingestion runs and no state address
+# changes shape. The knowledge base itself still exists (it lives inside modules/recon-agent, where the
+# gateway's tool policy, the `managed-kb` connector target and the readiness wait all reference it) --
+# it is simply left EMPTY, which is the cheap state for a managed KB and the state the flag is for.
 locals {
-  kb_ingest_targets = {
+  kb_ingest_targets = var.enable_knowledge_base_corpus ? {
     managed = {
       kb_id = module.recon_agent.managed_kb_id
       ds_id = module.recon_agent.managed_kb_data_source_id
     }
-  }
+  } : {}
 }
 
 # Uploading the seed objects does NOT make them searchable — a KB's index only reflects the S3
@@ -734,14 +1209,36 @@ output "kb_ingestion_counts" {
   value       = { for k, invocation in aws_lambda_invocation.kb_ingestion : k => jsondecode(invocation.result) }
 }
 
-# Seed the editable skills/ prefix from the repo. These objects are the live source the BFF skills
-# manager and the agent read at runtime; UI edits overwrite them in place with no redeploy. The
-# lifecycle ignore is what stops the next apply from reverting those edits — seeding is first-write
-# only. The key => file map lives in local.editable_seeds so the deploy-time push
-# (aws_lambda_invocation.seed_push) cannot drift from what is seeded here.
-resource "aws_s3_object" "skill_seed" {
-  # Keyed on the FILE NAME rather than the bucket key. The state addresses derive from this key, so
-  # re-keying on the bucket key would destroy and recreate every seeded object.
+# Forget the retired null_resource, including the stale ["vectors"] instance.
+#
+# Both instances are pure state entries: a null_resource with no `when = destroy` provisioner tears
+# down nothing in AWS, so nothing is lost by dropping them. `destroy = false` is here to keep them
+# out of the plan's DELETE list — the CI destroy guard matches `actions == ["delete"]` exactly, and
+# these two no-ops would otherwise force the manual `terraform:apply:allow-destroy` job and a human
+# approval for no reason. (The ["vectors"] entry has been a pending pure delete since the 2026-08-26
+# apply, when S3 Vectors stopped being a key in local.kb_ingest_targets.)
+removed {
+  from = null_resource.kb_ingestion
+
+  lifecycle {
+    destroy = false
+  }
+}
+
+# Seed the editable skills/ prefix and system-prompt from the repo. These are the live source
+# the BFF skills manager and the agent read at runtime; edits via the UI overwrite them in
+# place (no redeploy). modules/seeded-object with create_only = true, so UI edits are not reverted
+# on the next apply — seeding is first-write only, and the module ignores every attribute whose
+# drift the provider would resolve by re-uploading the repo file, not just etag/source as the
+# inline resource this replaced did (an application write that only set a charset could have
+# reverted a skill).
+# The key => file map lives in local.editable_seeds so the deploy-time push (aws_lambda_invocation.seed_push)
+# cannot drift from what is seeded here.
+module "skill_seed" {
+  source = "../../modules/seeded-object"
+  # Keyed on the FILE NAME, matching the `fileset()` keys the inline resource always had, so the
+  # `moved` blocks below map each live object one-to-one. Re-keying on the bucket key would destroy
+  # and recreate all seven objects.
   for_each = {
     for k, f in local.editable_seeds : basename(f) => { key = k, source = f }
     if startswith(k, "skills/")
@@ -749,12 +1246,68 @@ resource "aws_s3_object" "skill_seed" {
 
   bucket       = module.foundation.assets_bucket
   key          = each.value.key
-  source       = each.value.source
-  etag         = filemd5(each.value.source)
+  source_path  = each.value.source
   content_type = "text/markdown"
+  create_only  = true
+}
+
+# State-only moves of the seven skill objects from the inline aws_s3_object.skill_seed they were
+# declared as until 2026-09: one per instance, same key on both sides, same bucket, key, source and
+# content type on the other side, so a plan shows seven moves and no create, destroy or replace. A
+# skill file added later needs no entry; a `from` with nothing in state is a no-op.
+moved {
+  from = aws_s3_object.skill_seed["consult-guidance.md"]
+  to   = module.skill_seed["consult-guidance.md"].aws_s3_object.create_only[0]
+}
+
+moved {
+  from = aws_s3_object.skill_seed["correspondence-search.md"]
+  to   = module.skill_seed["correspondence-search.md"].aws_s3_object.create_only[0]
+}
+
+moved {
+  from = aws_s3_object.skill_seed["counterparty-contact-draft.md"]
+  to   = module.skill_seed["counterparty-contact-draft.md"].aws_s3_object.create_only[0]
+}
+
+moved {
+  from = aws_s3_object.skill_seed["document-cross-reference.md"]
+  to   = module.skill_seed["document-cross-reference.md"].aws_s3_object.create_only[0]
+}
+
+moved {
+  from = aws_s3_object.skill_seed["ledger-status-resolution.md"]
+  to   = module.skill_seed["ledger-status-resolution.md"].aws_s3_object.create_only[0]
+}
+
+moved {
+  from = aws_s3_object.skill_seed["record-match-review.md"]
+  to   = module.skill_seed["record-match-review.md"].aws_s3_object.create_only[0]
+}
+
+moved {
+  from = aws_s3_object.skill_seed["unknown.md"]
+  to   = module.skill_seed["unknown.md"].aws_s3_object.create_only[0]
+}
+
+
+# The one-time flat -> nested skills migration (skills/<name>.md -> skills/<name>/SKILL.md) is DONE
+# and its resource is deleted rather than ported to the deploy-actions Lambda.
+#
+# Verified against the live bucket on 2026-09-02: every object under skills/ is already a nested
+# SKILL.md and no flat <name>.md remains, so the provisioner had become a permanent no-op that still
+# shelled out to `aws s3api list-objects-v2` on every apply. Porting a no-op would have moved the
+# dependency without removing the work.
+#
+# ⚠️ If a flat object ever reappears (an old checkout applying an earlier revision), the seed
+# resources above create the NESTED key and the flat one is simply ignored — it is not read by
+# anything. The migration was only needed to preserve UI edits made under the old layout, and there
+# are none left to preserve.
+removed {
+  from = terraform_data.skills_layout_migration
 
   lifecycle {
-    ignore_changes = [etag, source]
+    destroy = false
   }
 }
 
@@ -792,29 +1345,76 @@ resource "aws_lambda_invocation" "seed_push" {
     handler_version = module.deploy_actions.source_code_hash
   })
 
-  # Seeding is create-only (`ignore_changes = [etag, source]`), so the objects must exist before the
-  # reconciliation reads their ETags — a missing object is the "record" branch, and racing it would
-  # write a marker for content the seed resource is about to create.
+  # Seeding is create-only (modules/seeded-object ignores every later change), so the objects must
+  # exist before the reconciliation reads their ETags — a missing object is the "record" branch, and
+  # racing it would write a marker for content the seed module is about to create.
   depends_on = [
-    aws_s3_object.system_prompt_seed,
-    aws_s3_object.harness_system_prompt_seed,
-    aws_s3_object.skill_seed,
+    module.system_prompt_seed,
+    module.harness_system_prompt_seed,
+    module.skill_seed,
   ]
+}
+
+# Forget the retired provisioner (no destroy provisioner; `destroy = false` keeps a no-op out of the
+# plan's DELETE list, which the CI destroy guard matches exactly).
+removed {
+  from = terraform_data.seed_push
+
+  lifecycle {
+    destroy = false
+  }
+}
+
+# The same reconciliation for the deal pipeline's create-only seeds (its skills and parser prompt),
+# against ITS bucket, when the app is deployed AND the operator has switched the push on. The pipeline
+# module exports the key => file map it seeds from (editable_seeds), so what is seeded and what is
+# pushed cannot disagree, and the deploy-actions role holds the same two grants on that bucket
+# (additional_assets_bucket_arns above). The bucket is SSE-S3 like recon's, which the reconciliation
+# checks before comparing anything. depends_on the whole module: the seed objects must exist before
+# their ETags are read (the "record" branch), as for recon's seeds above.
+#
+# ⚠️ Gated on enable_pipeline_seed_push (default false), not on enable_deal_pipeline alone. The
+# reconciliation's first run against a pipeline that was deployed before it existed meets objects
+# with no marker; every one the UI has rewritten since (an approved skill proposal, a Skills-tab
+# prompt edit) is then AMBIGUOUS and fails the apply -- after everything else in that apply has
+# landed. The operator adopts those keys by hand first (output pipeline_seed_push_command), then
+# flips the variable; from there this runs on every apply exactly like recon's seed_push.
+resource "aws_lambda_invocation" "pipeline_seed_push" {
+  count = var.enable_deal_pipeline && var.enable_pipeline_seed_push ? 1 : 0
+
+  function_name = module.deploy_actions.function_name
+
+  input = jsonencode({
+    action = "push_editable_seeds"
+    bucket = module.deal_pipeline[0].assets_bucket
+    seeds = {
+      for k, seed in module.deal_pipeline[0].editable_seeds : k => {
+        content = file(seed.path)
+        source  = seed.source
+      }
+    }
+    handler_version = module.deploy_actions.source_code_hash
+  })
+
+  depends_on = [module.deal_pipeline]
 }
 
 # The SHARED policy core. Read by the runtime container AND by the harness worker (which appends
 # the contract object above), and rewritten in place by the UI prompt editor and by deploying a
 # config version — so there is exactly one artifact holding the agent's instructions.
-resource "aws_s3_object" "system_prompt_seed" {
+module "system_prompt_seed" {
+  source = "../../modules/seeded-object"
+
   bucket       = module.foundation.assets_bucket
   key          = "system-prompt.md"
-  source       = local.editable_seeds["system-prompt.md"]
-  etag         = filemd5(local.editable_seeds["system-prompt.md"])
+  source_path  = local.editable_seeds["system-prompt.md"]
   content_type = "text/markdown"
+  create_only  = true
+}
 
-  lifecycle {
-    ignore_changes = [etag, source]
-  }
+moved {
+  from = aws_s3_object.system_prompt_seed
+  to   = module.system_prompt_seed.aws_s3_object.create_only[0]
 }
 
 # Publish the deterministic Tier-1 Lambda source for the Config tab's READ-ONLY viewer. Unlike
@@ -968,7 +1568,11 @@ module "upload_audit" {
 # document actually got indexed. Without it a KB-routed upload sits in the bucket forever and
 # consult-guidance never finds it, with no error anywhere. Same failure mode as an un-ingested seed
 # corpus (see aws_lambda_invocation.kb_ingestion above), one upload at a time instead of all at once.
+# Count-gated on enable_knowledge_base_corpus alongside the seed corpus and its ingestion: with the
+# corpus off, a KB-routed upload has nothing to be indexed into that anyone is retrieving from, and this
+# Lambda would start an ingestion job on an otherwise-empty knowledge base.
 module "kb_ingest_trigger" {
+  count  = var.enable_knowledge_base_corpus ? 1 : 0
   source = "../../modules/kb-ingest-trigger"
 
   name_prefix       = var.name_prefix
@@ -986,6 +1590,12 @@ module "kb_ingest_trigger" {
   lambda_source_hash      = module.lambda_package.source_code_hash
   vpc_subnet_ids          = local.vpc_subnets
   vpc_security_group_ids  = local.vpc_sgs
+}
+
+# State-only: the module call gained a `count`.
+moved {
+  from = module.kb_ingest_trigger
+  to   = module.kb_ingest_trigger[0]
 }
 
 # Mocked general ledger (S3 + Athena) backing the deterministic Tier-1 lookup and the

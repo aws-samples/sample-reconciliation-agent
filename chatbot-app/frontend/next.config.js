@@ -19,6 +19,10 @@ const nextConfig = {
   // Strict mode for better React warnings in development
   reactStrictMode: true,
 
+  // Next 16 writes AGENTS.md/CLAUDE.md into the package on every `next dev`; this repo keeps its
+  // agent guidance in the root AGENT.md, so the generated copies would only be untracked noise.
+  agentRules: false,
+
   // Experimental optimizations
   experimental: {
     optimizePackageImports: ['lucide-react', 'recharts'],

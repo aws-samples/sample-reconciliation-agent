@@ -12,8 +12,10 @@ class of bug the polls exist to prevent.
 """
 
 import ast
+import datetime
 import importlib.util
 import pathlib
+import re
 import sys
 
 import pytest
@@ -46,14 +48,16 @@ hnd = _load()
 class FakeClient:
     """A boto3 stand-in returning queued responses and recording calls."""
 
-    def __init__(self, responses=None, start_response=None):
+    def __init__(self, responses=None, start_response=None, user_pool_client=None):
         """Store the response queue.
 
         :param responses: list of dicts returned by successive get_* calls; the last repeats.
         :param start_response: dict returned by start_ingestion_job.
+        :param user_pool_client: the ``UserPoolClient`` body describe_user_pool_client returns.
         """
         self._responses = list(responses or [])
         self._start_response = start_response
+        self._user_pool_client = user_pool_client
         self.calls = []
 
     def _next(self):
@@ -74,6 +78,10 @@ class FakeClient:
     def get_ingestion_job(self, **kw):
         self.calls.append(("get_ingestion_job", kw))
         return self._next()
+
+    def describe_user_pool_client(self, **kw):
+        self.calls.append(("describe_user_pool_client", kw))
+        return {"UserPoolClient": self._user_pool_client}
 
     def update_user_pool_client(self, **kw):
         self.calls.append(("update_user_pool_client", kw))
@@ -206,6 +214,197 @@ def test_start_kb_ingestion_raises_on_a_failed_job(patch_boto):
     )
     with pytest.raises(RuntimeError, match="boom"):
         hnd.start_kb_ingestion(knowledge_base_id="kb", data_source_id="ds")
+
+
+# --- the Cognito callback patch --------------------------------------------------------------
+#
+# ⚠️ These tests are about ONE failure: UpdateUserPoolClient REPLACES a client's configuration rather
+# than merging into it, so a patch that sent only the two URL lists would strip the auth flows, the
+# scopes, the token validity and the supported identity providers off a live app client. The console
+# would keep working until the next token expiry and then fail with `invalid_request`, days after the
+# apply that caused it and with nothing in any diff to point at. The whole design of the action -- read
+# the live client, write it back with only the URLs changed -- exists for that, and it is only worth
+# anything if something checks that the carry-over actually happens.
+
+
+def _live_client(**overrides):
+    """A DescribeUserPoolClient body shaped like the one modules/console-auth creates.
+
+    Every field here is one UpdateUserPoolClient accepts and would drop if the patch did not carry it,
+    plus the read-only ones it must NOT send back.
+
+    :param overrides: fields to replace in the returned body.
+    :returns: the ``UserPoolClient`` dict.
+    """
+    body = {
+        # Read-only: Describe returns these, Update rejects them.
+        "UserPoolId": "us-east-1_Example1",
+        "ClientId": "exampleclientid",
+        "CreationDate": datetime.datetime(2026, 1, 1),
+        "LastModifiedDate": datetime.datetime(2026, 1, 2),
+        # Configuration that must survive the patch untouched.
+        "ClientName": "recon-console",
+        "AllowedOAuthFlows": ["code"],
+        "AllowedOAuthScopes": ["openid", "email", "profile"],
+        "AllowedOAuthFlowsUserPoolClient": True,
+        "ExplicitAuthFlows": ["ALLOW_REFRESH_TOKEN_AUTH"],
+        "SupportedIdentityProviders": ["COGNITO"],
+        "AccessTokenValidity": 60,
+        "IdTokenValidity": 60,
+        "RefreshTokenValidity": 1,
+        "TokenValidityUnits": {
+            "AccessToken": "minutes",
+            "IdToken": "minutes",
+            "RefreshToken": "days",
+        },
+        "PreventUserExistenceErrors": "ENABLED",
+        "EnableTokenRevocation": True,
+        # What the patch replaces: the create-time list, before the public host existed.
+        "CallbackURLs": ["http://localhost:3000/callback"],
+        "LogoutURLs": ["http://localhost:3000"],
+    }
+    body.update(overrides)
+    return body
+
+
+def test_patch_cognito_callbacks_replaces_the_urls_and_carries_everything_else(patch_boto):
+    client = patch_boto(FakeClient(user_pool_client=_live_client()))
+
+    result = hnd.patch_cognito_callbacks(
+        user_pool_id="us-east-1_Example1",
+        client_id="exampleclientid",
+        callback_urls=["https://d111111abcdef8.cloudfront.net/callback", "http://localhost:3000/callback"],
+        logout_urls=["https://d111111abcdef8.cloudfront.net", "http://localhost:3000"],
+    )
+
+    assert result["changed"] == "true"
+    (_, described), (_, sent) = client.calls
+    assert described == {"UserPoolId": "us-east-1_Example1", "ClientId": "exampleclientid"}
+
+    # The two lists are what the caller asked for...
+    assert sent["CallbackURLs"] == [
+        "https://d111111abcdef8.cloudfront.net/callback",
+        "http://localhost:3000/callback",
+    ]
+    assert sent["LogoutURLs"] == ["https://d111111abcdef8.cloudfront.net", "http://localhost:3000"]
+
+    # ...and EVERY other field of the live client came back unchanged. Compared as a whole dict rather
+    # than field by field, so a field added to console-auth and dropped by the patch fails here.
+    carried = {k: v for k, v in _live_client().items() if k not in {"CallbackURLs", "LogoutURLs"}}
+    read_only = {"CreationDate", "LastModifiedDate"}
+    for name, value in carried.items():
+        if name in read_only:
+            continue
+        assert sent[name] == value, f"the patch changed or dropped {name}"
+
+
+def test_patch_cognito_callbacks_does_not_send_the_read_only_fields_back(patch_boto):
+    """Describe returns them; Update rejects them, and boto3 would fail the apply on the request."""
+    client = patch_boto(FakeClient(user_pool_client=_live_client(ClientSecret="not-a-real-secret")))
+
+    hnd.patch_cognito_callbacks(
+        user_pool_id="us-east-1_Example1",
+        client_id="exampleclientid",
+        callback_urls=["https://console.example.test/callback"],
+        logout_urls=["https://console.example.test"],
+    )
+
+    (_, sent) = client.calls[1]
+    assert "ClientSecret" not in sent
+    assert "CreationDate" not in sent
+    assert "LastModifiedDate" not in sent
+    # The two identifiers ARE required by Update, so they are set explicitly rather than carried.
+    assert sent["UserPoolId"] == "us-east-1_Example1"
+    assert sent["ClientId"] == "exampleclientid"
+
+
+def test_patch_cognito_callbacks_writes_nothing_when_the_urls_already_match(patch_boto):
+    """Order is not significant to Cognito, so a re-ordered list is not a change to write."""
+    client = patch_boto(
+        FakeClient(
+            user_pool_client=_live_client(
+                CallbackURLs=["https://console.example.test/callback", "http://localhost:3000/callback"],
+                LogoutURLs=["https://console.example.test", "http://localhost:3000"],
+            )
+        )
+    )
+
+    result = hnd.patch_cognito_callbacks(
+        user_pool_id="us-east-1_Example1",
+        client_id="exampleclientid",
+        callback_urls=["http://localhost:3000/callback", "https://console.example.test/callback"],
+        logout_urls=["http://localhost:3000", "https://console.example.test"],
+    )
+
+    assert result["changed"] == "false"
+    assert [name for name, _ in client.calls] == ["describe_user_pool_client"]
+
+
+@pytest.mark.parametrize(
+    ("callbacks", "logouts"),
+    [
+        ([], ["https://console.example.test"]),
+        (["https://console.example.test/callback"], []),
+    ],
+)
+def test_patch_cognito_callbacks_refuses_to_write_an_empty_list(patch_boto, callbacks, logouts):
+    """Cognito accepts an empty list, and the result is a client no browser can sign in through."""
+    client = patch_boto(FakeClient(user_pool_client=_live_client()))
+
+    with pytest.raises(ValueError, match="non-empty"):
+        hnd.patch_cognito_callbacks(
+            user_pool_id="us-east-1_Example1",
+            client_id="exampleclientid",
+            callback_urls=callbacks,
+            logout_urls=logouts,
+        )
+    # Refused BEFORE reading anything, so a bad input cannot half-apply.
+    assert client.calls == []
+
+
+def test_patch_cognito_callbacks_is_reachable_through_handle(patch_boto):
+    """The action name in infra/environments/recon/main.tf's `input` must dispatch.
+
+    It did not: the invocation shipped before the action did, so a default apply failed on an unknown
+    action after the pool, the client, the container build, the ECS service, the ALB and CloudFront had
+    all landed.
+    """
+    client = patch_boto(FakeClient(user_pool_client=_live_client()))
+
+    result = hnd.handle(
+        {
+            "action": "patch_cognito_callbacks",
+            "user_pool_id": "us-east-1_Example1",
+            "client_id": "exampleclientid",
+            "callback_urls": ["https://console.example.test/callback"],
+            "logout_urls": ["https://console.example.test"],
+            # The caller-only key that re-runs the invocation when the actor's code changes.
+            "handler_version": "abc123=",
+        }
+    )
+
+    assert result["changed"] == "true"
+    assert [name for name, _ in client.calls] == [
+        "describe_user_pool_client",
+        "update_user_pool_client",
+    ]
+
+
+def test_the_terraform_invocation_and_the_handler_agree_on_the_action_name():
+    """A typo either side is an apply that fails at its last resource, so pin the pair.
+
+    The root's `input` is the only caller, and nothing between the two is typed.
+    """
+    root = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "infra"
+        / "environments"
+        / "recon"
+        / "main.tf"
+    ).read_text(encoding="utf-8")
+    names = set(re.findall(r'action\s+=\s+"([a-z_]+)"', root))
+    assert names, "no deploy-actions invocation found in the recon root"
+    assert names <= set(hnd.ACTIONS), f"the root invokes actions the handler does not have: {sorted(names - set(hnd.ACTIONS))}"
 
 
 # --- dispatch -------------------------------------------------------------------------------

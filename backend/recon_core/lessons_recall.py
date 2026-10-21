@@ -6,9 +6,7 @@ Before classifying an item, the agent retrieves the most relevant lessons and in
 advisory context — so prior corrections on similar items inform future proposals.
 """
 
-import logging
-
-logger = logging.getLogger(__name__)
+from backend.recon_core.memory import retrieve_records
 
 
 def retrieve_lessons(
@@ -31,23 +29,7 @@ def retrieve_lessons(
     :param top_k: max lessons to return.
     :returns: list of lesson texts, possibly empty.
     """
-    if not memory_id:
-        return []
-    try:
-        if client is None:
-            import boto3
-
-            client = boto3.client("bedrock-agentcore")
-        resp = client.retrieve_memory_records(
-            memoryId=memory_id,
-            namespace=f"reconciliation/lessons/{domain}",
-            searchCriteria={"searchQuery": query[:1000], "topK": top_k},
-        )
-        return [
-            r.get("content", {}).get("text", "")
-            for r in resp.get("memoryRecordSummaries", [])
-            if r.get("content", {}).get("text")
-        ]
-    except Exception as exc:  # noqa: BLE001 - advisory context, never fail the run
-        logger.warning("lessons recall failed (memory %s, domain %s): %s", memory_id, domain, exc)
-        return []
+    hits = retrieve_records(
+        memory_id, f"reconciliation/lessons/{domain}", query, top_k=top_k, client=client
+    )
+    return [hit["text"] for hit in hits]

@@ -61,6 +61,16 @@ describe("isReconAdmin", () => {
       }),
     ).toBe(false);
   });
+
+  it("trims the configured name, so it agrees with what /api/me reports", () => {
+    // `resolveAppAccess` trims; if this did not, a padded tfvars value would show an admin chip in the
+    // rail while every write route answered 403.
+    expect(isReconAdmin(["recon-admin"], { RECON_ADMIN_GROUP: "  recon-admin  " })).toBe(true);
+  });
+
+  it("reads a blank variable as unset rather than as a group named by whitespace", () => {
+    expect(isReconAdmin(["  ", ""], { RECON_ADMIN_GROUP: "  " })).toBe(false);
+  });
 });
 
 describe("requireReconAdmin", () => {
@@ -91,6 +101,37 @@ describe("requireReconAdmin", () => {
     // group, so an operator can act on it without reading the source to find out what they are missing.
     expect(body.error).toContain("recon-admin");
     expect(body.error).toContain("00uANALYST");
+  });
+
+  it("names the trimmed group in the 403, not the padded value", async () => {
+    process.env.RECON_ADMIN_GROUP = " recon-admin ";
+    authorizeRequest.mockResolvedValue({
+      ok: true,
+      mode: "okta",
+      subject: "00uANALYST",
+      groups: ["recon-analyst"],
+    });
+
+    const got = await requireReconAdmin(req());
+    if (!("error" in got)) throw new Error("expected a refusal");
+    const body = (await got.error.json()) as { error: string };
+    expect(body.error).toContain('"recon-admin" group');
+    expect(body.error).not.toContain('" recon-admin "');
+  });
+
+  it("403s everyone when RECON_ADMIN_GROUP is blank, naming the variable", async () => {
+    process.env.RECON_ADMIN_GROUP = "   ";
+    authorizeRequest.mockResolvedValue({
+      ok: true,
+      mode: "okta",
+      subject: "00uOPERATOR",
+      groups: ["recon-admin", "   "],
+    });
+
+    const got = await requireReconAdmin(req());
+    if (!("error" in got)) throw new Error("expected a refusal");
+    expect(got.error.status).toBe(403);
+    expect(((await got.error.json()) as { error: string }).error).toContain("RECON_ADMIN_GROUP");
   });
 
   it("403s everyone when RECON_ADMIN_GROUP is unset, naming the variable", async () => {
