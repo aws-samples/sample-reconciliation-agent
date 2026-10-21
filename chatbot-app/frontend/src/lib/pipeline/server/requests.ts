@@ -132,11 +132,16 @@ export function parseFieldsBody(body: Record<string, unknown> | null): Partial<F
   return out;
 }
 
-/** A PATCH body: the fields to change and, per field, why the reviewer is overriding it. */
+/** A PATCH body: the fields to change, per field why, and the orders the change applies to. */
 export interface OverrideRequest {
   fields: Partial<FieldValues>;
   reasons: Record<string, string>;
+  /** Order indexes, distinct and ascending; absent means the first (and on most deals only) order. */
+  orders?: number[];
 }
+
+/** Most orders one change may name; the parser stages at most ten per email. */
+const MAX_ORDER_INDEXES = 10;
 
 /**
  * Validate a `PATCH /deals/[id]` body: `{ fields, reasons }`.
@@ -149,6 +154,7 @@ export interface OverrideRequest {
  */
 export function parseOverrideBody(body: Record<string, unknown> | null): OverrideRequest {
   const fields = parseFieldsBody(body);
+  const orders = parseOrderIndexes(body?.orders);
   const raw = body?.reasons;
   if (raw === undefined) return { fields, reasons: {} };
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -164,7 +170,26 @@ export function parseOverrideBody(body: Record<string, unknown> | null): Overrid
     }
     if (reason) reasons[key] = reason;
   }
-  return { fields, reasons };
+  return { fields, reasons, ...(orders ? { orders } : {}) };
+}
+
+/**
+ * `orders`: a non-empty list of distinct order indexes. Whether they exist on the deal is the
+ * route's check, against the row it read.
+ *
+ * @throws Error naming the problem.
+ */
+function parseOrderIndexes(raw: unknown): number[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_ORDER_INDEXES) {
+    throw new Error(`orders must be a list of 1 to ${MAX_ORDER_INDEXES} order indexes`);
+  }
+  if (!raw.every((i) => Number.isInteger(i) && i >= 0)) {
+    throw new Error("orders must hold whole, non-negative order indexes");
+  }
+  const unique = [...new Set(raw as number[])].sort((a, b) => a - b);
+  if (unique.length !== raw.length) throw new Error("orders must not repeat an index");
+  return unique;
 }
 
 // ---------------------------------------------------------------------------------------------

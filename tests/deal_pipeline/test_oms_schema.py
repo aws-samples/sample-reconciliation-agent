@@ -15,7 +15,9 @@ from backend.deal_pipeline.oms_schema import (
     key_for_label,
     normalize_fields,
     parse_csv,
+    parse_csv_rows,
     to_csv,
+    to_csv_rows,
     validate_fields,
     validate_value,
 )
@@ -154,3 +156,25 @@ def test_parse_csv_maps_by_label_and_keeps_unknown_header_for_the_validator():
 def test_parse_csv_rejects_unreadable_files(text):
     with pytest.raises(ValueError):
         parse_csv(text)
+
+
+def test_to_csv_rows_writes_one_row_per_order_under_one_header():
+    # Mirrors the TypeScript toCsvRows test: built from the one-row writer the golden test pins.
+    usd = {**empty_fields(), "currency": "USD", "maturity_terms": "5 yr"}
+    eur = {**empty_fields(), "currency": "EUR", "maturity_terms": "5 yr"}
+    text = to_csv_rows([usd, eur])
+    header, first, second, tail = text.split("\n")
+    assert header == to_csv(usd).split("\n")[0]
+    assert first == to_csv(usd).split("\n")[1] and second == to_csv(eur).split("\n")[1]
+    assert tail == ""
+    assert to_csv_rows([usd]) == to_csv(usd)
+    labels, rows = parse_csv_rows(text)
+    assert [r["currency"] for r in rows] == ["USD", "EUR"]
+    assert parse_csv(text) == (labels, rows[0])
+
+
+def test_parse_csv_rows_names_the_row_whose_cell_count_is_off():
+    usd = {**empty_fields(), "currency": "USD"}
+    text = to_csv_rows([usd, usd]) + "only,three,cells\n"
+    with pytest.raises(ValueError, match="data row 3 has 3 cells"):
+        parse_csv_rows(text)

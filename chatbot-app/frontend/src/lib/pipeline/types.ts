@@ -36,10 +36,24 @@ export interface Enrichment {
   fields_from_security_master: string[];
 }
 
-export interface ParseOutput {
+/**
+ * One order of a parse that staged several (design §15): an instrument the email offers now, with
+ * its complete field set — shared values repeated — its evidence and its assumptions.
+ */
+export interface ParsedOrder {
+  label: string;
   fields: FieldValues;
   evidence: Record<string, FieldEvidence>;
   assumptions: string[];
+}
+
+export interface ParseOutput {
+  /** The first order's values: the whole parse for a single-order email. */
+  fields: FieldValues;
+  evidence: Record<string, FieldEvidence>;
+  assumptions: string[];
+  /** Present only when the email offers more than one instrument; read through `parsedOrdersOf`. */
+  orders?: ParsedOrder[];
   memory_hits: MemoryHit[];
   skills_used: string[];
   enrichment: Enrichment;
@@ -70,6 +84,8 @@ export interface UploadError {
   field: string | null;
   message: string;
   hint?: string;
+  /** In a file of several orders, the 0-based row (order index) the error came from. */
+  row?: number;
 }
 
 export interface UploadResult {
@@ -132,7 +148,25 @@ export interface FieldOverride {
   stage: OverrideStage;
   /** Break stage only: codes of the last rejected upload that named this field. */
   upload_error_codes?: string[];
+  /**
+   * The orders this override changed (indexes into `orders`). Absent on a single-order deal, which
+   * reads as `[0]` — see `overrideOrders`. One override covering several orders sends one lesson.
+   */
+  order_indexes?: number[];
   memory: OverrideMemory;
+}
+
+/**
+ * One order of a deal that stages several (design §15): one row of the deal's staging file, with
+ * its own values, its as-parsed values and its evidence. Approval, upload and rejection stay with
+ * the deal — the file is one unit per email.
+ */
+export interface DealOrder {
+  label: string;
+  fields: FieldValues;
+  original_fields: FieldValues;
+  evidence: Record<string, FieldEvidence>;
+  assumptions?: string[];
 }
 
 export interface DealRecord {
@@ -152,6 +186,12 @@ export interface DealRecord {
   history: DealHistoryEntry[];
   /** Absent on deals staged before overrides existed; read it through `overridesOf`. */
   overrides?: FieldOverride[];
+  /**
+   * Present only when the email offered more than one instrument; read through `ordersOf`. The
+   * top-level `fields`, `original_fields` and `evidence` are then the first order's, kept in step
+   * by every writer.
+   */
+  orders?: DealOrder[];
   created_at: string;
   updated_at: string;
 }

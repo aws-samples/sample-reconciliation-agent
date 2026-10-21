@@ -37,7 +37,7 @@ def scripted_fields(email: dict, issuer: str) -> dict:
     }
 
 
-@pytest.mark.parametrize("index", range(7))
+@pytest.mark.parametrize("index", range(9))
 def test_sample_email_parses_to_a_valid_record(sample_emails, security_master, index):
     email = sample_emails[index]
     issuer = security_master.match_issuer(email["subject"])["issuer_name"]
@@ -81,8 +81,8 @@ def test_sample_email_parses_to_a_valid_record(sample_emails, security_master, i
     assert labels == FIELD_LABELS and parsed == out["fields"]
 
 
-def test_corpus_has_seven_emails_with_the_expected_shape(sample_emails):
-    assert len(sample_emails) == 7
+def test_corpus_has_nine_emails_with_the_expected_shape(sample_emails):
+    assert len(sample_emails) == 9
     for email in sample_emails:
         assert email["source_kind"] in {"news-alert", "bank-notice"}
         assert email["subject"] and email["body"] and email["sent"]

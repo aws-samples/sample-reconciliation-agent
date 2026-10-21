@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { requireActor } from "@/lib/api-auth";
 import type { FieldValues, OverrideMemory } from "@/lib/pipeline/types";
 import { changedKeys, fieldDef, normalizeFields, validateFieldValue } from "@/lib/pipeline/omsSchema";
+import { orderName, ordersOf } from "@/lib/pipeline/orders";
 import { isConditionalCheckFailed } from "@/lib/pipeline/server/aws";
 import {
   applyOverrides,
@@ -42,7 +43,10 @@ export async function GET(
  * stay admin-gated in their own routes.
  *
  * Every field whose value changes must come with a reason, which is recorded on the deal and sent
- * to the knowledge memory as a lesson for the next parse. Only the changed values are validated
+ * to the knowledge memory as a lesson for the next parse. On a deal of several orders, `orders`
+ * names the orders the change applies to (default: the first); a field changed on several orders
+ * at once must hold the same value in all of them — the shared-field override of design §15 — and
+ * becomes one override and one lesson. Only the changed values are validated
  * against the schema formats (§5): an override of one field must not be refused because the parser
  * left another blank, and the OMS still validates the whole file on upload.
  *
@@ -76,9 +80,31 @@ export async function PATCH(
     if (!isOpen(deal)) {
       return jsonError(409, `deal ${id} is ${deal.status} and can no longer be edited`);
     }
-    const merged: FieldValues = normalizeFields({ ...deal.fields, ...body.fields });
-    const changed = changedKeys(deal.fields, merged);
+    const orders = ordersOf(deal);
+    const scope = body.orders ?? [0];
+    const missingOrder = scope.find((i) => i >= orders.length);
+    if (missingOrder !== undefined) {
+      return jsonError(400, `deal ${id} has ${orders.length} order(s); there is no order ${missingOrder}`);
+    }
+    const fieldsFor = new Map(
+      scope.map((i) => [i, normalizeFields({ ...orders[i].fields, ...body.fields })] as const),
+    );
+    const changed = [
+      ...new Set(scope.flatMap((i) => changedKeys(orders[i].fields, fieldsFor.get(i)!))),
+    ];
     if (changed.length === 0) return jsonError(400, "no field changes");
+    const diverging = changed.filter(
+      (key) => new Set(scope.map((i) => orders[i].fields[key] ?? "")).size > 1,
+    );
+    if (diverging.length > 0) {
+      return jsonError(
+        400,
+        `${diverging.join(", ")} differ${diverging.length === 1 ? "s" : ""} across ${scope
+          .map((i) => orderName(orders, i))
+          .join(", ")}; override each order on its own`,
+      );
+    }
+    const merged = fieldsFor.get(scope[0])!;
 
     const problems: Record<string, string> = {};
     for (const key of changed) {
@@ -95,7 +121,7 @@ export async function PATCH(
       });
     }
 
-    const written = await applyOverrides(deal, merged, body.reasons, who.actor);
+    const written = await applyOverrides(deal, scope, fieldsFor, body.reasons, who.actor);
     const email = await getEmail(deal.email_id).catch(() => null);
     const outcomes: Record<string, OverrideMemory> = {};
     await Promise.all(
@@ -103,8 +129,9 @@ export async function PATCH(
         try {
           const eventId = await createOverrideEvent(override, deal.deal_id, {
             email,
-            fields: written.deal.fields,
-            evidence: deal.evidence[override.field],
+            fields: fieldsFor.get(scope[0])!,
+            evidence: orders[scope[0]].evidence[override.field],
+            orders: orders.length > 1 ? { labels: orders.map((o, i) => orderName(orders, i)), scope } : undefined,
           });
           outcomes[override.override_id] =
             eventId === null ? { status: "off" } : { status: "sent", event_id: eventId };

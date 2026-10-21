@@ -1,22 +1,24 @@
 ---
 name: oms-csv-format
-description: The OMS staging CSV contract. Column order, the exact format for each value type, enum spellings, defaults, blanks and quoting. One header row and one data row per deal.
+description: The OMS staging CSV contract. Column order, the exact format for each value type, enum spellings, defaults, blanks and quoting. One header row, then one data row per order of the deal.
 metadata: { tier: "reference", applies_to: ["news-alert", "bank-notice"] }
 ---
 
 # The OMS staging CSV
 
-The OMS ingests one CSV per deal. It checks the header against its schema, every value against
-its type, and then its own business rules, and it rejects the file with the full list of errors
-it found, each with a stable code and a hint. This skill is the contract for the first two checks:
+The OMS ingests one CSV per deal, which is one per email. It checks the header against its
+schema, every row's values against their types, and then its own business rules, and it rejects
+the whole file with the full list of errors it found — each with a stable code, a hint, and, in a
+file of several orders, the row it came from. This skill is the contract for the first two checks:
 **what the columns are, in what order, and what a value of each type looks like.** The schema
 itself is `backend/deal_pipeline/oms_fields.json`; the column order below is that file's array
 order.
 
 ## Shape
 
-- Two lines: a **header row** of the 74 labels below, in order, then **one data row**. Never more
-  than one deal per file.
+- A **header row** of the 74 labels below, in order, then **one data row per order**, in the order
+  `stage_deal` listed them. Most deals have one order and so one data row. Never more than one deal
+  per file.
 - `\n` line endings. RFC 4180 quoting: a value containing a comma, a double quote or a line break
   is wrapped in double quotes, with embedded quotes doubled. Nothing else is quoted.
 - A **blank** is an empty cell (two adjacent commas). Never `N/A`, `-`, `TBD`, `null` or a space.

@@ -110,6 +110,8 @@ skills_used     string[]                        skill names loaded
 enrichment      { issuer_match: string|null, fields_from_security_master: string[] }
 model_id        string
 duration_ms     number
+orders?         { label, fields, evidence, assumptions }[]   only when the email offers several
+                instruments (§15); each a complete field set; the top level is then the first order
 ```
 
 ### Deal (`deals` table, pk `deal_id`, GSI `by_email` on `email_id`)
@@ -126,6 +128,9 @@ csv_key         string   "deal-csv/<deal_id>.csv"
 upload          UploadResult | null
 history         { at, actor, action, detail? }[]   STAGED / EDITED / APPROVED / UPLOAD_ACCEPTED / UPLOAD_REJECTED / REJECTED / LESSON_RETRACTED
 overrides       FieldOverride[]   append-only; [] at staging (absent on older rows)
+orders?         { label, fields, original_fields, evidence, assumptions? }[]   only when the email
+                offered several instruments (§15): one row each in the CSV. The top-level fields,
+                original_fields and evidence are then the first order's, kept in step by every writer
 created_at, updated_at
 ```
 
@@ -143,7 +148,9 @@ value           string   the new value
 reason          string   required, ≤ 2000 chars
 actor, at       string   verified caller, ISO-8601
 stage           "review" | "break"   break = made while the deal was UPLOAD_FAILED
-upload_error_codes? string[]   break only: codes of the last rejected upload naming this field
+upload_error_codes? string[]   break only: codes of the last rejected upload naming this field (in
+                one of this override's orders' rows)
+order_indexes?  number[]   on a deal of several orders, the orders it changed; absent = [0]
 memory          { status: "pending" | "sent" | "failed" | "off" | "retracted", event_id?, error?,
                   retracted_by?, retracted_at? }
 ```
@@ -154,7 +161,8 @@ memory          { status: "pending" | "sent" | "failed" | "off" | "retracted", e
 attempted_at    ISO-8601
 accepted        boolean
 staging_key     string | null   "oms-staging/<deal_id>.csv" when accepted
-errors          { code, field: string|null, message, hint?: string }[]
+errors          { code, field: string|null, message, hint?: string, row?: number }[]
+                row: 0-based order index, in a file of several orders
 validator_version string
 ```
 
@@ -176,7 +184,8 @@ created_at, decided_at, decided_by
 
 Schema: `backend/deal_pipeline/oms_fields.json` (mirrored at
 `chatbot-app/frontend/src/lib/pipeline/omsFields.json`; a test asserts they match). One CSV per
-deal: header row = every `label` in array order, one data row. Formats by `type`:
+deal, which is one per email: header row = every `label` in array order, then one data row per order
+(§15) — one row for nearly every deal. Formats by `type`:
 
 | type | format | example |
 | --- | --- | --- |
@@ -213,7 +222,9 @@ to learn; the fix column says which tier the assistant should propose.
 | `IG_FLAG` | Is Investment Grade? must be Yes when S&P issue rating is BBB- or better | **gap** | memory (situational) |
 
 The validator response also carries `hint` text per error written the way a real system's
-documentation would, so the assistant has something to reason from.
+documentation would, so the assistant has something to reason from. A file of several orders is
+validated row by row and accepted only when every row passes; each row's errors carry `row`, and a
+header problem is reported once for the file.
 
 ## 7. Assistant tools (BFF, Bedrock Converse streaming)
 
@@ -294,7 +305,7 @@ this app has no `/me` route of its own.
 | `/emails/[id]` | GET | email incl. parse |
 | `/emails/[id]/reparse` | POST | status → PARSING, re-invoke; 409 while a parser run is already in flight (the PARSING write is conditional, so two concurrent reparses start one run) |
 | `/deals` | GET | list (newest first) |
-| `/deals/[id]` | GET, PATCH | PATCH `{fields, reasons}` → a reason is required for every field whose value changes; only the changed values are validated (the OMS checks the rest on upload); regenerate CSV, one `FieldOverride` per changed field, history EDITED quoting each change and reason, then one memory lesson per override and its outcome recorded on the override; open to every user with access; 409 when the deal changed (status or `updated_at`) between read and write |
+| `/deals/[id]` | GET, PATCH | PATCH `{fields, reasons, orders?}` → `orders` names the order indexes the change applies to (default `[0]`; several only when they hold the same current value, which makes it one override and one lesson); a reason is required for every field whose value changes; only the changed values are validated (the OMS checks the rest on upload); regenerate CSV, one `FieldOverride` per changed field, history EDITED quoting each change and reason, then one memory lesson per override and its outcome recorded on the override; open to every user with access; 409 when the deal changed (status or `updated_at`) between read and write |
 | `/deals/[id]/csv` | GET | text/csv download |
 | `/deals/[id]/approve` | POST | status APPROVED → invoke OMS Lambda sync → UPLOADED / UPLOAD_FAILED; **admin-gated**; the APPROVED write is conditional on the status and `updated_at` read (409 on conflict, Lambda not invoked); both reads are strongly consistent |
 | `/deals/[id]/reject` | POST | `{reason}`; **admin-gated**; conditional on the status and `updated_at` read (409 on conflict) |
@@ -737,104 +748,78 @@ refused) and `infra/modules/frontend-ecs/tests/console_settings.tftest.hcl`. Not
 group; `console-admins` in the examples is an identity-provider group an operator maintains, like the
 four app groups.
 
-## 15. One email, several orders (design; not built)
+## 15. One email, several orders
 
-Status: designed, not implemented. The parser still stages one deal per email. Fictional samples
-for this section are in `data/deal-emails-multi-order/`. They stay out of the Simulate corpus until
-the parser can stage orders.
+Status: built on the parser, the BFF and the review screens. The mock OMS validates every row.
+Samples 08 and 09 in `data/deal-emails/` are fictional examples of the two shapes below.
 
 ### What arrives
 
-The desk's real notices come in three shapes. The samples reproduce the first two with invented
+The desk's real notices come in three shapes; the samples reproduce the first two with invented
 names and numbers.
 
 1. **One security in several tranches.** The issuer, instrument, secured level, ratings, use of
    proceeds, left lead and dates are shared. Currency, tenor, size, call protection and price talk
    vary per tranche. Some values are stated relative to another tranche ("EUR: +100bps from USD"),
-   and some are not yet known ("tranche sizes TBD"). Sample m1 has five tranches across two
+   and some are not yet known ("tranche sizes TBD"). Sample 08 has five tranches across two
    currencies.
 2. **A loan and a bond in one thread.** Even Pipeline Type and Security Type differ between the
-   orders, as do the left lead, tenor, call protection and pricing basis (spread over SOFR vs.
-   coupon talk). A facility can also split (term loan B plus a delayed-draw term loan). Sample m2
-   stages three orders.
+   orders, as do the left lead, tenor, call protection and pricing basis. A facility can also split
+   (term loan B plus a delayed-draw term loan). Sample 09 stages three orders.
 3. **A loan and a bond for one issuer as two separate emails.** Each email is 1:1 and needs nothing
-   here. Linking the two (same issuer, days apart) is a separate, later feature.
+   here. Linking the two is a separate, later feature.
 
-Which fields are shared is therefore a property of the email, not of the schema. In shape 2, Pipeline
-Type itself varies.
+### Decision: one file per email (2026-10-21)
 
-### Data model
+The staging file maps to the incoming email: one deal per email, one row per order. The desk may
+revisit this. Consequences:
 
-- **One deal record per order.** Each order is one OMS row, approved, uploaded, rejected and
-  overridden on its own. So it keeps everything §4 gives a deal: its own CSV, history, upload
-  result and `overrides[]`. That makes todo 1's override model apply per order unchanged. New
-  fields:
-  - `order_index`: 0-based.
-  - `order_count`.
-  - `order_label`: display only, built from what distinguishes the order, e.g. "USD 5yr", "EUR
-    8yr", "TLB", "DDTL", "Notes".
-- **The email lists its deals.** `deal_id` becomes `deal_ids: string[]`. `deal_id` stays, set to the
-  first order, until every reader has moved.
-- **The parse returns orders.** `ParseOutput` gains `orders: { label, fields, evidence,
-  assumptions }[]`, each with a complete field set, shared values repeated. The parser does not
-  declare which fields are shared; the UI computes that by comparison, so it can't be wrong in a way
-  the reviewer can't see.
-- **Derived values are evidence.** A value computed from another tranche records that in its
-  evidence `rule` ("USD 5yr talk + 100 bps"). An unknown size is blank with an assumption saying
-  why.
-- **Re-parse is unchanged.** It already supersedes every open deal of the email, not just one.
+- **Lifecycle per deal:** approval, upload, rejection and re-parse act on the deal, so on all of the
+  email's orders at once. The mock OMS accepts the file only when every row passes, and names each
+  error's row.
+- **Data per order:** each order keeps its own fields, original fields, evidence and assumptions
+  (`DealRecord.orders`). A single-order deal carries no `orders`, and every reader goes through
+  `ordersOf()`, which presents it as one order. 1:1 deals, their API and their screens are exactly
+  as before.
+- **Overrides name their orders:** an override names the orders it changed (`order_indexes`).
+  Overriding a shared field "for all orders" is therefore **one** override and **one** lesson.
+  Retracting it retracts that one lesson.
 
-### UI: Inbox parsed panel
+### Parsing
 
-This is the layout chosen on 2026-10-07: order chips across the top, then fields split into "shared
-by all orders" and "this order". With one order the strip is hidden and everything is "this order",
-which is exactly today's 1:1 panel.
+- **The rule:** `deal-parsing` rule U1 is one deal per email, with one order per instrument the
+  email offers now. Debt mentioned only as context (being refinanced, an existing tranche, a
+  revolver extended, "launching next week") is never an order.
+- **The tool:** `stage_deal` takes an optional `orders` list. The top-level `fields` hold what every
+  order shares; each order holds a `label` and only the fields that differ. The handler overlays
+  them into complete per-order records, so a five-tranche reply stays well inside the model's
+  output limit.
+- **Validation:** each order is validated and coerced on its own, and the one correction turn names
+  the order (`[EUR 5yr] Issue Size (MM): required but blank`).
+- **Derived and missing values:** a value derived from another order records the derivation as its
+  evidence `rule`. A "TBD" size is blank, with an assumption saying so.
+- **Cap:** at most ten orders per email.
 
-```
-│ 3 orders from this email                 │
-│ [●1 · TLB] [2 · DDTL] [3 · Notes ✎2]     │   chip: label, status pill, override count
-│                                          │
-│ SHARED BY ALL ORDERS                     │   current values equal across every order
-│  Issuer        Oakline Home Services ✎   │
-│  UOP           Refinance             ✎   │
-│ THIS ORDER · 1 · TLB                     │   values that differ, or are blank in some
-│  Pipeline Type Loan                  ✎   │
-│  Issue Size    1,600.000             ✎   │
-│  Call Protect. 101 soft 6m  overridden ✎ │
-```
+### Review UI
 
-- **Overriding a shared field** asks for its scope: *all N orders* (the default) or *this order
-  only*. "All" writes one override per order with the same reason, in one request, and sends **one**
-  lesson, not N. The first order's override owns the lesson (its `override_id` is the lesson's
-  provenance); the others record `memory: { status: "sent", lesson_of: <that id> }`. Retracting from
-  any of them retracts the one lesson and marks all of them.
-- **A value that diverges after an override** (one order changed alone) moves from "shared" to
-  "this order" on the next render, which is the truth.
-- **The evidence disclosure** shows a derived value's rule, so "EUR 5yr talk = USD + 100 bps" is
-  checkable against the USD tranche without leaving the panel.
-
-### UI: elsewhere
-
-- **Deals list:** one row per order, grouped under its email ("3 orders"), collapsed by default.
-- **Deal page:** "order 2 of 3 from email …" with links to the sibling orders. Approve and reject
-  stay per order. An admin-only "Approve all N" is a later convenience, not part of this design.
-- **Memory:** a shared-field lesson is phrased once, with the trigger the orders have in common. A
-  per-order lesson quotes that order's distinguishing attributes (currency, tenor, instrument) so
-  the extractor can tell "the EUR tranche" from "every tranche".
-
-### Contract changes
-
-| Where | Change |
-| --- | --- |
-| parser `stage_deal` tool | `orders: [...]`; the skill gains a "multi-tranche and multi-instrument notices" section on when to split and how to label |
-| `PATCH /emails/[id]/orders` (new) | `{ deal_ids, fields, reasons }` for a shared-field override across orders; per-order overrides keep `PATCH /deals/[id]` |
-| retract | follows `lesson_of` to the owning override |
-| mock OMS | unchanged: still one row per upload |
+- **Inbox panel:** a strip of order chips. Each chip shows the order's label, how many overrides
+  changed it (✎n), and after a rejected upload how many OMS errors were in its row (✕n). The
+  selected order's fields are split into "shared by all N orders" (computed: equal in every order)
+  and "this order". With one order the strip is hidden and the panel is the 1:1 panel.
+- **Overriding a shared field** offers *all N orders* (the default: one override, one lesson) or
+  *this order only*. A field that differs between orders is always overridden for this order
+  alone; asking to change several orders at once when their values differ is refused with 400.
+- **Deal page:** the same strip, locked while editing because a draft belongs to one order.
+  "Edit fields" edits the selected order. The reasons dialog offers "apply to all N orders" for any
+  changed field every order shared. The CSV preview shows every row.
+- **Upload result:** each error says which row and order it came from.
+- **Deals list:** a deal of several orders says so ("5 orders").
+- **Memory:** a lesson from a shared override says it "applies to all N orders"; a per-order
+  lesson names the order and quotes that order's attributes, so the extractor can tell "the EUR
+  tranche" from "every tranche".
 
 ### Open questions for the desk
 
-1. Does the OMS take N separate uploads for N orders (assumed here), or one file with N rows?
-2. Should a tranche whose size is "TBD" be staged blank, or held until the size is known?
-3. When a bond is mentioned in a loan launch but "launches next week", is it an order now, or later
-   when its own notice arrives?
-4. Should two emails for one issuer (shape 3) be linked in the Inbox?
+1. One file per email is the current decision. Would the OMS rather have one upload per order?
+2. Should a tranche whose size is "TBD" be staged blank (today), or held until the size is known?
+3. Should two emails for one issuer (shape 3) be linked in the Inbox?

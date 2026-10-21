@@ -15,9 +15,12 @@ import { BTN_PRIMARY, Eyebrow, Panel } from "@/components/app-ui/ui";
 export function UploadResultPanel({
   upload,
   dealId,
+  orderLabels,
 }: {
   upload: UploadResult | null;
   dealId: string;
+  /** On a deal of several orders, each order's name, so an error says which row it came from. */
+  orderLabels?: string[];
 }) {
   return (
     <Panel className="rc-rise p-5">
@@ -64,6 +67,12 @@ export function UploadResultPanel({
                 </span>
                 <span className="rc-mono break-all text-[11.5px] text-[var(--rc-ink-dim)]">
                   {e.field ?? "—"}
+                  {e.row !== undefined && (
+                    <span className="block text-[10.5px] text-[var(--rc-ink-faint)]" data-row={e.row}>
+                      row {e.row + 1}
+                      {orderLabels?.[e.row] ? ` · ${orderLabels[e.row]}` : ""}
+                    </span>
+                  )}
                 </span>
                 <span className="text-[12px] leading-relaxed text-[var(--rc-ink)]">
                   {e.message}

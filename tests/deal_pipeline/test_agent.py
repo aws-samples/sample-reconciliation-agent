@@ -506,3 +506,131 @@ def test_bedrock_client_is_built_with_bounded_timeouts_and_retries(monkeypatch):
     assert config.read_timeout == 120 and config.connect_timeout == 10
     # botocore counts client-config max_attempts as retries: 2 retries, 3 attempts in total.
     assert config.retries == {"total_max_attempts": 3, "mode": "standard"}
+
+
+# --- several orders from one email (design section 15) --------------------------------------------
+
+
+def orders_turn(shared: dict, orders: list[dict], evidence: dict | None = None) -> list[dict]:
+    """A stage_deal call with shared top-level fields and per-order overlays."""
+    payload = {
+        "fields": shared,
+        "evidence": evidence or {},
+        "assumptions": ["shared"],
+        "orders": orders,
+    }
+    return [tool_use(STAGE_TOOL, payload, "tu-stage")]
+
+
+TRANCHES = [
+    {
+        "label": "USD 5yr",
+        "fields": {"maturity_terms": "5 yr", "issue_size_mm": "2500.000", "call_protection": "NC2"},
+        "evidence": {
+            "issue_size_mm": {"value": "2500.000", "confidence": "high", "excerpt": "2.5B 5yr"}
+        },
+    },
+    {
+        "label": "EUR 5yr",
+        "fields": {
+            "currency": "EUR",
+            "maturity_terms": "5 yr",
+            "issue_size_mm": "",
+            "call_protection": "NC2",
+        },
+        "assumptions": ["EUR tranche sizes are TBD in the notice."],
+    },
+]
+
+
+def test_tool_schema_offers_orders_without_requiring_them():
+    stage = next(t for t in tool_config()["tools"] if t["toolSpec"]["name"] == STAGE_TOOL)
+    schema = stage["toolSpec"]["inputSchema"]["json"]
+    assert "orders" in schema["properties"] and "orders" not in schema["required"]
+    item = schema["properties"]["orders"]["items"]
+    assert item["required"] == ["label", "fields"]
+    # An order holds only what differs, so no field is required inside it.
+    assert "required" not in item["properties"]["fields"]
+    assert schema["properties"]["orders"]["maxItems"] == agent.MAX_ORDERS
+
+
+def test_several_orders_overlay_the_shared_fields_and_keep_each_orders_own(security_master):
+    # The EUR size is required and TBD, so the one correction turn runs; the model restages as is.
+    bedrock = FakeBedrock(
+        [
+            lookup_turn("Northwind Automotive"),
+            orders_turn(GOOD_FIELDS, TRANCHES, EVIDENCE),
+            orders_turn(GOOD_FIELDS, TRANCHES, EVIDENCE),
+        ]
+    )
+    out = run(bedrock, security_master=security_master)
+    assert len(bedrock.calls) == 3
+    assert [o["label"] for o in out["orders"]] == ["USD 5yr", "EUR 5yr"]
+    usd, eur = out["orders"]
+    # Shared values reach every order; each order's own values win.
+    assert usd["fields"]["left_agent"] == eur["fields"]["left_agent"] == "Harbor Point Securities"
+    assert usd["fields"]["currency"] == "USD" and eur["fields"]["currency"] == "EUR"
+    assert usd["fields"]["call_protection"] == "NC2"
+    assert usd["evidence"]["issue_size_mm"]["excerpt"] == "2.5B 5yr"
+    assert usd["evidence"]["commit_due"] == EVIDENCE["commit_due"]  # shared evidence too
+    # A size the notice leaves TBD is blank with the order's own assumption beside the shared one.
+    assert eur["fields"]["issue_size_mm"] == ""
+    assert eur["assumptions"][:2] == ["shared", "EUR tranche sizes are TBD in the notice."]
+    assert (
+        "Issue Size (MM) is required but could not be determined from the email."
+        in eur["assumptions"]
+    )
+    # Every order is a complete, enriched record; the top level is the first order.
+    assert all(list(o["fields"]) == FIELD_KEYS for o in out["orders"])
+    assert eur["fields"]["region"] == "North America"
+    assert out["fields"] == usd["fields"] and out["assumptions"] == usd["assumptions"]
+
+
+def test_the_correction_turn_names_the_order(security_master):
+    bad = [
+        TRANCHES[0],
+        {**TRANCHES[1], "fields": {**TRANCHES[1]["fields"], "maturity_terms": "until sold"}},
+    ]
+    bedrock = FakeBedrock(
+        [
+            lookup_turn("Northwind Automotive"),
+            orders_turn(GOOD_FIELDS, bad),
+            orders_turn(GOOD_FIELDS, TRANCHES),
+        ]
+    )
+    run(bedrock, security_master=security_master)
+    prompt = bedrock.calls[2]["messages"][-1]["content"][-1]["text"]
+    assert "[EUR 5yr] Maturity Terms: 'until sold'" in prompt
+    assert "[EUR 5yr] Issue Size (MM): required but blank" in prompt
+    assert "[USD 5yr]" not in prompt  # an order with nothing to fix is not named
+    assert "FULL set of fields and orders" in prompt
+
+
+def test_a_single_order_is_folded_into_the_top_level_and_unlabelled_orders_are_numbered(
+    security_master,
+):
+    one = FakeBedrock(
+        [lookup_turn("Northwind Automotive"), orders_turn(GOOD_FIELDS, [TRANCHES[0]])]
+    )
+    out = run(one, security_master=security_master)
+    assert "orders" not in out
+    assert (
+        out["fields"]["call_protection"] == "NC2" and out["fields"]["issue_size_mm"] == "2500.000"
+    )
+
+    unlabelled = [{**TRANCHES[0], "label": ""}, {**TRANCHES[0], "label": "  "}]
+    two = FakeBedrock([lookup_turn("Northwind Automotive"), orders_turn(GOOD_FIELDS, unlabelled)])
+    assert [o["label"] for o in run(two, security_master=security_master)["orders"]] == [
+        "Order 1",
+        "Order 2",
+    ]
+
+
+def test_orders_over_the_cap_are_dropped_and_said(security_master):
+    many = [{**TRANCHES[0], "label": f"T{i}"} for i in range(agent.MAX_ORDERS + 2)]
+    bedrock = FakeBedrock([lookup_turn("Northwind Automotive"), orders_turn(GOOD_FIELDS, many)])
+    out = run(bedrock, security_master=security_master)
+    assert len(out["orders"]) == agent.MAX_ORDERS
+    assert f"only the first {agent.MAX_ORDERS} were kept" in " ".join(
+        out["orders"][0]["assumptions"]
+    )

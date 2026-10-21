@@ -4,11 +4,11 @@ import pytest
 
 from backend.deal_pipeline import parser_handler
 from backend.deal_pipeline.agent import DEFAULT_SYSTEM_PROMPT
-from backend.deal_pipeline.oms_schema import to_csv
+from backend.deal_pipeline.oms_schema import parse_csv_rows, to_csv
 from backend.deal_pipeline.parser_handler import DEFAULT_MODEL_ID, handle
 from backend.recon_core.model_select import ALLOWED_MODEL_IDS
 from tests.deal_pipeline.conftest import MODEL_PARAM
-from tests.fakes.bedrock import FakeBedrock, lookup_turn, stage_turn, truncated_turn
+from tests.fakes.bedrock import FakeBedrock, lookup_turn, stage_turn, tool_use, truncated_turn
 from tests.fakes.lambda_context import fake_context
 
 SKILL = "---\nname: deal-parsing\ndescription: Parse deal emails.\n---\nTerm loans are Loan; notes are Bond.\n"
@@ -340,3 +340,52 @@ def test_date_arrived_uses_the_desk_time_zone_from_the_environment(aws, monkeypa
     email = aws.emails.get_item(Key={"email_id": "em_copperfield"})["Item"]
     assert email["parse"]["fields"]["date_arrived"] == "8/6/2026"
     assert "Europe/London" in email["parse"]["evidence"]["date_arrived"]["rule"]
+
+
+def test_an_email_offering_several_instruments_stages_one_deal_with_one_csv_row_per_order(aws):
+    # One file per email (design section 15): the loan and its delayed-draw facility are two
+    # orders of one deal, approved and uploaded together as one two-row CSV.
+    seed_email(aws)
+    seed_assets(aws)
+    orders = [
+        {"label": "TLB", "fields": {"issue_size_mm": "$1,295 million"}},
+        {
+            "label": "DDTL",
+            "fields": {"issue_size_mm": "$250 million"},
+            "assumptions": ["DDTL drawn later."],
+        },
+    ]
+    payload = {"fields": FIELDS, "evidence": {}, "assumptions": [], "orders": orders}
+    bedrock = FakeBedrock(
+        [
+            lookup_turn("Copperfield Insurance Partners"),
+            [tool_use("stage_deal", payload, "tu-stage")],
+        ]
+    )
+
+    result = handle({"email_id": "em_copperfield"}, None, bedrock=bedrock)
+
+    deal = aws.deals.get_item(Key={"deal_id": result["deal_id"]})["Item"]
+    assert [o["label"] for o in deal["orders"]] == ["TLB", "DDTL"]
+    assert [o["fields"]["issue_size_mm"] for o in deal["orders"]] == ["1295.000", "250.000"]
+    assert all(o["fields"] == o["original_fields"] for o in deal["orders"])
+    assert deal["orders"][1]["assumptions"] == ["DDTL drawn later."]
+    # The top level mirrors the first order for readers that predate orders.
+    assert deal["fields"] == deal["orders"][0]["fields"]
+    assert "2 orders: TLB, DDTL" in deal["history"][0]["detail"]
+
+    labels, rows = parse_csv_rows(
+        aws.s3.get_object(Bucket=aws.bucket, Key=deal["csv_key"])["Body"].read().decode("utf-8")
+    )
+    assert [r["issue_size_mm"] for r in rows] == ["1295.000", "250.000"]
+
+    email = aws.emails.get_item(Key={"email_id": "em_copperfield"})["Item"]
+    assert email["deal_id"] == result["deal_id"]  # still one deal per email
+    assert len(email["parse"]["orders"]) == 2
+
+
+def test_a_single_order_deal_has_no_orders_attribute(aws):
+    seed_email(aws)
+    seed_assets(aws)
+    result = handle({"email_id": "em_copperfield"}, None, bedrock=FakeBedrock([stage_turn(FIELDS)]))
+    assert "orders" not in aws.deals.get_item(Key={"deal_id": result["deal_id"]})["Item"]

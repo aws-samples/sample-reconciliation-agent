@@ -214,7 +214,8 @@ describe("EmailDetailPage", () => {
     fireEvent.change(within(editor).getByLabelText(/Reason for overriding/), { target: { value: "short name" } });
     await act(async () => fireEvent.click(within(editor).getByRole("button", { name: "Save override" })));
 
-    expect(updateDealFields).toHaveBeenCalledWith("dl_1", { left_agent: "Silverline" }, { left_agent: "short name" });
+    // A single-order deal sends no `orders`: the request it always sent.
+    expect(updateDealFields).toHaveBeenCalledWith("dl_1", { left_agent: "Silverline" }, { left_agent: "short name" }, undefined);
     expect(document.querySelector('[data-field="left_agent"]')).toHaveTextContent("Silverline");
     expect(document.querySelector('[data-override="left_agent"]')).toHaveTextContent("lesson sent to memory");
   });

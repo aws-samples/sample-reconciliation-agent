@@ -121,13 +121,15 @@ sometimes absent.
 
 Two more corpora sit beside the reconciliation ones and belong to the other app in the console.
 
-`deal-emails/` is the simulated inbox: seven fictional new-issue deal emails, one JSON file each
+`deal-emails/` is the simulated inbox: nine fictional new-issue deal emails, one JSON file each
 (`id`, `source_kind`, `from`, `to`, `sent`, `subject`, `body`). **The file name without `.json` is the
 corpus id** the simulate dialog sends back, so keep the numbering — it is the demo's narrative order —
 and never rename a file without expecting the id to change. The BFF reads the directory straight off
 disk under `next dev`; the console's container ships no `data/`, so `infra/modules/deal-pipeline`
 seeds the same files to the pipeline bucket under `samples/` and the BFF reads them from there. A new
-sample therefore needs a Terraform apply before it appears in the deployed console.
+sample therefore needs a Terraform apply before it appears in the deployed console. Samples 08 and 09
+are the one-email-several-orders cases (design §15): a security in five tranches across two currencies,
+and a loan launched alongside secured notes.
 `tests/deal_pipeline/test_sample_emails.py` runs every file through the parsing agent with a scripted
 model, so a file that drifts from the shape breaks there rather than as an empty menu on stage.
 

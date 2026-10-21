@@ -158,39 +158,56 @@ def _csv_cell(value) -> str:
     return s
 
 
-def to_csv(fields: dict[str, str]) -> str:
-    """Header row of labels plus one data row, "\\n" line endings, RFC 4180 quoting.
+def to_csv_rows(rows: list[dict[str, str]]) -> str:
+    """Header row of labels plus one data row per order, "\\n" line endings, RFC 4180 quoting.
 
-    Byte-identical to the TypeScript ``toCsv`` for the same field values, which is what lets the
-    BFF regenerate a deal's CSV after an edit without the two sides drifting.
+    One file per email: an email that offers several instruments stages one deal whose orders are
+    the rows of this file, in the email's order (design section 15). Byte-identical to the
+    TypeScript ``toCsvRows`` for the same values, which is what lets the BFF regenerate a deal's
+    CSV after an edit without the two sides drifting.
     """
     header = ",".join(_csv_cell(f["label"]) for f in FIELDS)
-    row = ",".join(_csv_cell(fields.get(f["key"], "")) for f in FIELDS)
-    return f"{header}\n{row}\n"
+    lines = [",".join(_csv_cell(fields.get(f["key"], "")) for f in FIELDS) for fields in rows]
+    return header + "\n" + "".join(line + "\n" for line in lines)
 
 
-def parse_csv(text: str) -> tuple[list[str], dict[str, str]]:
-    """Read a one-record staging CSV back into ``(header_labels, fields_by_key)``.
+def to_csv(fields: dict[str, str]) -> str:
+    """The one-order file: :func:`to_csv_rows` with a single row."""
+    return to_csv_rows([fields])
+
+
+def parse_csv_rows(text: str) -> tuple[list[str], list[dict[str, str]]]:
+    """Read a staging CSV back into ``(header_labels, [fields_by_key per data row])``.
 
     The header is returned verbatim so the OMS validator can report exactly how it differs from
     the schema (``HEADER_MISMATCH``); values are keyed by field key for every header label the
     schema knows, so a misordered file still yields values to validate. Only structural
-    problems raise here — a file the OMS could not even read as "one header row, one data row".
+    problems raise here — a file the OMS could not even read as "a header row and data rows".
 
     :param text: the CSV text.
-    :returns: the header labels in file order, and the known values keyed by field key.
-    :raises ValueError: when the file has no header row, no data row, or the data row's cell
-        count differs from the header's.
+    :returns: the header labels in file order, and one dict of known values per data row.
+    :raises ValueError: when the file has no header row, no data row, or a data row's cell count
+        differs from the header's (naming the row, 1-based, as the OMS would).
     """
     rows = [r for r in csv.reader(io.StringIO(text)) if r]
     if len(rows) < 2:
-        raise ValueError("CSV must contain a header row and one data row")
-    labels, data = rows[0], rows[1]
-    if len(data) != len(labels):
-        raise ValueError(f"data row has {len(data)} cells but the header has {len(labels)}")
-    fields = {}
-    for label, value in zip(labels, data):
-        key = _KEY_BY_LABEL.get(label)
-        if key is not None:
-            fields[key] = value
-    return labels, fields
+        raise ValueError("CSV must contain a header row and at least one data row")
+    labels = rows[0]
+    records = []
+    for number, data in enumerate(rows[1:], start=1):
+        if len(data) != len(labels):
+            where = "data row" if len(rows) == 2 else f"data row {number}"
+            raise ValueError(f"{where} has {len(data)} cells but the header has {len(labels)}")
+        fields = {}
+        for label, value in zip(labels, data):
+            key = _KEY_BY_LABEL.get(label)
+            if key is not None:
+                fields[key] = value
+        records.append(fields)
+    return labels, records
+
+
+def parse_csv(text: str) -> tuple[list[str], dict[str, str]]:
+    """The first data row of :func:`parse_csv_rows`, for callers that read a one-order file."""
+    labels, records = parse_csv_rows(text)
+    return labels, records[0]

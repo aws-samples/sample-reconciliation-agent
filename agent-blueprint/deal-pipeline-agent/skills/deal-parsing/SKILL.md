@@ -1,6 +1,6 @@
 ---
 name: deal-parsing
-description: Core rules for turning one new-issue deal email into one OMS pipeline record. Instrument classification, number and date conventions, naming, ratings, the complete field mapping, defaults, and the evidence discipline every value must meet.
+description: Core rules for turning one new-issue deal email into one OMS pipeline deal, with one order per instrument it offers. Instrument classification, number and date conventions, naming, ratings, the complete field mapping, defaults, and the evidence discipline every value must meet.
 metadata: { tier: "core", applies_to: ["news-alert", "bank-notice"] }
 ---
 
@@ -55,13 +55,33 @@ over the rules below for the field it names. A memory whose condition does not m
 
 ## Universal rules
 
-### U1 — One email, one deal
+### U1 — One email, one deal; one order per instrument offered now
 
-Stage exactly one record per email: the tranche named in the subject line or the opening
-sentence. Other debt the email mentions — the notes being refinanced, an existing tranche the
-add-on is fungible with, a revolver being extended alongside — is context for `Notes`, never a
-second record and never a source for this record's size, rating or maturity unless a rule below
-says so (U3 covers the fungible-tranche case).
+Stage one deal per email. A deal has **one order per instrument the email offers now**: usually
+one, the tranche named in the subject line or the opening sentence. Stage **several orders**
+only when the email itself launches more than one instrument that will be sized or priced on its
+own:
+
+- tranches of one security that differ by currency or tenor ("4B 5yr / 4B 8yr / 2B 10yr", "USD
+  and EUR tranches");
+- facilities launched together ("$1,600mm First Lien Term Loan B" and "$250mm Delayed Draw Term
+  Loan B");
+- a loan and a bond launched together for one issuer, in one notice or one forwarded thread.
+
+Other debt the email mentions — the notes being refinanced, an existing tranche the add-on is
+fungible with, a revolver being extended alongside, debt "alongside" that is not offered here —
+is context for `Notes`, never an order and never a source for an order's size, rating or
+maturity unless a rule below says so (U3 covers the fungible-tranche case). A bond "launching
+next week" is not an order yet; its own notice will be.
+
+With several orders, put every value the orders share (issuer, opportunity name stem, ratings,
+UOP, dates, left lead when it is the same) in the top-level `fields`, and give each order in
+`orders` a short `label` that tells it from the others (`USD 5yr`, `EUR 8yr`, `TLB`, `DDTL`,
+`Notes`) and **only the fields that differ** for it: currency, tenor, size, call protection,
+price or spread talk, pipeline and security type, left lead when the loan and bond have different
+leads. A value stated relative to another order ("EUR: +100 bps from USD") is computed, with that
+derivation as the evidence `rule`. A size stated as "TBD" is blank, with an assumption saying so;
+never copy another order's size. Each order becomes one row of the deal's staging file.
 
 ### U2 — Instrument classification
 

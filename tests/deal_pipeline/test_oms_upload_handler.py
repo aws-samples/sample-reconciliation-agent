@@ -2,7 +2,7 @@
 
 import pytest
 
-from backend.deal_pipeline.oms_schema import to_csv
+from backend.deal_pipeline.oms_schema import to_csv, to_csv_rows
 from backend.deal_pipeline.oms_upload_handler import handle
 from backend.deal_pipeline.oms_validator import VALIDATOR_VERSION
 from tests.deal_pipeline.conftest import clean_loan_fields
@@ -177,3 +177,28 @@ def test_upload_keeps_the_reviewers_overrides(aws):
     deal = aws.deals.get_item(Key={"deal_id": "dl_ov"})["Item"]
     assert deal["status"] == "UPLOADED"
     assert deal["overrides"] == [override]
+
+
+def test_a_file_of_several_orders_is_accepted_only_when_every_row_passes(aws):
+    good = clean_loan_fields()
+    bad = {**good, "covenant_status_num": ""}
+    seed_deal(aws, "dl_multi", good, csv_text=to_csv_rows([good, good]))
+    assert handle({"deal_id": "dl_multi"}, None)["accepted"] is True
+
+    seed_deal(aws, "dl_multi_bad", good, csv_text=to_csv_rows([good, bad]))
+    result = handle({"deal_id": "dl_multi_bad"}, None)
+    assert result["accepted"] is False and result["status"] == "UPLOAD_FAILED"
+    # Each error names the order's row, 0-based, so the reviewer sees which order was refused.
+    assert {e["row"] for e in result["errors"]} == {1}
+    assert "COVENANT_STATUS_REQUIRED" in {e["code"] for e in result["errors"]}
+    deal = aws.deals.get_item(Key={"deal_id": "dl_multi_bad"})["Item"]
+    assert deal["upload"]["errors"][0]["row"] == 1
+
+
+def test_a_header_problem_in_a_several_order_file_is_reported_once_without_a_row(aws):
+    good = clean_loan_fields()
+    text = to_csv_rows([good, good]).replace("Pipeline Status", "Status", 1)
+    seed_deal(aws, "dl_hdr", good, csv_text=text)
+    errors = handle({"deal_id": "dl_hdr"}, None)["errors"]
+    headers = [e for e in errors if e["code"] == "HEADER_MISMATCH"]
+    assert len(headers) == 1 and "row" not in headers[0]

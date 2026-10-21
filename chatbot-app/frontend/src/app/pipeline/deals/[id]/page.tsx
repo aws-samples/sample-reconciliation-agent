@@ -11,7 +11,9 @@ import {
   updateDealFields,
 } from "@/lib/pipelineApi";
 import type { DealRecord, FieldOverride, FieldValues } from "@/lib/pipeline/types";
-import { changedKeys, fieldDef, toCsv, validateFields } from "@/lib/pipeline/omsSchema";
+import { changedKeys, fieldDef, toCsvRows, validateFields } from "@/lib/pipeline/omsSchema";
+import { isMultiOrder, orderName, ordersOf, sharedKeys } from "@/lib/pipeline/orders";
+import { OrderStrip } from "@/components/pipeline/OrderStrip";
 import { latestOverrides, MAX_OVERRIDE_REASON_CHARS } from "@/lib/pipeline/overrides";
 import { useAppSubject } from "@/hooks/useAppSubject";
 import { DealFieldGrid } from "@/components/pipeline/DealFieldGrid";
@@ -70,6 +72,10 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
   // Save opens the reasons dialog: every changed field is an override and needs its own reason.
   const [confirming, setConfirming] = useState(false);
   const [reasons, setReasons] = useState<Record<string, string>>({});
+  // On a deal of several orders: the order shown and edited, and — per changed field that every
+  // order shared — whether the override applies to all of them (the default) or to this one.
+  const [orderIndex, setOrderIndex] = useState(0);
+  const [onlyThisOrder, setOnlyThisOrder] = useState<Record<string, boolean>>({});
 
   const load = useCallback(
     () =>
@@ -86,22 +92,31 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
   // Validation runs on the draft as it is typed, with the same rules the PATCH applies server-side.
   // Only the fields this draft changes block Save — the PATCH validates exactly those — so a column
   // the parser left blank does not hold every other correction hostage; the OMS still checks it.
+  const orders = useMemo(() => (deal ? ordersOf(deal) : []), [deal]);
+  const sel = Math.min(orderIndex, Math.max(orders.length - 1, 0));
   const problems = useMemo(() => (draft ? validateFields(draft) : {}), [draft]);
   const changed = useMemo(
-    () => (deal && draft ? changedKeys(deal.fields, draft) : []),
-    [deal, draft],
+    () => (orders[sel] && draft ? changedKeys(orders[sel].fields, draft) : []),
+    [orders, sel, draft],
   );
   const blocking = changed.filter((k) => problems[k]).length;
   const otherProblems = Object.keys(problems).length - blocking;
 
-  const csv = useMemo(() => (deal ? toCsv(draft ?? deal.fields) : ""), [deal, draft]);
+  // Every order's row, the draft in place of the order being edited.
+  const csv = useMemo(
+    () => toCsvRows(orders.map((o, i) => (i === sel && draft ? draft : o.fields))),
+    [orders, sel, draft],
+  );
 
   if (error) return <Placeholder kind="error">Failed to load the deal — {error}</Placeholder>;
   if (!deal) return <Placeholder kind="loading">◆ loading deal {id}…</Placeholder>;
 
   const editing = draft !== null;
   const open = decidable(deal.status);
-  const edited = changedKeys(deal.original_fields, deal.fields);
+  const multi = isMultiOrder(deal);
+  const order = orders[sel];
+  const shared = multi ? sharedKeys(orders) : null;
+  const edited = orders.flatMap((o) => changedKeys(o.original_fields, o.fields));
   const reasonsComplete = changed.every((k) => (reasons[k] ?? "").trim() !== "");
 
   const run = async (label: string, action: () => Promise<DealRecord | void>) => {
@@ -117,22 +132,41 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
     }
   };
 
+  /** Changed fields every order shared that the reviewer applies to all orders. */
+  const forAll = (k: string) => Boolean(shared?.has(k)) && !onlyThisOrder[k];
+
   const save = () =>
     run("save", async () => {
-      const next = await updateDealFields(
-        id,
-        Object.fromEntries(changed.map((k) => [k, draft![k] ?? ""])),
-        Object.fromEntries(changed.map((k) => [k, (reasons[k] ?? "").trim()])),
-      );
+      // One request per scope: fields for this order, then fields for every order. A single-order
+      // deal sends one request without `orders`, as it always did.
+      const groups = multi
+        ? [
+            { keys: changed.filter((k) => !forAll(k)), orders: [sel] },
+            { keys: changed.filter(forAll), orders: orders.map((_, i) => i) },
+          ]
+        : [{ keys: changed, orders: undefined }];
+      let next: DealRecord | undefined;
+      for (const g of groups) {
+        if (g.keys.length === 0) continue;
+        next = await updateDealFields(
+          id,
+          Object.fromEntries(g.keys.map((k) => [k, draft![k] ?? ""])),
+          Object.fromEntries(g.keys.map((k) => [k, (reasons[k] ?? "").trim()])),
+          g.orders,
+        );
+        setDeal(next);
+      }
       setDraft(null);
       setConfirming(false);
       setReasons({});
+      setOnlyThisOrder({});
       return next;
     });
 
   const cancelEdit = () => {
     setDraft(null);
     setReasons({});
+    setOnlyThisOrder({});
   };
 
   const reject = () =>
@@ -222,7 +256,7 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
               {open && (
                 <button
                   type="button"
-                  onClick={() => setDraft({ ...deal.fields })}
+                  onClick={() => setDraft({ ...order.fields })}
                   disabled={busy !== null}
                   className={BTN_QUIET}
                 >
@@ -279,21 +313,34 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
         <div className="space-y-3">
-          <Eyebrow>OMS staging fields · {editing ? "editing" : "as staged"}</Eyebrow>
+          {multi && (
+            // Locked while editing: a draft belongs to one order, and switching would drop it.
+            <fieldset disabled={editing} className="disabled:opacity-60">
+              <OrderStrip orders={orders} selected={sel} deal={deal} onSelect={setOrderIndex} />
+            </fieldset>
+          )}
+          <Eyebrow>
+            OMS staging fields{multi ? ` · ${sel + 1} · ${orderName(orders, sel)}` : ""} ·{" "}
+            {editing ? "editing" : "as staged"}
+          </Eyebrow>
           <DealFieldGrid
-            fields={draft ?? deal.fields}
-            original={deal.original_fields}
-            evidence={deal.evidence}
+            fields={draft ?? order.fields}
+            original={order.original_fields}
+            evidence={order.evidence}
             editing={editing}
             problems={problems}
-            overrides={latestOverrides(deal)}
+            overrides={latestOverrides(deal, sel)}
             onRetract={retractFor}
-            onChange={(key, value) => setDraft((d) => ({ ...(d ?? deal.fields), [key]: value }))}
+            onChange={(key, value) => setDraft((d) => ({ ...(d ?? order.fields), [key]: value }))}
           />
         </div>
 
         <div className="space-y-6">
-          <UploadResultPanel upload={deal.upload} dealId={deal.deal_id} />
+          <UploadResultPanel
+            upload={deal.upload}
+            dealId={deal.deal_id}
+            orderLabels={multi ? orders.map((_, i) => orderName(orders, i)) : undefined}
+          />
 
           <Panel className="rc-rise p-5">
             <Eyebrow>Staging CSV · {editing ? "preview of the draft" : deal.csv_key}</Eyebrow>
@@ -399,9 +446,19 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
                   <div className="rc-mono text-[12px] text-[var(--rc-ink)]">
                     {label}
                     <span className="text-[var(--rc-ink-faint)]">
-                      {" "}· {deal.fields[k] || "(blank)"} → {draft[k] || "(blank)"}
+                      {" "}· {order.fields[k] || "(blank)"} → {draft[k] || "(blank)"}
                     </span>
                   </div>
+                  {shared?.has(k) && (
+                    <label className="rc-mono flex items-center gap-1.5 text-[11px] text-[var(--rc-ink-dim)]">
+                      <input
+                        type="checkbox"
+                        checked={!onlyThisOrder[k]}
+                        onChange={(e) => setOnlyThisOrder((m) => ({ ...m, [k]: !e.target.checked }))}
+                      />
+                      apply to all {orders.length} orders (every order has this value) — one lesson
+                    </label>
+                  )}
                   <textarea
                     aria-label={`Reason for overriding ${label}`}
                     value={reasons[k] ?? ""}

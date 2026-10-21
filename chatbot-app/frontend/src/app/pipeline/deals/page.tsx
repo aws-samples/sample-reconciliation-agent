@@ -88,6 +88,11 @@ function DealsContent() {
         cell: (d) => (
           <span className="block truncate text-[13px] text-[var(--rc-ink)]" title={d.opportunity_name}>
             {d.opportunity_name || "—"}
+            {(d.orders?.length ?? 0) > 1 && (
+              <span className="rc-mono ml-2 text-[10.5px] text-[var(--rc-cyan)]" data-orders={d.orders!.length}>
+                {d.orders!.length} orders
+              </span>
+            )}
           </span>
         ),
       },

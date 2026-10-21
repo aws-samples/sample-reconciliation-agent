@@ -39,7 +39,7 @@ from boto3.dynamodb.conditions import Key
 
 from backend.deal_pipeline.agent import DEFAULT_DESK_TZ, DEFAULT_SYSTEM_PROMPT, parse_email
 from backend.deal_pipeline.memory_recall import retrieve_rules
-from backend.deal_pipeline.oms_schema import to_csv
+from backend.deal_pipeline.oms_schema import to_csv_rows
 from backend.deal_pipeline.security_master import SecurityMaster
 from backend.deal_pipeline.skills_loader import list_skills, load_text, select_skills
 from backend.recon_core.ddb_update import update_attributes, utc_now_iso
@@ -124,9 +124,12 @@ def build_deal(
     :param supersedes: ids of the email's earlier open deals this one replaces (named in history).
     """
     detail = f"Parsed with {parse['model_id']} in {parse['duration_ms']} ms"
+    orders = parse.get("orders") or []
+    if len(orders) > 1:
+        detail += f"; {len(orders)} orders: " + ", ".join(o["label"] for o in orders)
     if supersedes:
         detail += "; supersedes " + ", ".join(supersedes)
-    return {
+    deal = {
         "deal_id": deal_id,
         "email_id": email["email_id"],
         "opportunity_name": parse["fields"].get("opportunity_name", ""),
@@ -153,6 +156,27 @@ def build_deal(
         "created_at": created_at,
         "updated_at": created_at,
     }
+    if len(orders) > 1:
+        # One deal per email, one order per instrument it offers (design section 15). The top-level
+        # fields, original_fields and evidence are the first order's, kept in step by every writer
+        # so readers that predate orders still see a whole record.
+        deal["orders"] = [
+            {
+                "label": o["label"],
+                "fields": dict(o["fields"]),
+                "original_fields": dict(o["fields"]),
+                "evidence": o["evidence"],
+                "assumptions": o["assumptions"],
+            }
+            for o in orders
+        ]
+    return deal
+
+
+def deal_rows(deal: dict) -> list[dict]:
+    """The deal's staging rows: one per order, or the deal's own fields for a single order."""
+    orders = deal.get("orders") or []
+    return [o["fields"] for o in orders] if orders else [deal["fields"]]
 
 
 def handle(event, context=None, *, bedrock=None, agentcore=None) -> dict:
@@ -226,7 +250,7 @@ def handle(event, context=None, *, bedrock=None, agentcore=None) -> dict:
         s3.put_object(
             Bucket=bucket,
             Key=deal["csv_key"],
-            Body=to_csv(deal["fields"]).encode("utf-8"),
+            Body=to_csv_rows(deal_rows(deal)).encode("utf-8"),
             ContentType="text/csv",
         )
         deals.put_item(Item=deal)

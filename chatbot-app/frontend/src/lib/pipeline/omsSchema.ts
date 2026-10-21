@@ -122,11 +122,19 @@ function csvCell(v: string): string {
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-/** Header row of labels + one data row, "\n" line endings, RFC 4180 quoting. */
-export function toCsv(fields: FieldValues): string {
+/**
+ * Header row of labels + one data row per order, "\n" line endings, RFC 4180 quoting. One file per
+ * email (design §15); byte-identical to the Python `to_csv_rows` for the same values.
+ */
+export function toCsvRows(rows: FieldValues[]): string {
   const header = OMS_FIELDS.map((f) => csvCell(f.label)).join(",");
-  const row = OMS_FIELDS.map((f) => csvCell(fields[f.key] ?? "")).join(",");
-  return `${header}\n${row}\n`;
+  const lines = rows.map((fields) => OMS_FIELDS.map((f) => csvCell(fields[f.key] ?? "")).join(","));
+  return `${header}\n${lines.map((l) => `${l}\n`).join("")}`;
+}
+
+/** The one-order file: `toCsvRows` with a single row. */
+export function toCsv(fields: FieldValues): string {
+  return toCsvRows([fields]);
 }
 
 /** Keys whose current value differs from the original (for the review diff view). */
