@@ -17,11 +17,15 @@ import type {
   DealHistoryEntry,
   DealRecord,
   DealStatus,
+  FieldOverride,
   FieldValues,
+  OverrideMemory,
   UploadError,
   UploadResult,
 } from "@/lib/pipeline/types";
-import { changedKeys, toCsv } from "@/lib/pipeline/omsSchema";
+import { changedKeys, fieldDef, toCsv } from "@/lib/pipeline/omsSchema";
+import { overridesOf } from "@/lib/pipeline/overrides";
+import { newOverrideId } from "./ids";
 import {
   getItem,
   isConditionalCheckFailed,
@@ -47,12 +51,28 @@ export async function getDeal(
   return getItem<DealRecord>(env.dealsTable(), { deal_id: dealId }, options);
 }
 
-/** The write guard for a transition: the stored row must still hold the status the caller read. */
-function expectStatus(status: DealStatus): PutCondition {
+/**
+ * The write guard for a transition: the stored row must still hold the status the caller read and,
+ * when given, the `updated_at` it read.
+ *
+ * Status alone stops a decision from replacing another decision. It does not stop a whole-item put
+ * from erasing an override that landed in between without changing the status — a second reviewer
+ * correcting another field, or the memory outcome being recorded — and overrides are an audit trail
+ * the memory has already learned from, so losing one silently is not acceptable. `updated_at` moves
+ * on every write, so it catches those too.
+ */
+function expectRow(status: DealStatus, updatedAt?: string): PutCondition {
+  if (updatedAt === undefined) {
+    return {
+      expression: "#status = :expected",
+      names: { "#status": "status" },
+      values: { ":expected": status },
+    };
+  }
   return {
-    expression: "#status = :expected",
-    names: { "#status": "status" },
-    values: { ":expected": status },
+    expression: "#status = :expected AND #updated_at = :updated_at",
+    names: { "#status": "status", "#updated_at": "updated_at" },
+    values: { ":expected": status, ":updated_at": updatedAt },
   };
 }
 
@@ -61,12 +81,17 @@ function expectStatus(status: DealStatus): PutCondition {
  *
  * @param expectedStatus when given, the write is refused with `ConditionalCheckFailedException`
  *   unless the stored row is still in that status — the status the caller read before deciding.
+ * @param expectedUpdatedAt when given too, the stored row must also still carry this `updated_at`.
  */
-export async function putDeal(deal: DealRecord, expectedStatus?: DealStatus): Promise<void> {
+export async function putDeal(
+  deal: DealRecord,
+  expectedStatus?: DealStatus,
+  expectedUpdatedAt?: string,
+): Promise<void> {
   await putItem(
     env.dealsTable(),
     deal,
-    expectedStatus ? expectStatus(expectedStatus) : undefined,
+    expectedStatus ? expectRow(expectedStatus, expectedUpdatedAt) : undefined,
   );
 }
 
@@ -94,47 +119,82 @@ export async function writeDealCsv(deal: DealRecord): Promise<void> {
   await putText(deal.csv_key, toCsv(deal.fields), "text/csv");
 }
 
+/** A value as the history line quotes it. */
+function quoted(value: string): string {
+  return value ? `"${value}"` : "(blank)";
+}
+
 /**
- * Apply an edit from the review screen.
+ * Apply overrides from a review screen: the reviewer's new values, each with the reason they gave.
  *
  * Three things happen together, and they are ordered so a failure leaves nothing misleading
  * behind: the CSV is rewritten first (it is what the OMS will validate), then the record with the
- * new fields, an EDITED history row naming the changed columns, and — when the previous upload
- * was rejected — the status back to STAGED so the Approve button reappears. Writing the record
- * first would show the edit as saved while the OMS still saw the old file.
+ * new fields, one `FieldOverride` per changed field, an EDITED history row quoting each change and
+ * its reason, and — when the previous upload was rejected — the status back to STAGED so the
+ * Approve button reappears. Writing the record first would show the edit as saved while the OMS
+ * still saw the old file.
  *
- * The record write is conditional on the status the caller read. When it is refused, the CSV has
- * already been rewritten from an edit that was never recorded, so it is regenerated from the row
- * that won before the conflict propagates — otherwise the file the OMS validates would disagree
- * with the fields the review screen shows.
+ * An override made while the deal is UPLOAD_FAILED is a "break" fix and carries the codes of the
+ * rejection that named its field, so the lesson the memory extracts can say which OMS rule the
+ * correction satisfies. Every new override starts with memory `pending`; the route sends the
+ * lessons once this write has succeeded and records the outcome with `recordOverrideMemory`.
  *
- * @param fields the complete, already-validated field set (see `validateFields`).
- * @throws ConditionalCheckFailedException when the deal's status changed since it was read.
+ * The record write is conditional on the status and `updated_at` the caller read. When it is
+ * refused, the CSV has already been rewritten from an edit that was never recorded, so it is
+ * regenerated from the row that won before the conflict propagates — otherwise the file the OMS
+ * validates would disagree with the fields the review screen shows.
+ *
+ * @param fields the complete field set, with every changed value already validated.
+ * @param reasons a non-empty reason for every key whose value changes (the route enforces this).
+ * @returns the written deal and the overrides this call added, in field order.
+ * @throws ConditionalCheckFailedException when the deal changed since it was read.
  */
-export async function applyEdit(
+export async function applyOverrides(
   deal: DealRecord,
   fields: FieldValues,
+  reasons: Record<string, string>,
   actor: string,
   now: Date = new Date(),
-): Promise<DealRecord> {
-  const changed = changedKeys(deal.fields, fields);
+): Promise<{ deal: DealRecord; added: FieldOverride[] }> {
+  const at = now.toISOString();
+  const stage = deal.status === "UPLOAD_FAILED" ? "break" : "review";
+  const added: FieldOverride[] = changedKeys(deal.fields, fields).map((key) => {
+    const codes =
+      stage === "break"
+        ? (deal.upload?.errors ?? []).filter((e) => e.field === key).map((e) => e.code)
+        : [];
+    return {
+      override_id: newOverrideId(now),
+      field: key,
+      parsed_value: deal.original_fields[key] ?? "",
+      previous_value: deal.fields[key] ?? "",
+      value: fields[key] ?? "",
+      reason: reasons[key],
+      actor,
+      at,
+      stage,
+      ...(codes.length ? { upload_error_codes: codes } : {}),
+      memory: { status: "pending" },
+    };
+  });
   const edited: DealRecord = {
     ...deal,
     fields,
     // Denormalised for the list screens; must follow the field or the table shows a stale name.
     opportunity_name: fields.opportunity_name || deal.opportunity_name,
     status: deal.status === "UPLOAD_FAILED" ? "STAGED" : deal.status,
+    overrides: [...overridesOf(deal), ...added],
   };
-  const withHistory = appendHistory(
-    edited,
-    "EDITED",
-    actor,
-    changed.length ? `changed ${changed.join(", ")}` : "no field changes",
-    now,
-  );
+  const detail = added
+    .map(
+      (o) =>
+        `${fieldDef(o.field)?.label ?? o.field}: ${quoted(o.previous_value)} → ${quoted(o.value)} — ${o.reason}`,
+    )
+    .join("\n");
+  const withHistory = appendHistory(edited, "EDITED", actor, detail, now);
   await writeDealCsv(withHistory);
   try {
-    await putDeal(withHistory, deal.status);
+    await putDeal(withHistory, deal.status, deal.updated_at);
   } catch (err) {
     if (isConditionalCheckFailed(err)) {
       const winner = await getDeal(deal.deal_id, { consistent: true });
@@ -143,7 +203,115 @@ export async function applyEdit(
     }
     throw err;
   }
-  return withHistory;
+  return { deal: withHistory, added };
+}
+
+/**
+ * Write a change to a deal's overrides back without undoing anything that landed since it was read.
+ *
+ * The put is conditional on the `updated_at` the change builds on; on a conflict the change is
+ * re-applied once to a fresh, strongly consistent read. What happens on a second conflict is the
+ * caller's call: bookkeeping may give up (`mustLand: false`, returning the deal as it would have
+ * been), a reviewer's action may not (`mustLand: true` rethrows, and the route answers 409).
+ */
+async function rewriteOverrides(
+  deal: DealRecord,
+  apply: (d: DealRecord) => DealRecord,
+  mustLand: boolean,
+): Promise<DealRecord> {
+  const write = async (base: DealRecord): Promise<DealRecord> => {
+    const next = apply(base);
+    await putItem(env.dealsTable(), next, {
+      expression: "#updated_at = :updated_at",
+      names: { "#updated_at": "updated_at" },
+      values: { ":updated_at": base.updated_at },
+    });
+    return next;
+  };
+  try {
+    return await write(deal);
+  } catch (err) {
+    if (!isConditionalCheckFailed(err)) throw err;
+  }
+  const fresh = await getDeal(deal.deal_id, { consistent: true });
+  if (!fresh) {
+    if (mustLand) throw new Error(`deal ${deal.deal_id} no longer exists`);
+    return apply(deal);
+  }
+  try {
+    return await write(fresh);
+  } catch (err) {
+    if (!isConditionalCheckFailed(err) || mustLand) throw err;
+    return apply(fresh);
+  }
+}
+
+/**
+ * Record whether each new override's lesson reached the knowledge memory.
+ *
+ * Bookkeeping after the fact: if both attempts lose their race the overrides stay `pending` — the
+ * lessons were sent either way; only the record of it is missing.
+ *
+ * @param outcomes memory outcome per override id.
+ * @returns the deal as written, or as it would have been if both attempts lost their race.
+ */
+export function recordOverrideMemory(
+  deal: DealRecord,
+  outcomes: Record<string, OverrideMemory>,
+  now: Date = new Date(),
+): Promise<DealRecord> {
+  return rewriteOverrides(
+    deal,
+    (d) => ({
+      ...d,
+      overrides: overridesOf(d).map((o) =>
+        outcomes[o.override_id] ? { ...o, memory: outcomes[o.override_id] } : o,
+      ),
+      updated_at: now.toISOString(),
+    }),
+    false,
+  );
+}
+
+/**
+ * Mark overrides' lessons retracted after their records were deleted, with a LESSON_RETRACTED
+ * history row naming each field and how many records went.
+ *
+ * The overrides, and the values they set, stay: a retract takes back what the parser learned, not
+ * the correction to this deal. Must land — it is a reviewer's action — so a second lost race throws.
+ *
+ * @param deleted records deleted per override id; overrides not named are left alone.
+ * @throws ConditionalCheckFailedException when the deal kept changing under both attempts.
+ */
+export function markLessonsRetracted(
+  deal: DealRecord,
+  deleted: Record<string, number>,
+  actor: string,
+  now: Date = new Date(),
+): Promise<DealRecord> {
+  const at = now.toISOString();
+  return rewriteOverrides(
+    deal,
+    (d) => {
+      const retracted = overridesOf(d).filter((o) => o.override_id in deleted);
+      const detail = retracted
+        .map((o) => {
+          const n = deleted[o.override_id];
+          return `${fieldDef(o.field)?.label ?? o.field}: lesson retracted (${n} record${n === 1 ? "" : "s"} deleted)`;
+        })
+        .join("\n");
+      const next: DealRecord = {
+        ...d,
+        overrides: overridesOf(d).map((o) =>
+          o.override_id in deleted
+            ? { ...o, memory: { ...o.memory, status: "retracted", retracted_by: actor, retracted_at: at } }
+            : o,
+        ),
+      };
+      return retracted.length ? appendHistory(next, "LESSON_RETRACTED", actor, detail, now) : next;
+    },
+    true,
+  );
 }
 
 /** What the OMS upload Lambda returns; every field but `accepted` is defensively optional. */
@@ -176,9 +344,9 @@ export function isOpen(deal: DealRecord): boolean {
  *
  * Conditional on the status the caller read (STAGED, UPLOAD_FAILED, or APPROVED for the retry after
  * a failed invoke — the condition is the read status, not a fixed one, precisely so that retry path
- * keeps working).
+ * keeps working) and on its `updated_at`, so an override saved in between is not written over.
  *
- * @throws ConditionalCheckFailedException when the deal's status changed since it was read.
+ * @throws ConditionalCheckFailedException when the deal changed since it was read.
  */
 export async function markApproved(
   deal: DealRecord,
@@ -192,7 +360,7 @@ export async function markApproved(
     undefined,
     now,
   );
-  await putDeal(approved, deal.status);
+  await putDeal(approved, deal.status, deal.updated_at);
   return approved;
 }
 
@@ -236,7 +404,7 @@ export async function recordUpload(
 /**
  * Reject a deal with the reviewer's reason.
  *
- * @throws ConditionalCheckFailedException when the deal's status changed since it was read.
+ * @throws ConditionalCheckFailedException when the deal changed since it was read.
  */
 export async function markRejected(
   deal: DealRecord,
@@ -251,6 +419,6 @@ export async function markRejected(
     reason,
     now,
   );
-  await putDeal(rejected, deal.status);
+  await putDeal(rejected, deal.status, deal.updated_at);
   return rejected;
 }

@@ -99,6 +99,7 @@ def test_parsed_email_gets_a_deal_and_a_csv(aws):
     assert deal["fields"] == deal["original_fields"] == parse["fields"]
     assert deal["csv_key"] == f"deal-csv/{deal_id}.csv" and deal["upload"] is None
     assert [h["action"] for h in deal["history"]] == ["STAGED"]
+    assert deal["overrides"] == []  # reviewers append them later; the parser never does
     assert deal["history"][0]["actor"] == "parser"
     assert "supersedes" not in deal["history"][0]["detail"]  # nothing to retire on a first parse
     assert deal["created_at"] == deal["updated_at"] == email["updated_at"]

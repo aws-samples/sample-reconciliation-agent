@@ -13,7 +13,10 @@
 #      foundation model and on this account's inference profiles -- and renders BYTE FOR BYTE the JSON
 #      the recon module rendered inline before the move, so the moved policy plans no update;
 #   3. the role is declared on the memory itself as well as on the strategy (the permanent-drift
-#      lesson), and a memory sharing another memory's role creates none of its own.
+#      lesson), and a memory sharing another memory's role creates none of its own;
+#   4. provenance keys are absent unless asked for (so no existing memory plans a change), and when
+#      given are declared both as indexed keys on the memory and as STRICTLY_CONSISTENT entries in
+#      the strategy's record schema, within the service's limit of three.
 
 mock_provider "aws" {
   override_during = plan
@@ -273,4 +276,66 @@ run "a_shared_role_without_an_arn_fails_at_plan" {
   }
 
   expect_failures = [var.execution_role_arn]
+}
+
+run "no_provenance_keys_by_default_so_existing_memories_plan_no_change" {
+  command = plan
+
+  variables {
+    strategy = var.lessons
+  }
+
+  assert {
+    condition     = length(aws_bedrockagentcore_memory.this.indexed_key) == 0
+    error_message = "a memory without provenance_keys must declare no indexed keys"
+  }
+
+  assert {
+    condition     = length(aws_bedrockagentcore_memory_strategy.this[0].memory_record_schema) == 0
+    error_message = "a strategy without provenance_keys must declare no record schema"
+  }
+}
+
+run "provenance_keys_are_indexed_on_the_memory_and_passed_through_by_the_strategy" {
+  command = plan
+
+  variables {
+    strategy        = var.lessons
+    provenance_keys = ["override_id", "author", "deal_id"]
+  }
+
+  assert {
+    condition     = toset([for k in aws_bedrockagentcore_memory.this.indexed_key : "${k.key}:${k.type}"]) == toset(["override_id:STRING", "author:STRING", "deal_id:STRING"])
+    error_message = "each provenance key must be an indexed STRING key on the memory"
+  }
+
+  assert {
+    condition = [for e in aws_bedrockagentcore_memory_strategy.this[0].memory_record_schema[0].metadata_schema : "${e.key}:${e.type}:${e.extraction_type}"] == [
+      "override_id:STRING:STRICTLY_CONSISTENT",
+      "author:STRING:STRICTLY_CONSISTENT",
+      "deal_id:STRING:STRICTLY_CONSISTENT",
+    ]
+    error_message = "each provenance key must be passed through verbatim (STRICTLY_CONSISTENT), in the caller's order"
+  }
+}
+
+run "more_than_three_provenance_keys_is_refused" {
+  command = plan
+
+  variables {
+    strategy        = var.lessons
+    provenance_keys = ["a", "b", "c", "d"]
+  }
+
+  expect_failures = [var.provenance_keys]
+}
+
+run "provenance_keys_without_a_strategy_is_refused" {
+  command = plan
+
+  variables {
+    provenance_keys = ["override_id"]
+  }
+
+  expect_failures = [var.provenance_keys]
 }

@@ -83,6 +83,30 @@ variable "strategy" {
   default = null
 }
 
+variable "provenance_keys" {
+  description = <<-EOT
+    Event metadata keys copied verbatim onto every record the strategy extracts, so a record can be
+    traced back to what produced it (the pipeline's override id, author and deal). Each key is
+    declared twice, as the service requires: as an indexed key on the memory (which also makes it
+    filterable in ListMemoryRecords / RetrieveMemoryRecords) and as a STRICTLY_CONSISTENT entry in
+    the strategy's record schema. At most three per strategy (a service limit), and an indexed key
+    can never be removed from a memory once declared -- adding one is a one-way change. Empty (the
+    default) declares nothing, which is what every memory had before this variable existed.
+  EOT
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = length(var.provenance_keys) <= 3 && length(distinct(var.provenance_keys)) == length(var.provenance_keys)
+    error_message = "provenance_keys takes at most three distinct keys (the service's STRICTLY_CONSISTENT limit per strategy)."
+  }
+
+  validation {
+    condition     = length(var.provenance_keys) == 0 || var.strategy != null
+    error_message = "provenance_keys needs a strategy: they describe the records a strategy extracts."
+  }
+}
+
 variable "tags" {
   description = "Tags for the memory and the execution role. null leaves both untagged, as every existing memory is; an empty map is not the same thing to the provider, so pass null when there is nothing to tag."
   type        = map(string)

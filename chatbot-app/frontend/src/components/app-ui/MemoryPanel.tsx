@@ -126,8 +126,25 @@ export interface MemoryPanelProps<R extends MemoryPanelRecord> {
    * treats long-term memory as advisory context and degrades to the empty state without a word.
    */
   showLoadError?: boolean;
+  /**
+   * Which loaded records to show, for a caller's filters. Selection and "select all" follow what is
+   * shown. Defaults to every record.
+   */
+  visible?: (record: R) => boolean;
+  /** Rendered above the records table, e.g. the caller's filter controls. */
+  toolbar?: ReactNode;
+  /** Told the records whenever they change (a load, a delete), for callers that derive from them. */
+  onRecords?: (records: R[]) => void;
   className?: string;
 }
+
+/**
+ * How long a deleted record stays hidden from reloads. After BatchDeleteMemoryRecords the record is
+ * gone from GetMemoryRecord at once, but ListMemoryRecords (and search) keep returning it for up to
+ * about a minute (observed on a live memory); without this, Refresh straight after a delete shows
+ * the record again and reads as a delete that failed.
+ */
+const LIST_LAG_MS = 3 * 60 * 1000;
 
 const STRATEGY_STATUS_COLOR: Record<string, string> = {
   ACTIVE: "var(--rc-green)",
@@ -261,6 +278,9 @@ export function MemoryPanel<R extends MemoryPanelRecord>({
   noteStyle = "placeholder",
   deleteErrorLabel = "Delete failed — ",
   showLoadError = false,
+  visible,
+  toolbar,
+  onRecords,
   className = "",
 }: MemoryPanelProps<R>) {
   const [records, setRecords] = useState<R[] | null>(null);
@@ -277,8 +297,10 @@ export function MemoryPanel<R extends MemoryPanelRecord>({
 
   // The callbacks are read through a ref so `load` is stable: a caller passing fresh lambdas on every
   // render must not make the panel reload on every render.
-  const latest = useRef({ listRecords, getStrategy, onLoad });
-  latest.current = { listRecords, getStrategy, onLoad };
+  const latest = useRef({ listRecords, getStrategy, onLoad, onRecords });
+  latest.current = { listRecords, getStrategy, onLoad, onRecords };
+  // Record id -> when this panel deleted it; see LIST_LAG_MS.
+  const deletedAt = useRef(new Map<string, number>());
 
   const load = useCallback(() => {
     const api = latest.current;
@@ -288,13 +310,17 @@ export function MemoryPanel<R extends MemoryPanelRecord>({
     setStrategyError(null);
     api
       .listRecords()
-      .then((m) =>
+      .then((m) => {
+        const now = Date.now();
+        for (const [id, at] of deletedAt.current) {
+          if (now - at > LIST_LAG_MS) deletedAt.current.delete(id);
+        }
         setRecords(
-          [...m].sort((a, b) =>
-            (b.createdAt ?? "").localeCompare(a.createdAt ?? ""),
-          ),
-        ),
-      )
+          m
+            .filter((r) => !deletedAt.current.has(r.id))
+            .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? "")),
+        );
+      })
       .catch((e) => {
         // Advisory context degrades to an empty list; it never takes the rest of the page with it.
         // The reason is kept for the callers that choose to show it (`showLoadError`).
@@ -313,6 +339,12 @@ export function MemoryPanel<R extends MemoryPanelRecord>({
     load();
   }, [load, refreshToken]);
 
+  useEffect(() => {
+    if (records) latest.current.onRecords?.(records);
+  }, [records]);
+
+  const shown = records && visible ? records.filter(visible) : records;
+
   /** Add or remove one record from the selection. */
   function toggle(id: string): void {
     setSelected((prev) => {
@@ -326,9 +358,9 @@ export function MemoryPanel<R extends MemoryPanelRecord>({
   /** Select every loaded record, or clear the selection when all of them are already selected. */
   function toggleAll(): void {
     setSelected((prev) =>
-      prev.size === (records?.length ?? 0)
+      prev.size === (shown?.length ?? 0)
         ? new Set()
-        : new Set((records ?? []).map((r) => r.id)),
+        : new Set((shown ?? []).map((r) => r.id)),
     );
   }
 
@@ -345,6 +377,8 @@ export function MemoryPanel<R extends MemoryPanelRecord>({
     try {
       const result = await deleteRecords([...selected]);
       const gone = new Set(result.deleted);
+      const at = Date.now();
+      for (const id of gone) deletedAt.current.set(id, at);
       setRecords((prev) => (prev ?? []).filter((r) => !gone.has(r.id)));
       setSelected((prev) => new Set([...prev].filter((id) => !gone.has(id))));
       if (result.failed.length > 0) {
@@ -426,12 +460,16 @@ export function MemoryPanel<R extends MemoryPanelRecord>({
           </Note>
         )}
 
-        {!records ? (
+        {records && records.length > 0 && toolbar}
+
+        {!records || !shown ? (
           <Placeholder kind="loading">◆ loading memory…</Placeholder>
         ) : records.length === 0 ? (
           <Placeholder kind="empty">
             No consolidated memory yet — or {memoryIdEnvName} not configured.
           </Placeholder>
+        ) : shown.length === 0 ? (
+          <Placeholder kind="empty">No record matches the filters.</Placeholder>
         ) : (
           <>
             {canDelete && selected.size > 0 && (
@@ -466,7 +504,7 @@ export function MemoryPanel<R extends MemoryPanelRecord>({
                     type="checkbox"
                     aria-label="Select all memory records"
                     checked={
-                      selected.size > 0 && selected.size === records.length
+                      selected.size > 0 && selected.size === shown.length
                     }
                     onChange={toggleAll}
                     className="h-3.5 w-3.5 accent-[var(--rc-cyan)]"
@@ -478,7 +516,7 @@ export function MemoryPanel<R extends MemoryPanelRecord>({
                   </div>
                 ))}
               </div>
-              {records.map((r) => (
+              {shown.map((r) => (
                 <div
                   key={r.id}
                   className="grid items-center gap-4 border-b border-[var(--rc-line-soft)] px-5 py-4 last:border-0"

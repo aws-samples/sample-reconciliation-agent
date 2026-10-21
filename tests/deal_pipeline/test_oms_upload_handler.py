@@ -154,3 +154,26 @@ def test_verdict_is_not_persisted_when_the_deal_is_no_longer_approved(aws):
     assert len(deal["history"]) == 1
     keys = [o["Key"] for o in aws.s3.list_objects_v2(Bucket=aws.bucket).get("Contents", [])]
     assert "oms-staging/dl_withdrawn.csv" not in keys
+
+
+def test_upload_keeps_the_reviewers_overrides(aws):
+    # The verdict is written with UpdateItem, not a whole-item put, so the overrides the BFF appended
+    # (the deal's audit trail of corrections, and what the memory learned from) survive the upload.
+    seed_deal(aws, "dl_ov", clean_loan_fields())
+    override = {
+        "override_id": "ov_1",
+        "field": "left_agent",
+        "reason": "short name",
+        "memory": {"status": "sent"},
+    }
+    aws.deals.update_item(
+        Key={"deal_id": "dl_ov"},
+        UpdateExpression="SET overrides = :o",
+        ExpressionAttributeValues={":o": [override]},
+    )
+
+    handle({"deal_id": "dl_ov"}, None)
+
+    deal = aws.deals.get_item(Key={"deal_id": "dl_ov"})["Item"]
+    assert deal["status"] == "UPLOADED"
+    assert deal["overrides"] == [override]

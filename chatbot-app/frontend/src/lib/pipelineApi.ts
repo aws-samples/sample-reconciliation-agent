@@ -89,17 +89,37 @@ export async function getDeal(id: string): Promise<DealRecord> {
 }
 
 /**
- * Replace the deal's current field values. The route validates formats, stores them, regenerates
- * the staging CSV and appends an EDITED history entry.
+ * Override some of the deal's field values, each with the reviewer's reason. The route validates
+ * the changed values, records one override per changed field, regenerates the staging CSV, appends
+ * an EDITED history entry and sends each override to the parser's memory as a lesson.
+ *
+ * @param fields only the fields being changed.
+ * @param reasons a reason for every key in `fields` whose value changes.
  */
 export async function updateDealFields(
   id: string,
-  fields: FieldValues,
+  fields: Partial<FieldValues>,
+  reasons: Record<string, string>,
 ): Promise<DealRecord> {
   return json(
     await pipelineFetch(
       `/api/pipeline/deals/${encodeURIComponent(id)}`,
-      jsonInit("PATCH", { fields }),
+      jsonInit("PATCH", { fields, reasons }),
+    ),
+  );
+}
+
+/**
+ * Take back the lesson one override taught. Allowed for the override's author and pipeline admins;
+ * the override and its value stay on the deal.
+ *
+ * @returns the deal with that override's memory `retracted` and a LESSON_RETRACTED history row.
+ */
+export async function retractOverrideLesson(dealId: string, overrideId: string): Promise<DealRecord> {
+  return json(
+    await pipelineFetch(
+      `/api/pipeline/deals/${encodeURIComponent(dealId)}/overrides/${encodeURIComponent(overrideId)}/retract`,
+      { method: "POST" },
     ),
   );
 }

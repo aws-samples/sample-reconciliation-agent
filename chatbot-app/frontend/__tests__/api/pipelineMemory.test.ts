@@ -146,12 +146,15 @@ describe("DELETE /api/pipeline/memory", () => {
     });
     const resp = await memory.DELETE(req("DELETE", { ids: ["rec-1", "rec-2", "rec-1"] }));
     expect(resp.status).toBe(200);
+    // No record here came from an override, so no deal is marked: `retracted` and `unmarked` empty.
     expect(await resp.json()).toEqual({
       deleted: ["rec-1"],
       failed: [{ id: "rec-2", error: "record not found" }],
+      retracted: [],
+      unmarked: [],
     });
-    expect(agentcoreSend.mock.calls[0][0]).toMatchObject({
-      __cmd: "BatchDelete",
+    const del = agentcoreSend.mock.calls.map((c) => c[0]).find((c) => c.__cmd === "BatchDelete");
+    expect(del).toMatchObject({
       memoryId: MEMORY_ID,
       records: [{ memoryRecordId: "rec-1" }, { memoryRecordId: "rec-2" }],
     });

@@ -11,6 +11,7 @@
 
 import type { FieldValues } from "@/lib/pipeline/types";
 import { fieldDef } from "@/lib/pipeline/omsSchema";
+import { MAX_OVERRIDE_REASON_CHARS } from "@/lib/pipeline/overrides";
 import { stringField } from "@/lib/server/http";
 
 // ---------------------------------------------------------------------------------------------
@@ -129,6 +130,41 @@ export function parseFieldsBody(body: Record<string, unknown> | null): Partial<F
   }
   if (Object.keys(out).length === 0) throw new Error("fields is empty");
   return out;
+}
+
+/** A PATCH body: the fields to change and, per field, why the reviewer is overriding it. */
+export interface OverrideRequest {
+  fields: Partial<FieldValues>;
+  reasons: Record<string, string>;
+}
+
+/**
+ * Validate a `PATCH /deals/[id]` body: `{ fields, reasons }`.
+ *
+ * Only the shape is checked here. Which keys actually change, and so which need a reason, depends
+ * on the stored deal, so the route enforces that against the row it read. A reason for a key the
+ * body does not edit is refused: it is a client that lost track of its own draft.
+ *
+ * @throws Error naming the problem.
+ */
+export function parseOverrideBody(body: Record<string, unknown> | null): OverrideRequest {
+  const fields = parseFieldsBody(body);
+  const raw = body?.reasons;
+  if (raw === undefined) return { fields, reasons: {} };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("reasons must be { <field_key>: string }");
+  }
+  const reasons: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!(key in fields)) throw new Error(`reason given for "${key}", which this request does not edit`);
+    if (typeof value !== "string") throw new Error(`reason for "${key}" must be a string`);
+    const reason = value.trim();
+    if (reason.length > MAX_OVERRIDE_REASON_CHARS) {
+      throw new Error(`reason for "${key}" is longer than ${MAX_OVERRIDE_REASON_CHARS} characters`);
+    }
+    if (reason) reasons[key] = reason;
+  }
+  return { fields, reasons };
 }
 
 // ---------------------------------------------------------------------------------------------

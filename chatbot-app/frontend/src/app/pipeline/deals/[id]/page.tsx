@@ -7,10 +7,12 @@ import {
   getDeal,
   getDealCsv,
   rejectDeal,
+  retractOverrideLesson,
   updateDealFields,
 } from "@/lib/pipelineApi";
-import type { DealRecord, FieldValues } from "@/lib/pipeline/types";
-import { changedKeys, toCsv, validateFields } from "@/lib/pipeline/omsSchema";
+import type { DealRecord, FieldOverride, FieldValues } from "@/lib/pipeline/types";
+import { changedKeys, fieldDef, toCsv, validateFields } from "@/lib/pipeline/omsSchema";
+import { latestOverrides, MAX_OVERRIDE_REASON_CHARS } from "@/lib/pipeline/overrides";
 import { useAppSubject } from "@/hooks/useAppSubject";
 import { DealFieldGrid } from "@/components/pipeline/DealFieldGrid";
 import { UploadResultPanel } from "@/components/pipeline/UploadResultPanel";
@@ -32,6 +34,7 @@ import { StatusPill } from "@/components/pipeline/ui";
 const HISTORY_COLOR: Record<string, string> = {
   STAGED: "var(--rc-cyan)",
   EDITED: "var(--rc-violet)",
+  LESSON_RETRACTED: "var(--rc-amber)",
   APPROVED: "var(--rc-violet)",
   UPLOAD_ACCEPTED: "var(--rc-green)",
   UPLOAD_REJECTED: "var(--rc-red)",
@@ -55,7 +58,7 @@ function downloadText(filename: string, text: string): void {
 
 export default function DealDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const { isAdmin } = useAppSubject("pipeline");
+  const { subject, isAdmin } = useAppSubject("pipeline");
   const [deal, setDeal] = useState<DealRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Non-null while editing. The grid edits this copy; Save sends it, Cancel drops it.
@@ -64,6 +67,9 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
   const [actionError, setActionError] = useState<string | null>(null);
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState("");
+  // Save opens the reasons dialog: every changed field is an override and needs its own reason.
+  const [confirming, setConfirming] = useState(false);
+  const [reasons, setReasons] = useState<Record<string, string>>({});
 
   const load = useCallback(
     () =>
@@ -78,8 +84,15 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
   }, [load]);
 
   // Validation runs on the draft as it is typed, with the same rules the PATCH applies server-side.
+  // Only the fields this draft changes block Save — the PATCH validates exactly those — so a column
+  // the parser left blank does not hold every other correction hostage; the OMS still checks it.
   const problems = useMemo(() => (draft ? validateFields(draft) : {}), [draft]);
-  const problemCount = Object.keys(problems).length;
+  const changed = useMemo(
+    () => (deal && draft ? changedKeys(deal.fields, draft) : []),
+    [deal, draft],
+  );
+  const blocking = changed.filter((k) => problems[k]).length;
+  const otherProblems = Object.keys(problems).length - blocking;
 
   const csv = useMemo(() => (deal ? toCsv(draft ?? deal.fields) : ""), [deal, draft]);
 
@@ -89,6 +102,7 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
   const editing = draft !== null;
   const open = decidable(deal.status);
   const edited = changedKeys(deal.original_fields, deal.fields);
+  const reasonsComplete = changed.every((k) => (reasons[k] ?? "").trim() !== "");
 
   const run = async (label: string, action: () => Promise<DealRecord | void>) => {
     setBusy(label);
@@ -105,10 +119,21 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
 
   const save = () =>
     run("save", async () => {
-      const next = await updateDealFields(id, draft!);
+      const next = await updateDealFields(
+        id,
+        Object.fromEntries(changed.map((k) => [k, draft![k] ?? ""])),
+        Object.fromEntries(changed.map((k) => [k, (reasons[k] ?? "").trim()])),
+      );
       setDraft(null);
+      setConfirming(false);
+      setReasons({});
       return next;
     });
+
+  const cancelEdit = () => {
+    setDraft(null);
+    setReasons({});
+  };
 
   const reject = () =>
     run("reject", async () => {
@@ -117,6 +142,12 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
       setReason("");
       return next;
     });
+
+  // The route decides; this only hides the action from viewers it would refuse.
+  const retractFor = (o: FieldOverride) =>
+    isAdmin || (subject !== "" && o.actor === subject)
+      ? async (target: FieldOverride) => setDeal(await retractOverrideLesson(id, target.override_id))
+      : undefined;
 
   const download = () =>
     run("download", async () => {
@@ -169,14 +200,20 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
             <>
               <button
                 type="button"
-                onClick={save}
-                disabled={busy !== null || problemCount > 0}
+                onClick={() => setConfirming(true)}
+                disabled={busy !== null || changed.length === 0 || blocking > 0}
                 className={BTN_CONFIRM}
-                title={problemCount > 0 ? `${problemCount} field(s) still invalid` : undefined}
+                title={
+                  blocking > 0
+                    ? `${blocking} changed field(s) still invalid`
+                    : changed.length === 0
+                      ? "no field changed yet"
+                      : undefined
+                }
               >
-                {busy === "save" ? "Saving…" : "Save"}
+                Save…
               </button>
-              <button type="button" onClick={() => setDraft(null)} disabled={busy !== null} className={BTN_LINK}>
+              <button type="button" onClick={cancelEdit} disabled={busy !== null} className={BTN_LINK}>
                 Cancel
               </button>
             </>
@@ -227,10 +264,16 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
         </p>
       )}
       {actionError && <Placeholder kind="error">{actionError}</Placeholder>}
-      {editing && problemCount > 0 && (
+      {editing && blocking > 0 && (
         <p className="rc-mono text-[12px]" style={{ color: "var(--rc-red)" }}>
-          {problemCount} field{problemCount === 1 ? "" : "s"} would be rejected by the OMS — fix
+          {blocking} changed field{blocking === 1 ? "" : "s"} would be rejected by the OMS — fix
           them to save.
+        </p>
+      )}
+      {editing && otherProblems > 0 && (
+        <p className="rc-mono text-[12px]" style={{ color: "var(--rc-amber)" }}>
+          {otherProblems} other field{otherProblems === 1 ? "" : "s"} would also be rejected on
+          upload; they do not block saving these changes.
         </p>
       )}
 
@@ -243,6 +286,8 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
             evidence={deal.evidence}
             editing={editing}
             problems={problems}
+            overrides={latestOverrides(deal)}
+            onRetract={retractFor}
             onChange={(key, value) => setDraft((d) => ({ ...(d ?? deal.fields), [key]: value }))}
           />
         </div>
@@ -278,7 +323,7 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
                       {formatDateTime(h.at)}
                     </div>
                     {h.detail && (
-                      <div className="mt-1 text-[12px] leading-relaxed text-[var(--rc-ink-dim)]">
+                      <div className="mt-1 whitespace-pre-line text-[12px] leading-relaxed text-[var(--rc-ink-dim)]">
                         {h.detail}
                       </div>
                     )}
@@ -338,6 +383,57 @@ export default function DealDetailPage({ params }: { params: Promise<{ id: strin
           </Disclosure>
         </div>
       </div>
+
+      {confirming && draft && (
+        <Modal
+          title={`Why ${changed.length === 1 ? "this override" : `these ${changed.length} overrides`}?`}
+          subtitle="Each reason is saved on the deal and sent to the parser's memory, so the next similar email is parsed the way you corrected this one."
+          onClose={() => setConfirming(false)}
+          className="max-w-2xl"
+        >
+          <ul className="space-y-4">
+            {changed.map((k) => {
+              const label = fieldDef(k)?.label ?? k;
+              return (
+                <li key={k} className="space-y-1.5">
+                  <div className="rc-mono text-[12px] text-[var(--rc-ink)]">
+                    {label}
+                    <span className="text-[var(--rc-ink-faint)]">
+                      {" "}· {deal.fields[k] || "(blank)"} → {draft[k] || "(blank)"}
+                    </span>
+                  </div>
+                  <textarea
+                    aria-label={`Reason for overriding ${label}`}
+                    value={reasons[k] ?? ""}
+                    onChange={(e) => setReasons((r) => ({ ...r, [k]: e.target.value }))}
+                    maxLength={MAX_OVERRIDE_REASON_CHARS}
+                    rows={2}
+                    placeholder="What the parser got wrong, and the rule that gives the right value…"
+                    className={`${INPUT_CLASS} w-full leading-relaxed`}
+                  />
+                </li>
+              );
+            })}
+          </ul>
+          {/* The page's own error line sits behind this overlay, so a failed save says so here. */}
+          {actionError && <Placeholder kind="error">{actionError}</Placeholder>}
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={save}
+              disabled={busy !== null || !reasonsComplete}
+              className={BTN_CONFIRM}
+            >
+              {busy === "save"
+                ? "Saving…"
+                : `Save ${changed.length} override${changed.length === 1 ? "" : "s"}`}
+            </button>
+            <button type="button" onClick={() => setConfirming(false)} disabled={busy !== null} className={BTN_LINK}>
+              Back to editing
+            </button>
+          </div>
+        </Modal>
+      )}
 
       {rejecting && (
         <Modal

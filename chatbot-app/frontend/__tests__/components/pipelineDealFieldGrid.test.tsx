@@ -10,7 +10,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { DealFieldGrid } from "@/components/pipeline/DealFieldGrid";
 import { emptyFields, validateFields } from "@/lib/pipeline/omsSchema";
-import type { FieldEvidence, FieldValues } from "@/lib/pipeline/types";
+import type { FieldEvidence, FieldOverride, FieldValues } from "@/lib/pipeline/types";
 
 const ORIGINAL: FieldValues = {
   ...emptyFields(),
@@ -137,5 +137,37 @@ describe("DealFieldGrid", () => {
     fireEvent.click(within(r).getByRole("button", { name: /evidence/ }));
     expect(within(r).getByText(/Size:\s+\$700,000,000/)).toBeTruthy();
     expect(within(r).getByText(/dollars to millions with three decimals/)).toBeTruthy();
+  });
+
+  it("explains an overridden value with its reason, author and memory outcome", () => {
+    const override: FieldOverride = {
+      override_id: "ov_1",
+      field: "secured_level",
+      parsed_value: "Senior Secured",
+      previous_value: "Senior Secured",
+      value: "First Lien",
+      reason: "Project-finance TLBs book as First Lien in the OMS.",
+      actor: "reviewer@example.test",
+      at: "2026-08-13T10:05:00Z",
+      stage: "break",
+      upload_error_codes: ["PROJECT_FINANCE_LIEN"],
+      memory: { status: "failed", error: "ThrottlingException" },
+    };
+    render(
+      <DealFieldGrid
+        fields={{ ...ORIGINAL, secured_level: "First Lien" }}
+        original={ORIGINAL}
+        evidence={EVIDENCE}
+        editing={false}
+        problems={{}}
+        overrides={{ secured_level: override }}
+        onChange={vi.fn()}
+      />,
+    );
+    const r = row("secured_level");
+    expect(within(r).getByText("Project-finance TLBs book as First Lien in the OMS.")).toBeTruthy();
+    expect(within(r).getByText(/reviewer@example\.test .* fixing an OMS rejection/)).toBeTruthy();
+    expect(within(r).getByText("lesson not sent")).toHaveAttribute("title", "ThrottlingException");
+    expect(within(row("issue_size_mm")).queryByText(/overridden/)).toBeNull();
   });
 });

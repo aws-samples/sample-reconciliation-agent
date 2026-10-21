@@ -1,9 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import type { FieldEvidence, FieldValues, OmsFieldDef } from "@/lib/pipeline/types";
-import { fieldsBySection, formatHint } from "@/lib/pipeline/omsSchema";
-import { Disclosure, INPUT_CLASS } from "@/components/app-ui/ui";
+import type { FieldEvidence, FieldOverride, FieldValues } from "@/lib/pipeline/types";
+import { fieldsBySection } from "@/lib/pipeline/omsSchema";
+import { Disclosure } from "@/components/app-ui/ui";
+import { FieldInput } from "@/components/pipeline/FieldInput";
+import { OverrideNote } from "@/components/pipeline/OverrideEditor";
 import { ConfidenceChip } from "@/components/pipeline/ui";
 
 // The review surface: every OMS column, grouped the way the OMS groups them, with the parser's value,
@@ -46,63 +48,14 @@ function EvidenceNote({ evidence }: { evidence: FieldEvidence }) {
   );
 }
 
-/**
- * The editing control for one column, shaped by its type.
- *
- * Enums and booleans are selects, because a free-text "yes" is exactly the FORMAT_INVALID the OMS
- * rejects. Everything else is text with the expected format as its placeholder.
- */
-function FieldInput({
-  def,
-  value,
-  invalid,
-  onChange,
-}: {
-  def: OmsFieldDef;
-  value: string;
-  invalid: boolean;
-  onChange: (value: string) => void;
-}) {
-  const style = invalid ? { borderColor: "var(--rc-red)" } : undefined;
-  const label = def.label;
-  if (def.type === "enum" || def.type === "boolean") {
-    const options = def.type === "boolean" ? ["Yes", "No"] : (def.values ?? []);
-    return (
-      <select
-        aria-label={label}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className={`${INPUT_CLASS} w-full`}
-        style={style}
-      >
-        <option value="">— blank —</option>
-        {options.map((o) => (
-          <option key={o} value={o}>
-            {o}
-          </option>
-        ))}
-      </select>
-    );
-  }
-  return (
-    <input
-      aria-label={label}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      placeholder={def.type === "string" ? (def.pattern ? "e.g. 7 yr" : "text") : formatHint(def.type)}
-      spellCheck={false}
-      className={`${INPUT_CLASS} w-full`}
-      style={style}
-    />
-  );
-}
-
 export function DealFieldGrid({
   fields,
   original,
   evidence,
   editing,
   problems,
+  overrides = {},
+  onRetract,
   onChange,
 }: {
   /** Current values (the draft while editing). */
@@ -113,6 +66,10 @@ export function DealFieldGrid({
   editing: boolean;
   /** Validation problems keyed by field key, from `validateFields` on the draft. */
   problems: Record<string, string>;
+  /** The override behind each field's current value, from `latestOverrides`. */
+  overrides?: Record<string, FieldOverride>;
+  /** Offered on an override's note when the viewer may retract its lesson (author or admin). */
+  onRetract?: (override: FieldOverride) => ((o: FieldOverride) => Promise<void>) | undefined;
   onChange: (key: string, value: string) => void;
 }) {
   return (
@@ -146,6 +103,7 @@ export function DealFieldGrid({
                 const changed = value !== (original[def.key] ?? "");
                 const problem = problems[def.key];
                 const ev = evidence[def.key];
+                const override = overrides[def.key];
                 return (
                   <div
                     key={def.key}
@@ -202,6 +160,11 @@ export function DealFieldGrid({
                       )}
                       {ev && <ConfidenceChip level={ev.confidence} />}
                     </div>
+                    {override && (
+                      <div className="col-span-full">
+                        <OverrideNote override={override} onRetract={onRetract?.(override)} />
+                      </div>
+                    )}
                     {ev && <EvidenceNote evidence={ev} />}
                   </div>
                 );

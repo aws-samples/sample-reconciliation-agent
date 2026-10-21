@@ -124,8 +124,28 @@ original_fields { [field_key]: string }   as parsed, for diffing
 evidence, assumptions, memory_hits, skills_used, enrichment   copied from ParseOutput
 csv_key         string   "deal-csv/<deal_id>.csv"
 upload          UploadResult | null
-history         { at, actor, action, detail? }[]   STAGED / EDITED / APPROVED / UPLOAD_ACCEPTED / UPLOAD_REJECTED / REJECTED
+history         { at, actor, action, detail? }[]   STAGED / EDITED / APPROVED / UPLOAD_ACCEPTED / UPLOAD_REJECTED / REJECTED / LESSON_RETRACTED
+overrides       FieldOverride[]   append-only; [] at staging (absent on older rows)
 created_at, updated_at
+```
+
+### FieldOverride
+
+One reviewer's change to one field, with the reason they gave. The latest override of a field
+explains its current value; earlier ones stay as that field's audit trail.
+
+```
+override_id     string   "ov_<ulid>"
+field           string   OMS field key
+parsed_value    string   original_fields[field]
+previous_value  string   the value this override replaced (the parser's, or an earlier override's)
+value           string   the new value
+reason          string   required, ≤ 2000 chars
+actor, at       string   verified caller, ISO-8601
+stage           "review" | "break"   break = made while the deal was UPLOAD_FAILED
+upload_error_codes? string[]   break only: codes of the last rejected upload naming this field
+memory          { status: "pending" | "sent" | "failed" | "off" | "retracted", event_id?, error?,
+                  retracted_by?, retracted_at? }
 ```
 
 ### UploadResult
@@ -228,9 +248,35 @@ Stream protocol (`text/event-stream`, one JSON object per `data:` line):
 - `deal_pipeline_dev_knowledge`: strategy `edge_cases`, type CUSTOM, `SEMANTIC_OVERRIDE`
   extraction prompt tuned to extract *reusable deal-parsing rules* and return an empty list for
   chatter. Namespace `deal-pipeline/edge-cases/{actorId}`; the desk uses actorId `deal-desk`.
-  Written by the assistant's `save_memory` tool and by the Memory Manager's manual add. Read by
-  the parser (`retrieve_memory_records`, query = subject + first 600 chars, top 6) and by the
-  Memory Manager panel.
+  Written by the assistant's `save_memory` tool, by the Memory Manager's manual add, and by every
+  field override (one USER event per override, sessionId `override-<deal_id>`, quoting the parser's
+  value, the correction, the reason, the parser's evidence and a few classifying deal attributes so
+  the extractor can find a trigger). Read by the parser (`retrieve_memory_records`, query = subject
+  + first 600 chars, top 6) and by the Memory Manager panel. A reason that does not generalise
+  yields no record; that filtering is the extraction prompt's job.
+- **Lesson provenance.** Each override event carries `override_id`, `author` and `deal_id` as event
+  metadata, and the strategy's record schema copies all three onto the record it extracts
+  (`STRICTLY_CONSISTENT`: passed through, never inferred). The service requires each such key to
+  also be an indexed key on the memory, allows at most three per strategy, and never lets an
+  indexed key be removed — Terraform's `provenance_keys` on the knowledge memory declares both
+  halves, and adding them is an in-place, one-way change. Verified on a throwaway memory
+  (2026-10-20): every extracted record carried exactly the keys of the one event it came from;
+  `ListMemoryRecords` filters on them server-side; and consolidation never merged — a second
+  lesson restating a rule, and a third contradicting it, each became a record of their own beside
+  the first, all three recalled by the parser. So a record's provenance names one override, a
+  retract can delete exactly that override's lesson, and two lessons about one field is the shape a
+  conflict takes; the Memory Manager surfaces it rather than leaving the parser to choose. Records
+  written before the keys existed, and rules saved by hand or by the assistant, carry none.
+- **Pruning.** Overrides teach without review, so the lesson can be taken back: by the override's
+  author or a pipeline admin from the override's note (`POST /deals/[id]/overrides/[oid]/retract`,
+  which deletes the records whose `override_id` matches), or by an admin from the Memory Manager
+  (which marks the override it came from as retracted on its deal). Either way the override and the
+  value it set stay; `memory.status` becomes `retracted` and the deal's history gains a
+  LESSON_RETRACTED row. After a delete only `GetMemoryRecord` drops the record at once:
+  `ListMemoryRecords` and the parser's `RetrieveMemoryRecords` both keep returning it for up to
+  about a minute (observed live, 2026-10-20 and 10-21). So the shared memory panel hides what it
+  deleted from reloads for three minutes, and a re-parse in the first minute after a retract may
+  still recall the lesson.
 - `deal_pipeline_dev_chat`: events only, 7-day expiry. actorId = user subject, sessionId =
   chat session. The assistant rebuilds history from `list_events` on load.
 
@@ -248,13 +294,14 @@ this app has no `/me` route of its own.
 | `/emails/[id]` | GET | email incl. parse |
 | `/emails/[id]/reparse` | POST | status → PARSING, re-invoke; 409 while a parser run is already in flight (the PARSING write is conditional, so two concurrent reparses start one run) |
 | `/deals` | GET | list (newest first) |
-| `/deals/[id]` | GET, PATCH | PATCH `{fields}` → validate types client-side, store, regenerate CSV, history EDITED; **admin-gated**; 409 when the status changed between read and write |
+| `/deals/[id]` | GET, PATCH | PATCH `{fields, reasons}` → a reason is required for every field whose value changes; only the changed values are validated (the OMS checks the rest on upload); regenerate CSV, one `FieldOverride` per changed field, history EDITED quoting each change and reason, then one memory lesson per override and its outcome recorded on the override; open to every user with access; 409 when the deal changed (status or `updated_at`) between read and write |
 | `/deals/[id]/csv` | GET | text/csv download |
-| `/deals/[id]/approve` | POST | status APPROVED → invoke OMS Lambda sync → UPLOADED / UPLOAD_FAILED; **admin-gated**; the APPROVED write is conditional on the status read (409 on conflict, Lambda not invoked); the post-upload reload is a strongly consistent read |
-| `/deals/[id]/reject` | POST | `{reason}`; **admin-gated**; conditional on the status read (409 on conflict) |
+| `/deals/[id]/approve` | POST | status APPROVED → invoke OMS Lambda sync → UPLOADED / UPLOAD_FAILED; **admin-gated**; the APPROVED write is conditional on the status and `updated_at` read (409 on conflict, Lambda not invoked); both reads are strongly consistent |
+| `/deals/[id]/reject` | POST | `{reason}`; **admin-gated**; conditional on the status and `updated_at` read (409 on conflict) |
 | `/chat` | POST | SSE stream (§7); body `{session_id, message, context?:{deal_id?, email_id?}}`; open to all, but `save_memory` / `delete_memory` are offered to the model and executed only for admin-group callers (same gate as `/memory` POST/DELETE) |
 | `/chat/history` | GET | `?session_id=` → messages from chat memory |
-| `/memory` | GET, POST, DELETE | records / manual add `{rule}` / `{ids}`; POST and DELETE **admin-gated** |
+| `/deals/[id]/overrides/[oid]/retract` | POST | delete the records carrying this override's `override_id`, mark it `retracted`, history LESSON_RETRACTED; the override's **author or an admin**; 409 when there is nothing to retract (no lesson sent, already retracted, or no record yet — still extracting, or it did not generalise) |
+| `/memory` | GET, POST, DELETE | records, each override lesson with its `source` (override, author, deal, field, reason) / manual add `{rule}` / `{ids}`, which also marks the overrides those records came from as retracted; POST and DELETE **admin-gated** |
 | `/memory/strategy` | GET | GetMemory projection |
 | `/skills`, `/skills/[name]` | GET, PUT / GET, PUT, DELETE | S3 SKILL.md catalog; writes **admin-gated** |
 | `/skills/system-prompt` | GET, PUT | `prompts/parser-system.md`; PUT **admin-gated** |
@@ -273,12 +320,15 @@ decides who may call any of these routes at all — unset, every authenticated u
 supplied by the console's stored layer (§14), which overlays the same environment names before
 `resolveAppAccess` reads them; nothing in this app's BFF reads that layer directly, and the
 console's own `/api/console/*` routes sit outside this prefix and belong to the shell.
-`PIPELINE_ADMIN_GROUP` gates every route that changes what the next parse does or what reaches
-the OMS: approve/reject, field edits (PATCH `/deals/[id]`), skill and parser-prompt writes,
-proposal decisions, memory add and delete (the REST routes and the assistant's `save_memory` /
-`delete_memory` tools alike), config PUT; admins implicitly have access. Reading, chatting,
-simulating an email, reparsing and proposing a skill change stay open to every user with access —
-none of them changes the OMS or the parser without an admin's decision.
+`PIPELINE_ADMIN_GROUP` gates every route that changes what reaches the OMS or rewrites what the
+parser is taught wholesale: approve/reject, skill and parser-prompt writes, proposal decisions,
+memory add and delete (the REST routes and the assistant's `save_memory` / `delete_memory` tools
+alike), config PUT; admins implicitly have access. Reading, chatting, simulating an email,
+reparsing and proposing a skill change stay open to every user with access. So do field overrides
+(PATCH `/deals/[id]`): correcting the parser is the desk's daily work, nothing reaches the OMS
+until an admin approves, and every override carries its author and reason — but each one does
+send a lesson to the knowledge memory without review, so pruning a bad lesson is an admin's
+Memory Manager delete.
 
 ## 10. Frontend
 
@@ -294,7 +344,19 @@ carries the one console-aware control in this app: **Use console default** besid
 presets, which copies the console-wide default model id into this app's own parameter through the
 same admin-gated PUT (§14); every other setting on that screen is this app's own. This app's own
 primitives are `src/components/pipeline/ui.tsx` (its `StatusPill` and `ConfidenceChip`) and its panels
-(`EmailViewer.tsx`, `DealFieldGrid.tsx`, ...). The header chrome (`AppChrome`, `AppNav`, `UserMenu`),
+(`EmailViewer.tsx`, `DealFieldGrid.tsx`, ...).
+
+Field overrides have two entry points over the one PATCH. In `inbox/[id]` the parsed panel shows
+the staged deal's current values once the parse has staged one, and while that deal is STAGED or
+UPLOAD_FAILED each row has a ✎ that opens an inline editor (`OverrideEditor.tsx`) under the row:
+new value, parsed value, required reason. Inline rather than a modal so the email stays visible
+beside it. In `deals/[id]` the bulk **Edit fields** mode ends in a dialog asking one reason per
+changed field. Both show the latest override of each field under its value (`OverrideNote`): author,
+time, reason, and whether its lesson reached the memory — with **retract lesson** for its author and
+for admins, on any deal status (a lesson from a finished deal can still be wrong). The Memory Manager
+says where each lesson came from (override, author, field, deal link, reason, or "saved by hand or by
+the assistant"), filters by source, author and field, and flags every field with more than one
+lesson ("check they agree"), with a link that filters to them. The header chrome (`AppChrome`, `AppNav`, `UserMenu`),
 the column-preferences `DataTable` and the generic primitives (Panel, Pill, Modal, Notice, buttons)
 are shared with the recon app in `src/components/app-ui/`; neither app imports the other. Theme CSS:
 `src/app/app-theme.css`, shared, `rc-` prefix, scoped to `.app-root`.
@@ -674,3 +736,105 @@ at its contract key, a blank seed creates nothing, the two prefix shapes that br
 refused) and `infra/modules/frontend-ecs/tests/console_settings.tftest.hcl`. Nothing here creates a
 group; `console-admins` in the examples is an identity-provider group an operator maintains, like the
 four app groups.
+
+## 15. One email, several orders (design; not built)
+
+Status: designed, not implemented. The parser still stages one deal per email. Fictional samples
+for this section are in `data/deal-emails-multi-order/`. They stay out of the Simulate corpus until
+the parser can stage orders.
+
+### What arrives
+
+The desk's real notices come in three shapes. The samples reproduce the first two with invented
+names and numbers.
+
+1. **One security in several tranches.** The issuer, instrument, secured level, ratings, use of
+   proceeds, left lead and dates are shared. Currency, tenor, size, call protection and price talk
+   vary per tranche. Some values are stated relative to another tranche ("EUR: +100bps from USD"),
+   and some are not yet known ("tranche sizes TBD"). Sample m1 has five tranches across two
+   currencies.
+2. **A loan and a bond in one thread.** Even Pipeline Type and Security Type differ between the
+   orders, as do the left lead, tenor, call protection and pricing basis (spread over SOFR vs.
+   coupon talk). A facility can also split (term loan B plus a delayed-draw term loan). Sample m2
+   stages three orders.
+3. **A loan and a bond for one issuer as two separate emails.** Each email is 1:1 and needs nothing
+   here. Linking the two (same issuer, days apart) is a separate, later feature.
+
+Which fields are shared is therefore a property of the email, not of the schema. In shape 2, Pipeline
+Type itself varies.
+
+### Data model
+
+- **One deal record per order.** Each order is one OMS row, approved, uploaded, rejected and
+  overridden on its own. So it keeps everything §4 gives a deal: its own CSV, history, upload
+  result and `overrides[]`. That makes todo 1's override model apply per order unchanged. New
+  fields:
+  - `order_index`: 0-based.
+  - `order_count`.
+  - `order_label`: display only, built from what distinguishes the order, e.g. "USD 5yr", "EUR
+    8yr", "TLB", "DDTL", "Notes".
+- **The email lists its deals.** `deal_id` becomes `deal_ids: string[]`. `deal_id` stays, set to the
+  first order, until every reader has moved.
+- **The parse returns orders.** `ParseOutput` gains `orders: { label, fields, evidence,
+  assumptions }[]`, each with a complete field set, shared values repeated. The parser does not
+  declare which fields are shared; the UI computes that by comparison, so it can't be wrong in a way
+  the reviewer can't see.
+- **Derived values are evidence.** A value computed from another tranche records that in its
+  evidence `rule` ("USD 5yr talk + 100 bps"). An unknown size is blank with an assumption saying
+  why.
+- **Re-parse is unchanged.** It already supersedes every open deal of the email, not just one.
+
+### UI: Inbox parsed panel
+
+This is the layout chosen on 2026-10-07: order chips across the top, then fields split into "shared
+by all orders" and "this order". With one order the strip is hidden and everything is "this order",
+which is exactly today's 1:1 panel.
+
+```
+│ 3 orders from this email                 │
+│ [●1 · TLB] [2 · DDTL] [3 · Notes ✎2]     │   chip: label, status pill, override count
+│                                          │
+│ SHARED BY ALL ORDERS                     │   current values equal across every order
+│  Issuer        Oakline Home Services ✎   │
+│  UOP           Refinance             ✎   │
+│ THIS ORDER · 1 · TLB                     │   values that differ, or are blank in some
+│  Pipeline Type Loan                  ✎   │
+│  Issue Size    1,600.000             ✎   │
+│  Call Protect. 101 soft 6m  overridden ✎ │
+```
+
+- **Overriding a shared field** asks for its scope: *all N orders* (the default) or *this order
+  only*. "All" writes one override per order with the same reason, in one request, and sends **one**
+  lesson, not N. The first order's override owns the lesson (its `override_id` is the lesson's
+  provenance); the others record `memory: { status: "sent", lesson_of: <that id> }`. Retracting from
+  any of them retracts the one lesson and marks all of them.
+- **A value that diverges after an override** (one order changed alone) moves from "shared" to
+  "this order" on the next render, which is the truth.
+- **The evidence disclosure** shows a derived value's rule, so "EUR 5yr talk = USD + 100 bps" is
+  checkable against the USD tranche without leaving the panel.
+
+### UI: elsewhere
+
+- **Deals list:** one row per order, grouped under its email ("3 orders"), collapsed by default.
+- **Deal page:** "order 2 of 3 from email …" with links to the sibling orders. Approve and reject
+  stay per order. An admin-only "Approve all N" is a later convenience, not part of this design.
+- **Memory:** a shared-field lesson is phrased once, with the trigger the orders have in common. A
+  per-order lesson quotes that order's distinguishing attributes (currency, tenor, instrument) so
+  the extractor can tell "the EUR tranche" from "every tranche".
+
+### Contract changes
+
+| Where | Change |
+| --- | --- |
+| parser `stage_deal` tool | `orders: [...]`; the skill gains a "multi-tranche and multi-instrument notices" section on when to split and how to label |
+| `PATCH /emails/[id]/orders` (new) | `{ deal_ids, fields, reasons }` for a shared-field override across orders; per-order overrides keep `PATCH /deals/[id]` |
+| retract | follows `lesson_of` to the owning override |
+| mock OMS | unchanged: still one row per upload |
+
+### Open questions for the desk
+
+1. Does the OMS take N separate uploads for N orders (assumed here), or one file with N rows?
+2. Should a tranche whose size is "TBD" be staged blank, or held until the size is known?
+3. When a bond is mentioned in a loan launch but "launches next week", is it an order now, or later
+   when its own notice arrives?
+4. Should two emails for one issuer (shape 3) be linked in the Inbox?

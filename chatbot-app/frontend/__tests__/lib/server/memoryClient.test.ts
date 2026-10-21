@@ -7,7 +7,9 @@
  * given region, or taken from the caller; and each call's projection is the shape both apps' routes
  * and the parser already depend on. `createEvent` sends actor and session ids exactly as given — the
  * two apps sanitise differently, and the client must not choose for them — while the chat helpers
- * reduce OIDC subjects and session ids to the memory API's charset themselves.
+ * reduce OIDC subjects and session ids to the memory API's charset themselves. Provenance: an
+ * event's string metadata is sent as given, a record's own metadata comes back without the
+ * service's keys, and listing can be narrowed by metadata on the service side.
  */
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -308,6 +310,48 @@ describe("createMemoryClient", () => {
       memoryStatus: "ACTIVE",
       strategies: [],
     });
+  });
+
+  it("listRecords returns the app's metadata without the service's keys, and filters on the service", async () => {
+    dataSend.mockResolvedValueOnce({
+      memoryRecordSummaries: [
+        {
+          memoryRecordId: "rec-1",
+          content: { text: "a rule" },
+          createdAt: new Date("2026-10-20T00:00:00Z"),
+          metadata: {
+            "x-amz-agentcore-memory-recordType": { stringValue: "BASE" },
+            "x-amz-agentcore-memory-createdAt": { dateTimeValue: new Date() },
+            override_id: { stringValue: "ov_1" },
+            author: { stringValue: "alice" },
+          },
+        },
+        { memoryRecordId: "rec-2", content: { text: "no metadata" }, createdAt: new Date("2026-10-19T00:00:00Z") },
+      ],
+    });
+    const out = await createMemoryClient({ memoryId: MEMORY_ID }).listRecords(NAMESPACE, { override_id: "ov_1" });
+    expect(out[0].metadata).toEqual({ override_id: "ov_1", author: "alice" });
+    expect("metadata" in out[1]).toBe(false); // absent, not {}, so existing projections are unchanged
+    expect(dataSend.mock.calls[0][0].metadataFilters).toEqual([
+      { left: { metadataKey: "override_id" }, operator: "EQUALS_TO", right: { metadataValue: { stringValue: "ov_1" } } },
+    ]);
+
+    // No filter, no metadataFilters argument at all.
+    dataSend.mockResolvedValueOnce({ memoryRecordSummaries: [] });
+    await createMemoryClient({ memoryId: MEMORY_ID }).listRecords(NAMESPACE);
+    expect("metadataFilters" in dataSend.mock.calls[1][0]).toBe(false);
+  });
+
+  it("createEvent sends string metadata as given, and none when there is none", async () => {
+    dataSend.mockResolvedValue({ event: { eventId: "evt-m" } });
+    const client = createMemoryClient({ memoryId: MEMORY_ID });
+    await client.createEvent({ actorId: "a", sessionId: "s", role: "USER", text: "t", metadata: { override_id: "ov_1", deal_id: "dl_1" } });
+    expect(dataSend.mock.calls[0][0].metadata).toEqual({
+      override_id: { stringValue: "ov_1" },
+      deal_id: { stringValue: "dl_1" },
+    });
+    await client.createEvent({ actorId: "a", sessionId: "s", role: "USER", text: "t", metadata: {} });
+    expect("metadata" in dataSend.mock.calls[1][0]).toBe(false);
   });
 
   it("createEvent sends the ids exactly as given and answers the event id", async () => {

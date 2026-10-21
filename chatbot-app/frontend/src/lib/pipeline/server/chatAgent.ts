@@ -38,13 +38,11 @@ import { getDeal, listDeals } from "./dealStore";
 import { getEmail } from "./emailStore";
 import { env } from "./env";
 import {
-  batchDelete,
   createRuleEvent,
-  EDGE_CASES_NAMESPACE,
   appendChatEvent,
   listChatEvents,
-  listRecords,
 } from "./memoryClient";
+import { deleteLessons, listLessons } from "./lessons";
 import { createProposal } from "./proposalStore";
 import { getAssistantPrompt, getSkill, listSkills } from "./skillsStore";
 
@@ -276,6 +274,8 @@ export interface ToolContext {
   dealId?: string;
   /** Whether the verified caller is in `PIPELINE_ADMIN_GROUP`; gates the memory-writing tools. */
   canWrite: boolean;
+  /** The verified caller, named on any override a `delete_memory` marks as retracted. */
+  actor?: string;
 }
 
 /** Security-master object the OMS validator also reads; the two must agree on canonical names. */
@@ -478,7 +478,7 @@ export async function executeTool(
         };
       }
       case "list_memories": {
-        const records = await listRecords(EDGE_CASES_NAMESPACE);
+        const records = await listLessons();
         return {
           ok: true,
           summary: `${records.length} memory record${records.length === 1 ? "" : "s"}`,
@@ -506,7 +506,7 @@ export async function executeTool(
       }
       case "delete_memory": {
         const recordId = str(input, "record_id");
-        const outcome = await batchDelete([recordId]);
+        const outcome = await deleteLessons([recordId], ctx.actor ?? "assistant");
         if (outcome === null)
           return {
             ok: false,
@@ -648,7 +648,7 @@ export async function* runAssistantTurn(
   }
   await appendChatEvent(sessionId, "user", message, actor);
 
-  const ctx: ToolContext = { sessionId, dealId: context?.deal_id, canWrite };
+  const ctx: ToolContext = { sessionId, dealId: context?.deal_id, canWrite, actor };
   const finalText: string[] = [];
 
   try {

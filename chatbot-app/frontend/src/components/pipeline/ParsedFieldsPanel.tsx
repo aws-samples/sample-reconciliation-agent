@@ -1,9 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import Link from "next/link";
-import type { EmailRecord, FieldEvidence, OmsFieldDef } from "@/lib/pipeline/types";
+import type {
+  DealRecord,
+  EmailRecord,
+  FieldEvidence,
+  FieldOverride,
+  OmsFieldDef,
+} from "@/lib/pipeline/types";
 import { fieldsBySection } from "@/lib/pipeline/omsSchema";
+import { latestOverrides } from "@/lib/pipeline/overrides";
 import { formatDuration } from "@/components/pipeline/format";
 import {
   BTN_LINK,
@@ -14,12 +21,18 @@ import {
   Panel,
   Placeholder,
 } from "@/components/app-ui/ui";
+import { OverrideEditor, OverrideNote } from "@/components/pipeline/OverrideEditor";
 import { ConfidenceChip, StatusPill } from "@/components/pipeline/ui";
 
 // What the parsing agent made of the email, beside the email itself. Every value is shown with the
 // text it came from and the rule that shaped it, because "the parser said S+275 means 2.750%" is
 // only reviewable when the reviewer can see the line that said S+275 and the skill that said how to
 // convert it.
+//
+// Once the parse has staged a deal, the panel shows the deal's CURRENT values — the parser's, or a
+// reviewer's override — and, while the deal is still open, lets the reviewer override any of them in
+// place with a reason. The email stays visible beside the editor, which is the point of editing here
+// rather than on the deal page: the reason is usually a quote from the email.
 
 /** A small labelled chip, for skills, memory hits and enriched fields. */
 function Chip({ children, title }: { children: string; title?: string }) {
@@ -56,15 +69,27 @@ function EvidenceBody({ evidence }: { evidence: FieldEvidence }) {
   );
 }
 
-/** One parsed field: label, value, confidence; opens to the excerpt and rule when there is evidence. */
+/**
+ * One parsed field: label, value, confidence; opens to the excerpt and rule when there is evidence.
+ * With `onEdit`, a ✎ opens the override editor under the row; `override` explains a changed value.
+ */
 function FieldRow({
   def,
   value,
   evidence,
+  override,
+  onEdit,
+  onRetract,
+  editor,
 }: {
   def: OmsFieldDef;
   value: string;
   evidence: FieldEvidence | undefined;
+  override?: FieldOverride;
+  onRetract?: (o: FieldOverride) => Promise<void>;
+  onEdit?: () => void;
+  /** The open override editor for this row, when it is the one being edited. */
+  editor?: ReactNode;
 }) {
   const summary = (
     <span className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] items-baseline gap-3">
@@ -80,31 +105,68 @@ function FieldRow({
       </span>
     </span>
   );
-  if (!evidence)
-    return (
-      <div className="rounded border border-[var(--rc-line-soft)] px-3 py-2">{summary}</div>
-    );
-  return (
+  const row = !evidence ? (
+    <div className="rounded border border-[var(--rc-line-soft)] px-3 py-2">{summary}</div>
+  ) : (
     <Disclosure summary={summary} meta={<ConfidenceChip level={evidence.confidence} />}>
       <EvidenceBody evidence={evidence} />
     </Disclosure>
+  );
+  return (
+    <div>
+      <div className="flex items-start gap-1.5">
+        <div className="min-w-0 flex-1">{row}</div>
+        {onEdit && (
+          // Beside the row, not inside it: the evidence row is itself a button, and a button inside
+          // a button is neither valid nor reachable by keyboard.
+          <button
+            type="button"
+            onClick={onEdit}
+            aria-label={`Override ${def.label}`}
+            title={`Override ${def.label}`}
+            className="rc-mono mt-1 rounded px-1.5 py-1 text-[13px] leading-none text-[var(--rc-ink-faint)] hover:bg-[var(--rc-panel-2)] hover:text-[var(--rc-violet)]"
+          >
+            ✎
+          </button>
+        )}
+      </div>
+      {override && !editor && <OverrideNote override={override} onRetract={onRetract} />}
+      {editor}
+    </div>
   );
 }
 
 export function ParsedFieldsPanel({
   email,
+  deal = null,
+  onOverride,
+  onRetract,
   onReparse,
   reparsing = false,
 }: {
   email: EmailRecord;
+  /** The deal this parse staged. When given, its current values and overrides are shown. */
+  deal?: DealRecord | null;
+  /** Present while the deal can still be edited; saves one field's override with its reason. */
+  onOverride?: (key: string, value: string, reason: string) => Promise<void>;
+  /**
+   * For each override, the retract action when the viewer may take its lesson back (its author or an
+   * admin), else undefined. Independent of `onOverride`: a lesson from a finished deal can still be
+   * wrong.
+   */
+  onRetract?: (override: FieldOverride) => ((o: FieldOverride) => Promise<void>) | undefined;
   onReparse?: () => void;
   reparsing?: boolean;
 }) {
   // Blank fields hidden by default: the schema has seventy columns and most of an email fills
   // twenty. The count of what is hidden is shown, so "hidden" never reads as "missing".
   const [showBlank, setShowBlank] = useState(false);
+  // One editor at a time: two half-written reasons on one screen is one too many to keep track of.
+  const [editingKey, setEditingKey] = useState<string | null>(null);
   const parse = email.parse;
   const inFlight = email.status === "RECEIVED" || email.status === "PARSING";
+  const values = deal?.fields ?? parse?.fields ?? {};
+  const latest = deal ? latestOverrides(deal) : {};
 
   return (
     <Panel className="rc-rise p-5">
@@ -194,11 +256,22 @@ export function ParsedFieldsPanel({
             </dd>
           </dl>
 
+          {deal && !onOverride && (
+            <p className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">
+              Values are read-only: the deal is {deal.status.toLowerCase().replace(/_/g, " ")}.
+            </p>
+          )}
+
           {/* The fields, by OMS section. */}
           <div className="space-y-4">
             {fieldsBySection().map(({ section, fields }) => {
               const rows = fields.filter(
-                (f) => showBlank || (parse.fields[f.key] ?? "") !== "" || parse.evidence[f.key],
+                (f) =>
+                  showBlank ||
+                  (values[f.key] ?? "") !== "" ||
+                  parse.evidence[f.key] ||
+                  latest[f.key] ||
+                  editingKey === f.key,
               );
               const hidden = fields.length - rows.length;
               if (rows.length === 0 && !showBlank) return null;
@@ -217,8 +290,29 @@ export function ParsedFieldsPanel({
                       <FieldRow
                         key={f.key}
                         def={f}
-                        value={parse.fields[f.key] ?? ""}
+                        value={values[f.key] ?? ""}
                         evidence={parse.evidence[f.key]}
+                        override={latest[f.key]}
+                        onRetract={latest[f.key] ? onRetract?.(latest[f.key]) : undefined}
+                        onEdit={
+                          onOverride
+                            ? () => setEditingKey((k) => (k === f.key ? null : f.key))
+                            : undefined
+                        }
+                        editor={
+                          onOverride && editingKey === f.key ? (
+                            <OverrideEditor
+                              def={f}
+                              current={values[f.key] ?? ""}
+                              parsed={deal?.original_fields[f.key] ?? parse.fields[f.key] ?? ""}
+                              onSave={async (value, reason) => {
+                                await onOverride(f.key, value, reason);
+                                setEditingKey(null);
+                              }}
+                              onCancel={() => setEditingKey(null)}
+                            />
+                          ) : undefined
+                        }
                       />
                     ))}
                   </div>

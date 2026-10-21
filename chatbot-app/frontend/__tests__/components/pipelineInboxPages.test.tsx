@@ -5,16 +5,26 @@
  * state ahead of the data. So the property to pin is recovery: one failed poll must not leave the page
  * saying "failed to load" after the next poll has brought the data back — during the demo that is the
  * exact window a viewer is watching.
+ *
+ * The detail page also loads the deal its parse staged, so the panel shows current values and can
+ * override them while the deal is open — and only then.
  */
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EmailRecord } from "@/lib/pipeline/types";
+import { emptyFields } from "@/lib/pipeline/omsSchema";
+import type { DealRecord, EmailRecord } from "@/lib/pipeline/types";
 
 const listEmails = vi.fn();
 const getEmail = vi.fn();
+const getDeal = vi.fn();
+const updateDealFields = vi.fn();
+const retractOverrideLesson = vi.fn();
 vi.mock("@/lib/pipelineApi", () => ({
   listEmails: (...a: unknown[]) => listEmails(...a),
   getEmail: (...a: unknown[]) => getEmail(...a),
+  getDeal: (...a: unknown[]) => getDeal(...a),
+  updateDealFields: (...a: unknown[]) => updateDealFields(...a),
+  retractOverrideLesson: (...a: unknown[]) => retractOverrideLesson(...a),
   reparseEmail: vi.fn(),
   listSamples: vi.fn(),
   createEmail: vi.fn(),
@@ -75,6 +85,9 @@ beforeEach(() => {
   vi.useFakeTimers();
   listEmails.mockReset();
   getEmail.mockReset();
+  getDeal.mockReset();
+  updateDealFields.mockReset();
+  retractOverrideLesson.mockReset();
 });
 
 afterEach(() => {
@@ -131,5 +144,129 @@ describe("EmailDetailPage", () => {
     expect(getEmail).toHaveBeenCalledTimes(3);
     expect(screen.queryByText(/Failed to load the email/)).toBeNull();
     expect(screen.getByText(/Parse failed — model timed out/)).toBeTruthy();
+  });
+
+  const parsedFields = { ...emptyFields(), pipeline_type: "Loan", left_agent: "Silverline Partners" };
+  const parsed = () =>
+    email({
+      status: "PARSED",
+      deal_id: "dl_1",
+      parse: {
+        fields: parsedFields,
+        evidence: {},
+        assumptions: [],
+        memory_hits: [],
+        skills_used: [],
+        enrichment: { issuer_match: null, fields_from_security_master: [] },
+        model_id: "m",
+        duration_ms: 1,
+      },
+    });
+  const stagedDeal = (over: Partial<DealRecord> = {}): DealRecord => ({
+    deal_id: "dl_1",
+    email_id: "em_1",
+    opportunity_name: "",
+    status: "STAGED",
+    fields: { ...parsedFields },
+    original_fields: { ...parsedFields },
+    evidence: {},
+    assumptions: [],
+    memory_hits: [],
+    skills_used: [],
+    enrichment: { issuer_match: null, fields_from_security_master: [] },
+    csv_key: "deal-csv/dl_1.csv",
+    upload: null,
+    history: [],
+    created_at: "t",
+    updated_at: "t",
+    ...over,
+  });
+
+  it("overrides one value on the staged deal and shows the deal the route returned", async () => {
+    getEmail.mockResolvedValue(parsed());
+    getDeal.mockResolvedValue(stagedDeal());
+    updateDealFields.mockResolvedValue(
+      stagedDeal({
+        fields: { ...parsedFields, left_agent: "Silverline" },
+        overrides: [
+          {
+            override_id: "ov_1",
+            field: "left_agent",
+            parsed_value: "Silverline Partners",
+            previous_value: "Silverline Partners",
+            value: "Silverline",
+            reason: "short name",
+            actor: "sub-1",
+            at: "t",
+            stage: "review",
+            memory: { status: "sent", event_id: "ev-1" },
+          },
+        ],
+      }),
+    );
+    render(<EmailDetailPage params={params} />);
+    await tick();
+    expect(getDeal).toHaveBeenCalledWith("dl_1");
+
+    fireEvent.click(screen.getByRole("button", { name: "Override Left Agent" }));
+    const editor = screen.getByRole("group", { name: "Override Left Agent" });
+    fireEvent.change(within(editor).getByLabelText("Left Agent"), { target: { value: "Silverline" } });
+    fireEvent.change(within(editor).getByLabelText(/Reason for overriding/), { target: { value: "short name" } });
+    await act(async () => fireEvent.click(within(editor).getByRole("button", { name: "Save override" })));
+
+    expect(updateDealFields).toHaveBeenCalledWith("dl_1", { left_agent: "Silverline" }, { left_agent: "short name" });
+    expect(document.querySelector('[data-field="left_agent"]')).toHaveTextContent("Silverline");
+    expect(document.querySelector('[data-override="left_agent"]')).toHaveTextContent("lesson sent to memory");
+  });
+
+  it("offers no override once the deal has left review, nor when the deal cannot be read", async () => {
+    getEmail.mockResolvedValue(parsed());
+    getDeal.mockResolvedValueOnce(stagedDeal({ status: "UPLOADED" }));
+    const { unmount } = render(<EmailDetailPage params={params} />);
+    await tick();
+    expect(screen.getByText(/Values are read-only: the deal is uploaded/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Override / })).toBeNull();
+    unmount();
+
+    getDeal.mockRejectedValueOnce(new Error("pipeline API error 500"));
+    render(<EmailDetailPage params={params} />);
+    await tick();
+    expect(screen.getByText(/Could not load deal dl_1, so values are shown as parsed/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Override / })).toBeNull();
+  });
+
+  it("offers to retract a lesson only to the override's author (the viewer here is not an admin)", async () => {
+    const mine = {
+      override_id: "ov_mine",
+      field: "left_agent",
+      parsed_value: "Silverline Partners",
+      previous_value: "Silverline Partners",
+      value: "Silverline",
+      reason: "short name",
+      actor: "sub-1",
+      at: "t",
+      stage: "review" as const,
+      memory: { status: "sent" as const, event_id: "ev-1" },
+    };
+    const theirs = { ...mine, override_id: "ov_theirs", field: "pipeline_type", value: "Bond", actor: "someone-else" };
+    getEmail.mockResolvedValue(parsed());
+    getDeal.mockResolvedValue(
+      stagedDeal({ fields: { ...parsedFields, left_agent: "Silverline", pipeline_type: "Bond" }, overrides: [mine, theirs] }),
+    );
+    retractOverrideLesson.mockResolvedValue(
+      stagedDeal({
+        fields: { ...parsedFields, left_agent: "Silverline", pipeline_type: "Bond" },
+        overrides: [{ ...mine, memory: { status: "retracted", retracted_by: "sub-1" } }, theirs],
+      }),
+    );
+    render(<EmailDetailPage params={params} />);
+    await tick();
+
+    const note = (f: string) => document.querySelector(`[data-override="${f}"]`) as HTMLElement;
+    expect(within(note("pipeline_type")).queryByRole("button", { name: "retract lesson" })).toBeNull();
+    fireEvent.click(within(note("left_agent")).getByRole("button", { name: "retract lesson" }));
+    await act(async () => fireEvent.click(within(note("left_agent")).getByRole("button", { name: "retract" })));
+    expect(retractOverrideLesson).toHaveBeenCalledWith("dl_1", "ov_mine");
+    expect(note("left_agent")).toHaveTextContent("lesson retracted");
   });
 });
