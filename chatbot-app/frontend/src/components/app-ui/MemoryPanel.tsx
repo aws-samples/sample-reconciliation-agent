@@ -140,8 +140,8 @@ export interface MemoryPanelProps<R extends MemoryPanelRecord> {
 
 /**
  * How long a deleted record stays hidden from reloads. After BatchDeleteMemoryRecords the record is
- * gone from GetMemoryRecord and from search at once, but ListMemoryRecords keeps returning it for up
- * to about a minute (observed on a live memory); without this, Refresh straight after a delete shows
+ * gone from GetMemoryRecord at once, but ListMemoryRecords (and search) keep returning it for up to
+ * about a minute (observed on a live memory); without this, Refresh straight after a delete shows
  * the record again and reads as a delete that failed.
  */
 const LIST_LAG_MS = 3 * 60 * 1000;

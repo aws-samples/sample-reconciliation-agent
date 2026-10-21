@@ -272,9 +272,11 @@ Stream protocol (`text/event-stream`, one JSON object per `data:` line):
   which deletes the records whose `override_id` matches), or by an admin from the Memory Manager
   (which marks the override it came from as retracted on its deal). Either way the override and the
   value it set stay; `memory.status` becomes `retracted` and the deal's history gains a
-  LESSON_RETRACTED row. After a delete, `GetMemoryRecord` and search drop the record at once but
-  `ListMemoryRecords` keeps returning it for up to about a minute, so the shared memory panel hides
-  what it deleted from reloads for three minutes.
+  LESSON_RETRACTED row. After a delete only `GetMemoryRecord` drops the record at once:
+  `ListMemoryRecords` and the parser's `RetrieveMemoryRecords` both keep returning it for up to
+  about a minute (observed live, 2026-10-20 and 10-21). So the shared memory panel hides what it
+  deleted from reloads for three minutes, and a re-parse in the first minute after a retract may
+  still recall the lesson.
 - `deal_pipeline_dev_chat`: events only, 7-day expiry. actorId = user subject, sessionId =
   chat session. The assistant rebuilds history from `list_events` on load.
 
