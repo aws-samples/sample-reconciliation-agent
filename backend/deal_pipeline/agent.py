@@ -36,6 +36,9 @@ from backend.deal_pipeline.security_master import ISSUER_FIELD_MAP, SecurityMast
 logger = logging.getLogger(__name__)
 
 MAX_ROUNDS = 6
+# Orders one email may stage. The densest notice the desk has seen launched five tranches; ten is
+# room for that and a loan beside it, and a cap on a model that splits a term sheet line by line.
+MAX_ORDERS = 10
 LOOKUP_TOOL = "lookup_security_master"
 STAGE_TOOL = "stage_deal"
 CONFIDENCE_LEVELS = ("high", "medium", "low")
@@ -85,8 +88,9 @@ def bedrock_client():
 # Used when s3://<assets>/prompts/parser-system.md has not been seeded (or was deleted). Kept
 # generic on purpose: the operational rules live in the skills, which the desk edits.
 DEFAULT_SYSTEM_PROMPT = """You are the new-issue desk's deal-parsing agent. You read ONE deal email \
-(a market news alert or an arranger's launch notice) and stage exactly one record for the OMS \
-pipeline by calling the stage_deal tool.
+(a market news alert or an arranger's launch notice) and stage it for the OMS pipeline by calling \
+the stage_deal tool once: one deal, with one order per instrument the email offers now (usually \
+one; several when it launches tranches or a loan and a bond together).
 
 Rules:
 - Use only what the email states or what the security master returns. Never invent a value; \
@@ -149,6 +153,29 @@ def tool_config() -> dict:
     field_props = {
         f["key"]: {"type": "string", "description": _field_description(f)} for f in FIELDS
     }
+    evidence_schema = {
+        "type": "object",
+        "description": "Per field key (non-blank fields only): where the value came from.",
+        "additionalProperties": {
+            "type": "object",
+            "properties": {
+                "value": {"type": "string"},
+                "confidence": {"type": "string", "enum": list(CONFIDENCE_LEVELS)},
+                "excerpt": {
+                    "type": "string",
+                    "description": "Exact email text the value was taken from.",
+                },
+                "rule": {
+                    "type": "string",
+                    "description": (
+                        "Skill or memory rule applied, when any -- or, for a value derived from "
+                        "another order, how ('USD 5yr talk + 100 bps')."
+                    ),
+                },
+            },
+            "required": ["value", "confidence", "excerpt"],
+        },
+    }
     stage_schema = {
         "type": "object",
         "properties": {
@@ -158,30 +185,44 @@ def tool_config() -> dict:
                 "properties": field_props,
                 "required": list(field_props),
             },
-            "evidence": {
-                "type": "object",
-                "description": "Per field key (non-blank fields only): where the value came from.",
-                "additionalProperties": {
-                    "type": "object",
-                    "properties": {
-                        "value": {"type": "string"},
-                        "confidence": {"type": "string", "enum": list(CONFIDENCE_LEVELS)},
-                        "excerpt": {
-                            "type": "string",
-                            "description": "Exact email text the value was taken from.",
-                        },
-                        "rule": {
-                            "type": "string",
-                            "description": "Skill or memory rule applied, when any.",
-                        },
-                    },
-                    "required": ["value", "confidence", "excerpt"],
-                },
-            },
+            "evidence": evidence_schema,
             "assumptions": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Things inferred without direct evidence, and fields left blank and why.",
+            },
+            "orders": {
+                "type": "array",
+                "maxItems": MAX_ORDERS,
+                "description": (
+                    "Only when the email offers MORE THAN ONE instrument now -- tranches that differ "
+                    "by currency or tenor, a term loan and a delayed-draw term loan, a loan and a "
+                    "bond. One entry per order, in the email's order; omit for a single order. Then "
+                    "the top-level fields and evidence hold what every order shares, and each entry "
+                    "holds only the fields whose value differs for that order. Debt mentioned as "
+                    "context (notes being refinanced, an existing tranche, a revolver extended) is "
+                    "never an order."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "label": {
+                            "type": "string",
+                            "description": (
+                                "Short label telling this order from the others, e.g. 'USD 5yr', "
+                                "'EUR 8yr', 'TLB', 'DDTL', 'Notes'."
+                            ),
+                        },
+                        "fields": {
+                            "type": "object",
+                            "description": "Only the field keys that differ for this order, in OMS format.",
+                            "properties": field_props,
+                        },
+                        "evidence": evidence_schema,
+                        "assumptions": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["label", "fields"],
+                },
             },
         },
         "required": ["fields", "evidence", "assumptions"],
@@ -212,7 +253,10 @@ def tool_config() -> dict:
             {
                 "toolSpec": {
                     "name": STAGE_TOOL,
-                    "description": "Stage the parsed deal for review. Call exactly once, with every field.",
+                    "description": (
+                        "Stage the parsed deal for review. Call exactly once, with every field; add "
+                        "orders only when the email offers more than one instrument now."
+                    ),
                     "inputSchema": {"json": stage_schema},
                 }
             },
@@ -263,7 +307,8 @@ def build_user_message(
         f"Reference date for dates written without a year: {reference_iso[:10]}.\n"
         f"1. Call {LOOKUP_TOOL} with the issuer / borrower name.\n"
         f"2. Then call {STAGE_TOOL} once with every OMS field, evidence for each non-blank field, "
-        "and your assumptions."
+        "and your assumptions. If the email offers more than one instrument now, add one order per "
+        "instrument holding only the fields that differ for it."
     )
     return "\n\n".join(sections)
 
@@ -471,20 +516,82 @@ def _finalize(staged: dict, reference: tuple[datetime, str, str], match: dict | 
     }
 
 
-def _correction_prompt(problems: dict[str, str], fields: dict[str, str]) -> str:
-    lines = []
-    for key, problem in problems.items():
-        label = by_key(key)["label"]
-        current = fields.get(key, "")
-        lines.append(
-            f"- {label}: required but blank" if not current else f"- {label}: '{current}' {problem}"
+def _order_payloads(staged: dict) -> tuple[list[tuple[str, dict]], list[str]]:
+    """Split a stage_deal payload into one payload per order: ``([(label, payload)], notes)``.
+
+    Without ``orders``, or with one, the payload is one order labelled "" -- the single-record
+    parse, unchanged (a lone order is folded into the top level). With several, each order's
+    payload is the shared top level overlaid with that order's own fields, evidence and
+    assumptions, so :func:`_finalize` sees a complete record either way.
+
+    :returns: the payloads, and assumptions about the split itself (orders over the cap).
+    """
+    raw = staged.get("orders")
+    orders = [o for o in raw if isinstance(o, dict)] if isinstance(raw, list) else []
+    notes = []
+    if len(orders) > MAX_ORDERS:
+        notes.append(
+            f"The model staged {len(orders)} orders; only the first {MAX_ORDERS} were kept."
         )
+        orders = orders[:MAX_ORDERS]
+
+    def as_dict(value) -> dict:
+        return value if isinstance(value, dict) else {}
+
+    def as_list(value) -> list:
+        return value if isinstance(value, list) else []
+
+    def overlay(order: dict) -> dict:
+        return {
+            "fields": {**as_dict(staged.get("fields")), **as_dict(order.get("fields"))},
+            "evidence": {**as_dict(staged.get("evidence")), **as_dict(order.get("evidence"))},
+            "assumptions": as_list(staged.get("assumptions")) + as_list(order.get("assumptions")),
+        }
+
+    if len(orders) <= 1:
+        return [("", overlay(orders[0]) if orders else staged)], notes
+    labelled = []
+    for number, order in enumerate(orders, start=1):
+        label = str(order.get("label") or "").strip() or f"Order {number}"
+        labelled.append((label, overlay(order)))
+    return labelled, notes
+
+
+def _correction_prompt(outcomes: list[tuple[str, dict]]) -> str:
+    """Ask for one restage naming every value the OMS would reject, by order when there are several."""
+    lines = []
+    for order_label, outcome in outcomes:
+        prefix = f"[{order_label}] " if order_label else ""
+        for key, problem in outcome["problems"].items():
+            label = by_key(key)["label"]
+            current = outcome["fields"].get(key, "")
+            lines.append(
+                f"- {prefix}{label}: required but blank"
+                if not current
+                else f"- {prefix}{label}: '{current}' {problem}"
+            )
+    several = len(outcomes) > 1
     return (
         "The staged record has values the OMS will reject. Call stage_deal again with the FULL set "
-        "of fields, correcting only these (keep every other field exactly as staged):\n"
+        + ("of fields and orders" if several else "of fields")
+        + ", correcting only these (keep every other field exactly as staged):\n"
         + "\n".join(lines)
         + "\nIf the email does not state a value, leave the field blank and add an assumption."
     )
+
+
+def _settle(outcome: dict, notes: list[str]) -> dict:
+    """Blank whatever still fails validation, saying so; ``{fields, evidence, assumptions}``."""
+    fields, evidence = outcome["fields"], outcome["evidence"]
+    assumptions = list(outcome["assumptions"]) + notes
+    for key, problem in outcome["problems"].items():
+        label = by_key(key)["label"]
+        if fields[key]:
+            assumptions.append(f"Left {label} blank: '{fields[key]}' {problem}.")
+            fields[key] = ""
+        else:
+            assumptions.append(f"{label} is required but could not be determined from the email.")
+    return {"fields": fields, "evidence": evidence, "assumptions": assumptions}
 
 
 def _tool_result(use: dict, payload: dict, *, error: bool = False) -> dict:
@@ -584,7 +691,8 @@ def parse_email(
     config = tool_config()
     match: dict | None = None
     matched_by_pipeline = False
-    outcome: dict | None = None
+    outcomes: list[tuple[str, dict]] | None = None
+    split_notes: list[str] = []
     retried = False
 
     for round_number in range(1, MAX_ROUNDS + 1):
@@ -648,16 +756,17 @@ def parse_email(
                     f"{email.get('subject', '')}\n{email.get('body', '')}"
                 )
                 matched_by_pipeline = match is not None
-            outcome = _finalize(staged, reference, match)
-            if outcome["problems"] and not retried:
+            payloads, split_notes = _order_payloads(staged)
+            outcomes = [(label, _finalize(p, reference, match)) for label, p in payloads]
+            if any(o["problems"] for _, o in outcomes) and not retried:
                 retried = True
-                follow_up = _correction_prompt(outcome["problems"], outcome["fields"])
+                follow_up = _correction_prompt(outcomes)
             else:
                 break
         content = results + ([{"text": follow_up}] if follow_up else [])
         messages.append({"role": "user", "content": content})
 
-    if outcome is None:
+    if outcomes is None:
         logger.warning("model never called %s within %d rounds", STAGE_TOOL, MAX_ROUNDS)
         return _blank_output(
             model_id,
@@ -667,19 +776,17 @@ def parse_email(
             started,
         )
 
-    fields, evidence, assumptions = outcome["fields"], outcome["evidence"], outcome["assumptions"]
+    notes = list(split_notes)
     if matched_by_pipeline:
-        assumptions.append(
+        notes.append(
             f"Issuer '{match['issuer_name']}' was matched by the pipeline from the email text; "
             f"the model did not call {LOOKUP_TOOL}."
         )
-    for key, problem in outcome["problems"].items():
-        label = by_key(key)["label"]
-        if fields[key]:
-            assumptions.append(f"Left {label} blank: '{fields[key]}' {problem}.")
-            fields[key] = ""
-        else:
-            assumptions.append(f"{label} is required but could not be determined from the email.")
+    settled = [(label, _settle(outcome, notes)) for label, outcome in outcomes]
+    # The top level is the first order, which for a single-order email is the whole parse; readers
+    # that predate orders keep working on it.
+    first = settled[0][1]
+    fields, evidence, assumptions = first["fields"], first["evidence"], first["assumptions"]
 
     from_master = [
         key
@@ -698,4 +805,9 @@ def parse_email(
         },
         "model_id": model_id,
         "duration_ms": int((time.perf_counter() - started) * 1000),
+        **(
+            {"orders": [{"label": label, **order} for label, order in settled]}
+            if len(settled) > 1
+            else {}
+        ),
     }

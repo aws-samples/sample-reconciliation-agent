@@ -11,6 +11,7 @@ import type {
 } from "@/lib/pipeline/types";
 import { fieldsBySection } from "@/lib/pipeline/omsSchema";
 import { latestOverrides } from "@/lib/pipeline/overrides";
+import { orderName, ordersOf, parsedOrdersOf, sharedKeys } from "@/lib/pipeline/orders";
 import { formatDuration } from "@/components/pipeline/format";
 import {
   BTN_LINK,
@@ -22,6 +23,7 @@ import {
   Placeholder,
 } from "@/components/app-ui/ui";
 import { OverrideEditor, OverrideNote } from "@/components/pipeline/OverrideEditor";
+import { OrderStrip } from "@/components/pipeline/OrderStrip";
 import { ConfidenceChip, StatusPill } from "@/components/pipeline/ui";
 
 // What the parsing agent made of the email, beside the email itself. Every value is shown with the
@@ -33,6 +35,12 @@ import { ConfidenceChip, StatusPill } from "@/components/pipeline/ui";
 // reviewer's override — and, while the deal is still open, lets the reviewer override any of them in
 // place with a reason. The email stays visible beside the editor, which is the point of editing here
 // rather than on the deal page: the reason is usually a quote from the email.
+//
+// An email that offers several instruments stages one deal with several orders (design §15). The
+// panel then shows one order at a time, picked from a strip of chips, with its fields split into
+// "shared by all orders" (equal in every order, computed rather than declared by the parser) and
+// "this order". Overriding a shared field asks whether the correction applies to every order —
+// one override, one lesson — or to this one alone.
 
 /** A small labelled chip, for skills, memory hits and enriched fields. */
 function Chip({ children, title }: { children: string; title?: string }) {
@@ -147,8 +155,11 @@ export function ParsedFieldsPanel({
   email: EmailRecord;
   /** The deal this parse staged. When given, its current values and overrides are shown. */
   deal?: DealRecord | null;
-  /** Present while the deal can still be edited; saves one field's override with its reason. */
-  onOverride?: (key: string, value: string, reason: string) => Promise<void>;
+  /**
+   * Present while the deal can still be edited; saves one field's override with its reason, for
+   * the given orders (`[0]` on a single-order deal).
+   */
+  onOverride?: (key: string, value: string, reason: string, orders: number[]) => Promise<void>;
   /**
    * For each override, the retract action when the viewer may take its lesson back (its author or an
    * admin), else undefined. Independent of `onOverride`: a lesson from a finished deal can still be
@@ -163,10 +174,88 @@ export function ParsedFieldsPanel({
   const [showBlank, setShowBlank] = useState(false);
   // One editor at a time: two half-written reasons on one screen is one too many to keep track of.
   const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [orderIndex, setOrderIndex] = useState(0);
   const parse = email.parse;
   const inFlight = email.status === "RECEIVED" || email.status === "PARSING";
-  const values = deal?.fields ?? parse?.fields ?? {};
-  const latest = deal ? latestOverrides(deal) : {};
+  const orders = deal ? ordersOf(deal) : parse ? parsedOrdersOf(parse) : [];
+  const multi = orders.length > 1;
+  const sel = Math.min(orderIndex, Math.max(orders.length - 1, 0));
+  const order = orders[sel];
+  const values = order?.fields ?? {};
+  const evidence = order?.evidence ?? {};
+  const parsedValues = deal ? ordersOf(deal)[sel]?.original_fields : order?.fields;
+  const assumptions = order?.assumptions ?? parse?.assumptions ?? [];
+  const latest = deal ? latestOverrides(deal, sel) : {};
+  const shared = multi ? sharedKeys(orders) : null;
+
+  /** The OMS sections, restricted to the keys `inGroup` admits; `null` when nothing shows. */
+  const sections = (inGroup: (key: string) => boolean) => {
+    const out = fieldsBySection().map(({ section, fields: all }) => {
+      const fields = all.filter((f) => inGroup(f.key));
+      if (fields.length === 0) return null;
+      const rows = fields.filter(
+        (f) =>
+          showBlank ||
+          (values[f.key] ?? "") !== "" ||
+          evidence[f.key] ||
+          latest[f.key] ||
+          editingKey === f.key,
+      );
+      const hidden = fields.length - rows.length;
+      if (rows.length === 0 && !showBlank) return null;
+      return (
+        <section key={section}>
+          <div className="flex items-baseline justify-between">
+            <Eyebrow>{section}</Eyebrow>
+            {hidden > 0 && (
+              <span className="rc-mono text-[10.5px] text-[var(--rc-ink-faint)]">
+                {hidden} blank hidden
+              </span>
+            )}
+          </div>
+          <div className="mt-2 space-y-1.5">
+            {rows.map((f) => {
+              const sharedBy = shared?.has(f.key) ? orders.length : undefined;
+              return (
+                <FieldRow
+                  key={f.key}
+                  def={f}
+                  value={values[f.key] ?? ""}
+                  evidence={evidence[f.key]}
+                  override={latest[f.key]}
+                  onRetract={latest[f.key] ? onRetract?.(latest[f.key]) : undefined}
+                  onEdit={
+                    onOverride ? () => setEditingKey((k) => (k === f.key ? null : f.key)) : undefined
+                  }
+                  editor={
+                    onOverride && editingKey === f.key ? (
+                      <OverrideEditor
+                        def={f}
+                        current={values[f.key] ?? ""}
+                        parsed={parsedValues?.[f.key] ?? ""}
+                        sharedBy={sharedBy}
+                        onSave={async (value, reason, allOrders) => {
+                          await onOverride(
+                            f.key,
+                            value,
+                            reason,
+                            allOrders ? orders.map((_, i) => i) : [sel],
+                          );
+                          setEditingKey(null);
+                        }}
+                        onCancel={() => setEditingKey(null)}
+                      />
+                    ) : undefined
+                  }
+                />
+              );
+            })}
+          </div>
+        </section>
+      );
+    });
+    return out.some(Boolean) ? out : null;
+  };
 
   return (
     <Panel className="rc-rise p-5">
@@ -262,63 +351,42 @@ export function ParsedFieldsPanel({
             </p>
           )}
 
-          {/* The fields, by OMS section. */}
+          {multi && (
+            <OrderStrip
+              orders={orders}
+              selected={sel}
+              deal={deal}
+              onSelect={(i) => {
+                setOrderIndex(i);
+                setEditingKey(null);
+              }}
+            />
+          )}
+
+          {/* The fields, by OMS section — split into shared and per-order when there are orders. */}
           <div className="space-y-4">
-            {fieldsBySection().map(({ section, fields }) => {
-              const rows = fields.filter(
-                (f) =>
-                  showBlank ||
-                  (values[f.key] ?? "") !== "" ||
-                  parse.evidence[f.key] ||
-                  latest[f.key] ||
-                  editingKey === f.key,
-              );
-              const hidden = fields.length - rows.length;
-              if (rows.length === 0 && !showBlank) return null;
-              return (
-                <section key={section}>
-                  <div className="flex items-baseline justify-between">
-                    <Eyebrow>{section}</Eyebrow>
-                    {hidden > 0 && (
-                      <span className="rc-mono text-[10.5px] text-[var(--rc-ink-faint)]">
-                        {hidden} blank hidden
-                      </span>
-                    )}
-                  </div>
-                  <div className="mt-2 space-y-1.5">
-                    {rows.map((f) => (
-                      <FieldRow
-                        key={f.key}
-                        def={f}
-                        value={values[f.key] ?? ""}
-                        evidence={parse.evidence[f.key]}
-                        override={latest[f.key]}
-                        onRetract={latest[f.key] ? onRetract?.(latest[f.key]) : undefined}
-                        onEdit={
-                          onOverride
-                            ? () => setEditingKey((k) => (k === f.key ? null : f.key))
-                            : undefined
-                        }
-                        editor={
-                          onOverride && editingKey === f.key ? (
-                            <OverrideEditor
-                              def={f}
-                              current={values[f.key] ?? ""}
-                              parsed={deal?.original_fields[f.key] ?? parse.fields[f.key] ?? ""}
-                              onSave={async (value, reason) => {
-                                await onOverride(f.key, value, reason);
-                                setEditingKey(null);
-                              }}
-                              onCancel={() => setEditingKey(null)}
-                            />
-                          ) : undefined
-                        }
-                      />
-                    ))}
-                  </div>
-                </section>
-              );
-            })}
+            {multi ? (
+              <>
+                <div className="space-y-4" data-group="shared">
+                  <h3 className="rc-mono text-[11px] uppercase tracking-[0.14em] text-[var(--rc-cyan)]">
+                    Shared by all {orders.length} orders
+                  </h3>
+                  {sections((k) => shared!.has(k)) ?? (
+                    <p className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">◇ nothing shared</p>
+                  )}
+                </div>
+                <div className="space-y-4" data-group="order">
+                  <h3 className="rc-mono text-[11px] uppercase tracking-[0.14em] text-[var(--rc-cyan)]">
+                    This order · {sel + 1} · {orderName(orders, sel)}
+                  </h3>
+                  {sections((k) => !shared!.has(k)) ?? (
+                    <p className="rc-mono text-[11px] text-[var(--rc-ink-faint)]">◇ no value differs from the other orders</p>
+                  )}
+                </div>
+              </>
+            ) : (
+              sections(() => true)
+            )}
             <button type="button" onClick={() => setShowBlank((v) => !v)} className={BTN_LINK}>
               {showBlank ? "Hide blank fields" : "Show blank fields"}
             </button>
@@ -326,14 +394,14 @@ export function ParsedFieldsPanel({
 
           {/* What the agent decided without direct evidence — the list a reviewer reads first. */}
           <section>
-            <Eyebrow>Assumptions</Eyebrow>
-            {parse.assumptions.length === 0 ? (
+            <Eyebrow>Assumptions{multi ? ` · ${orderName(orders, sel)}` : ""}</Eyebrow>
+            {assumptions.length === 0 ? (
               <p className="rc-mono mt-2 text-[12px] text-[var(--rc-ink-faint)]">
                 ◇ none recorded
               </p>
             ) : (
               <ul className="mt-2 space-y-1.5">
-                {parse.assumptions.map((a, i) => (
+                {assumptions.map((a, i) => (
                   <li
                     key={i}
                     className="border-l-2 border-[var(--rc-amber)] pl-3 text-[12.5px] leading-relaxed text-[var(--rc-ink)]"

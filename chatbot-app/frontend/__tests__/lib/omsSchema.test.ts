@@ -20,6 +20,7 @@ import {
   OMS_FIELDS,
   OMS_SECTIONS,
   toCsv,
+  toCsvRows,
   validateFields,
   validateFieldValue,
 } from "@/lib/pipeline/omsSchema";
@@ -160,6 +161,24 @@ describe("toCsv", () => {
     const csv = toCsv({ ...emptyFields(), notes: 'Fungible with existing, "cov-lite" TLB', desk_notes: "a\nb" });
     expect(csv).toContain('"Fungible with existing, ""cov-lite"" TLB"');
     expect(csv).toContain('"a\nb"');
+  });
+
+  it("writes one row per order under one header, and a one-order file is exactly toCsv", () => {
+    // One file per email: every order of the deal is a row (design §15). Built from the one-row
+    // writer, whose bytes the golden tests here and in tests/deal_pipeline/test_oms_schema.py pin
+    // on both sides, so the two multi-row writers agree whenever those do.
+    const usd = { ...emptyFields(), currency: "USD", maturity_terms: "5 yr" };
+    const eur = { ...emptyFields(), currency: "EUR", maturity_terms: "5 yr" };
+    const csv = toCsvRows([usd, eur]);
+    const lines = csv.split("\n");
+    expect(lines).toHaveLength(4); // header, two rows, and the empty string after the final LF
+    expect(lines[0]).toBe(toCsv(usd).split("\n")[0]);
+    expect(lines[1]).toBe(toCsv(usd).split("\n")[1]);
+    expect(lines[2]).toBe(toCsv(eur).split("\n")[1]);
+    expect(lines[3]).toBe("");
+    expect(toCsvRows([usd])).toBe(toCsv(usd));
+    const cells = lines[2].split(",");
+    expect(cells[OMS_FIELDS.findIndex((f) => f.key === "currency")]).toBe("EUR");
   });
 
   it("golden: the Ratings header block", () => {

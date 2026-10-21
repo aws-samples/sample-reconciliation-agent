@@ -23,8 +23,12 @@ import type {
   UploadError,
   UploadResult,
 } from "@/lib/pipeline/types";
-import { changedKeys, fieldDef, toCsv } from "@/lib/pipeline/omsSchema";
+import { changedKeys, fieldDef, OMS_FIELDS, toCsvRows } from "@/lib/pipeline/omsSchema";
+import { dealRows, isMultiOrder, orderName, ordersOf, withOrderValues } from "@/lib/pipeline/orders";
 import { overridesOf } from "@/lib/pipeline/overrides";
+
+/** Every OMS field key, in schema order — the order overrides and history lines follow. */
+const OMS_KEYS = OMS_FIELDS.map((f) => f.key);
 import { newOverrideId } from "./ids";
 import {
   getItem,
@@ -116,7 +120,7 @@ export function appendHistory(
 
 /** Regenerate the staging CSV from the deal's current fields. */
 export async function writeDealCsv(deal: DealRecord): Promise<void> {
-  await putText(deal.csv_key, toCsv(deal.fields), "text/csv");
+  await putText(deal.csv_key, toCsvRows(dealRows(deal)), "text/csv");
 }
 
 /** A value as the history line quotes it. */
@@ -144,51 +148,75 @@ function quoted(value: string): string {
  * regenerated from the row that won before the conflict propagates — otherwise the file the OMS
  * validates would disagree with the fields the review screen shows.
  *
- * @param fields the complete field set, with every changed value already validated.
+ * On a deal of several orders one call changes one set of orders, and each changed field becomes
+ * ONE override naming them (`order_indexes`) — one lesson for the memory, however many orders it
+ * corrected.
+ *
+ * @param orderIndexes the orders this change applies to (`[0]` on a single-order deal).
+ * @param fieldsFor the complete new field set for each of those orders, every changed value
+ *   already validated.
  * @param reasons a non-empty reason for every key whose value changes (the route enforces this).
  * @returns the written deal and the overrides this call added, in field order.
  * @throws ConditionalCheckFailedException when the deal changed since it was read.
  */
 export async function applyOverrides(
   deal: DealRecord,
-  fields: FieldValues,
+  orderIndexes: number[],
+  fieldsFor: Map<number, FieldValues>,
   reasons: Record<string, string>,
   actor: string,
   now: Date = new Date(),
 ): Promise<{ deal: DealRecord; added: FieldOverride[] }> {
   const at = now.toISOString();
   const stage = deal.status === "UPLOAD_FAILED" ? "break" : "review";
-  const added: FieldOverride[] = changedKeys(deal.fields, fields).map((key) => {
+  const orders = ordersOf(deal);
+  const multi = isMultiOrder(deal);
+  // The first order in scope speaks for all of them: the route only lets several orders share an
+  // override when they shared the value it replaces.
+  const lead = orders[orderIndexes[0]];
+  const next = fieldsFor.get(orderIndexes[0])!;
+  const changed = OMS_KEYS.filter((key) =>
+    orderIndexes.some((i) => changedKeys(orders[i].fields, fieldsFor.get(i)!).includes(key)),
+  );
+  const added: FieldOverride[] = changed.map((key) => {
+    // A break fix carries the codes of the rejection that named this field — in one of these
+    // orders' rows, when the file had several.
     const codes =
       stage === "break"
-        ? (deal.upload?.errors ?? []).filter((e) => e.field === key).map((e) => e.code)
+        ? (deal.upload?.errors ?? [])
+            .filter((e) => e.field === key && (e.row === undefined || orderIndexes.includes(e.row)))
+            .map((e) => e.code)
         : [];
     return {
       override_id: newOverrideId(now),
       field: key,
-      parsed_value: deal.original_fields[key] ?? "",
-      previous_value: deal.fields[key] ?? "",
-      value: fields[key] ?? "",
+      parsed_value: lead.original_fields[key] ?? "",
+      previous_value: lead.fields[key] ?? "",
+      value: next[key] ?? "",
       reason: reasons[key],
       actor,
       at,
       stage,
-      ...(codes.length ? { upload_error_codes: codes } : {}),
+      ...(codes.length ? { upload_error_codes: [...new Set(codes)] } : {}),
+      ...(multi ? { order_indexes: [...orderIndexes] } : {}),
       memory: { status: "pending" },
     };
   });
   const edited: DealRecord = {
-    ...deal,
-    fields,
-    // Denormalised for the list screens; must follow the field or the table shows a stale name.
-    opportunity_name: fields.opportunity_name || deal.opportunity_name,
+    ...withOrderValues(deal, fieldsFor),
     status: deal.status === "UPLOAD_FAILED" ? "STAGED" : deal.status,
     overrides: [...overridesOf(deal), ...added],
   };
+  // Which orders a line is about, when there are several: "[EUR 5yr] " or "[all 5 orders] ".
+  const scope = !multi
+    ? ""
+    : orderIndexes.length === orders.length
+      ? `[all ${orders.length} orders] `
+      : `[${orderIndexes.map((i) => orderName(orders, i)).join(", ")}] `;
   const detail = added
     .map(
       (o) =>
-        `${fieldDef(o.field)?.label ?? o.field}: ${quoted(o.previous_value)} → ${quoted(o.value)} — ${o.reason}`,
+        `${scope}${fieldDef(o.field)?.label ?? o.field}: ${quoted(o.previous_value)} → ${quoted(o.value)} — ${o.reason}`,
     )
     .join("\n");
   const withHistory = appendHistory(edited, "EDITED", actor, detail, now);

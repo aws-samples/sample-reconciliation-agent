@@ -255,6 +255,23 @@ def _ig_flag_error(fields: dict[str, str]) -> dict | None:
     )
 
 
+def validate_rows(rows: list[dict[str, str]], labels: list[str], counterparties) -> list[dict]:
+    """Validate every order row of one staging file; the file is accepted only when none fails.
+
+    A header problem is reported once, for the file. With more than one row, each row's errors
+    carry ``row`` (0-based, the order's index on the deal) so the reviewer sees which order the
+    OMS refused; a one-row file's errors are exactly :func:`validate`'s.
+    """
+    header = _header_errors(labels)
+    errors = list(header)
+    for index, fields in enumerate(rows):
+        row_errors = [e for e in validate(fields, labels, counterparties) if e not in header]
+        if len(rows) > 1:
+            row_errors = [{**e, "row": index} for e in row_errors]
+        errors.extend(row_errors)
+    return errors
+
+
 def validate(fields: dict[str, str], labels: list[str], counterparties) -> list[dict]:
     """Validate one staging record and return every import error the mock OMS would report.
 

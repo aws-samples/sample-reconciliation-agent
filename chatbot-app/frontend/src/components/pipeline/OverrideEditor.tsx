@@ -115,6 +115,7 @@ export function OverrideEditor({
   def,
   current,
   parsed,
+  sharedBy,
   onSave,
   onCancel,
 }: {
@@ -123,12 +124,18 @@ export function OverrideEditor({
   current: string;
   /** The parser's value, shown beside the new one. */
   parsed: string;
+  /**
+   * How many orders share this value, when it is shared by several: the editor then asks whether
+   * the override applies to all of them (the default) or to this order only.
+   */
+  sharedBy?: number;
   /** Persist the override; a rejection is shown in the editor and leaves it open. */
-  onSave: (value: string, reason: string) => Promise<void>;
+  onSave: (value: string, reason: string, allOrders: boolean) => Promise<void>;
   onCancel: () => void;
 }) {
   const [value, setValue] = useState(current);
   const [reason, setReason] = useState("");
+  const [allOrders, setAllOrders] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -140,7 +147,7 @@ export function OverrideEditor({
     setBusy(true);
     setError(null);
     try {
-      await onSave(value.trim(), reason.trim());
+      await onSave(value.trim(), reason.trim(), Boolean(sharedBy) && allOrders);
     } catch (e) {
       setError(String(e));
       setBusy(false);
@@ -177,8 +184,21 @@ export function OverrideEditor({
           className={`${INPUT_CLASS} w-full leading-relaxed`}
         />
       </div>
+      {sharedBy && sharedBy > 1 && (
+        <fieldset className="rc-mono flex flex-wrap items-center gap-x-4 gap-y-1 text-[11.5px] text-[var(--rc-ink-dim)]">
+          <legend className="rc-eyebrow mb-1">Apply to</legend>
+          <label className="flex items-center gap-1.5">
+            <input type="radio" name={`scope-${def.key}`} checked={allOrders} onChange={() => setAllOrders(true)} />
+            all {sharedBy} orders
+          </label>
+          <label className="flex items-center gap-1.5">
+            <input type="radio" name={`scope-${def.key}`} checked={!allOrders} onChange={() => setAllOrders(false)} />
+            this order only
+          </label>
+        </fieldset>
+      )}
       <p className="rc-mono text-[10.5px] text-[var(--rc-ink-faint)]">
-        Saved to the deal and to the parser&apos;s memory.
+        Saved to the deal and to the parser&apos;s memory{sharedBy && sharedBy > 1 && allOrders ? " — one lesson for every order" : ""}.
       </p>
       {error && (
         <p role="alert" className="rc-mono text-[11.5px]" style={{ color: "var(--rc-red)" }}>

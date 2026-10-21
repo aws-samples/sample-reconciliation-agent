@@ -210,7 +210,8 @@ describe("ParsedFieldsPanel overrides", () => {
     expect(save).toBeEnabled();
 
     await act(async () => fireEvent.click(save));
-    expect(onOverride).toHaveBeenCalledWith("left_agent", "Silverline", "The desk books the bank's short name.");
+    // The only order of a single-order deal.
+    expect(onOverride).toHaveBeenCalledWith("left_agent", "Silverline", "The desk books the bank's short name.", [0]);
     expect(screen.queryByRole("group", { name: "Override Left Agent" })).toBeNull();
   });
 
@@ -286,3 +287,78 @@ describe("ParsedFieldsPanel overrides", () => {
     expect(within(note).getByRole("group", { name: "Retract this lesson" })).toBeTruthy();
   });
 });
+
+describe("ParsedFieldsPanel with several orders", () => {
+  const usd = { ...deal().fields, currency: "USD", maturity_terms: "5 yr" };
+  const eur = { ...deal().fields, currency: "EUR", maturity_terms: "8 yr" };
+  const twoOrders = () =>
+    deal({
+      fields: usd,
+      original_fields: usd,
+      orders: [
+        { label: "USD 5yr", fields: usd, original_fields: usd, evidence: {} },
+        { label: "EUR 8yr", fields: eur, original_fields: eur, evidence: {}, assumptions: ["EUR size TBD."] },
+      ],
+    });
+
+  it("shows one order at a time, with shared values apart from that order's own", () => {
+    render(<ParsedFieldsPanel email={email()} deal={twoOrders()} />);
+    expect(screen.getByText(/2 orders from this email/)).toBeTruthy();
+    const shared = document.querySelector('[data-group="shared"]') as HTMLElement;
+    const own = document.querySelector('[data-group="order"]') as HTMLElement;
+    expect(shared).toHaveTextContent("Shared by all 2 orders");
+    expect(within(shared).getByText("Silverline Partners")).toBeTruthy(); // same in both
+    expect(within(shared).queryByText("USD")).toBeNull();
+    expect(own).toHaveTextContent("This order · 1 · USD 5yr");
+    expect(within(own).getByText("USD")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /2 · EUR 8yr/ }));
+    expect(document.querySelector('[data-group="order"]')).toHaveTextContent("This order · 2 · EUR 8yr");
+    expect(within(document.querySelector('[data-group="order"]') as HTMLElement).getByText("EUR")).toBeTruthy();
+    expect(screen.getByText("EUR size TBD.")).toBeTruthy(); // the order's own assumptions
+  });
+
+  it("asks whether a shared override applies to every order, and saves the scope chosen", async () => {
+    const onOverride = vi.fn().mockResolvedValue(undefined);
+    render(<ParsedFieldsPanel email={email()} deal={twoOrders()} onOverride={onOverride} />);
+    fireEvent.click(screen.getByRole("button", { name: /2 · EUR 8yr/ }));
+
+    const edit = async (label: string, value: string, onlyThis = false) => {
+      fireEvent.click(screen.getByRole("button", { name: `Override ${label}` }));
+      const editor = screen.getByRole("group", { name: `Override ${label}` });
+      fireEvent.change(within(editor).getByLabelText(label), { target: { value } });
+      fireEvent.change(within(editor).getByLabelText(/Reason for overriding/), { target: { value: "r" } });
+      if (onlyThis) fireEvent.click(within(editor).getByLabelText("this order only"));
+      await act(async () => fireEvent.click(within(editor).getByRole("button", { name: "Save override" })));
+    };
+
+    // Shared: all orders by default — one override covering both.
+    await edit("Left Agent", "Silverline");
+    expect(onOverride).toHaveBeenLastCalledWith("left_agent", "Silverline", "r", [0, 1]);
+    // Shared, narrowed to this order.
+    await edit("Left Agent", "Silverline", true);
+    expect(onOverride).toHaveBeenLastCalledWith("left_agent", "Silverline", "r", [1]);
+    // This order's own field: no scope to choose, always this order.
+    fireEvent.click(screen.getByRole("button", { name: "Override Maturity Terms" }));
+    expect(within(screen.getByRole("group", { name: "Override Maturity Terms" })).queryByText("Apply to")).toBeNull();
+  });
+
+  it("counts each order's overrides and OMS errors on its chip", () => {
+    const d = twoOrders();
+    d.status = "UPLOAD_FAILED";
+    d.upload = {
+      attempted_at: "t",
+      accepted: false,
+      staging_key: null,
+      errors: [{ code: "COVENANT_STATUS_REQUIRED", field: "covenant_status_num", message: "m", row: 1 }],
+      validator_version: "1",
+    };
+    d.overrides = [{ ...agentOverride, order_indexes: [0, 1] }];
+    render(<ParsedFieldsPanel email={email()} deal={d} />);
+    const eurChip = screen.getByRole("button", { name: /2 · EUR 8yr/ });
+    expect(eurChip).toHaveTextContent("✎1");
+    expect(eurChip).toHaveTextContent("✕1");
+    expect(screen.getByRole("button", { name: /1 · USD 5yr/ })).not.toHaveTextContent("✕");
+  });
+});
+

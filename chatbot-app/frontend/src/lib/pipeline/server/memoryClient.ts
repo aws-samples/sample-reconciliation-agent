@@ -170,6 +170,8 @@ export interface OverrideLessonContext {
   fields: FieldValues;
   /** The parser's evidence for the overridden field, when it recorded any. */
   evidence?: FieldEvidence;
+  /** On a deal of several orders: every order's name, and the ones this override changed. */
+  orders?: { labels: string[]; scope: number[] };
 }
 
 /**
@@ -186,8 +188,18 @@ export function overrideLessonText(override: FieldOverride, context: OverrideLes
   const lines = [
     "Deal-desk override of a parsed OMS field.",
     `Field: ${label(override.field)}`,
-    `Parser value: ${show(override.parsed_value)}`,
   ];
+  const o = context.orders;
+  if (o && o.labels.length > 1) {
+    // Several orders from one email: say which this corrects, so the extractor can tell "the EUR
+    // tranche" from "every tranche" (design §15).
+    lines.push(
+      o.scope.length === o.labels.length
+        ? `Applies to all ${o.labels.length} orders of the deal: ${o.labels.join(", ")}`
+        : `Order: ${o.scope.map((i) => o.labels[i]).join(", ")} (of ${o.labels.length}: ${o.labels.join(", ")})`,
+    );
+  }
+  lines.push(`Parser value: ${show(override.parsed_value)}`);
   if (override.previous_value !== override.parsed_value) {
     lines.push(`Value before this override: ${show(override.previous_value)}`);
   }

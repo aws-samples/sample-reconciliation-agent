@@ -19,8 +19,8 @@ import os
 import boto3
 from botocore.exceptions import ClientError
 
-from backend.deal_pipeline.oms_schema import parse_csv
-from backend.deal_pipeline.oms_validator import VALIDATOR_VERSION, validate
+from backend.deal_pipeline.oms_schema import parse_csv_rows
+from backend.deal_pipeline.oms_validator import VALIDATOR_VERSION, validate_rows
 from backend.deal_pipeline.security_master import SecurityMaster
 from backend.recon_core.ddb_update import (
     is_conditional_check_failed,
@@ -37,18 +37,18 @@ DEFAULT_COUNTERPARTIES_KEY = "security-master/counterparties.csv"
 def validate_csv_text(text: str, counterparties) -> list[dict]:
     """Parse and validate CSV text; a file that cannot be read at all is one ``HEADER_MISMATCH``."""
     try:
-        labels, fields = parse_csv(text)
+        labels, rows = parse_csv_rows(text)
     except ValueError as exc:
         return [
             {
                 "code": "HEADER_MISMATCH",
                 "field": None,
                 "message": f"The file could not be read as a pipeline import: {exc}.",
-                "hint": "A pipeline import is one header row of field labels followed by exactly "
-                "one data row with the same number of cells.",
+                "hint": "A pipeline import is one header row of field labels followed by one data "
+                "row per order, each with the same number of cells.",
             }
         ]
-    return validate(fields, labels, counterparties)
+    return validate_rows(rows, labels, counterparties)
 
 
 def handle(event, _context=None) -> dict:

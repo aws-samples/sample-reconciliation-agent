@@ -95,16 +95,19 @@ export async function getDeal(id: string): Promise<DealRecord> {
  *
  * @param fields only the fields being changed.
  * @param reasons a reason for every key in `fields` whose value changes.
+ * @param orders on a deal of several orders, the ones the change applies to; omitted for the first
+ *   (and on most deals only) order.
  */
 export async function updateDealFields(
   id: string,
   fields: Partial<FieldValues>,
   reasons: Record<string, string>,
+  orders?: number[],
 ): Promise<DealRecord> {
   return json(
     await pipelineFetch(
       `/api/pipeline/deals/${encodeURIComponent(id)}`,
-      jsonInit("PATCH", { fields, reasons }),
+      jsonInit("PATCH", orders ? { fields, reasons, orders } : { fields, reasons }),
     ),
   );
 }

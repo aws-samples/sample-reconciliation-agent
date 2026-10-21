@@ -459,6 +459,115 @@ describe("PATCH /api/pipeline/deals/[id]", () => {
   });
 });
 
+describe("PATCH /api/pipeline/deals/[id] on a deal of several orders", () => {
+  /** Two tranches of one deal: everything shared but the currency and the maturity. */
+  function twoTranches(over: Partial<DealRecord> = {}): DealRecord {
+    const base = stagedDeal();
+    const usd = { ...base.fields, maturity_terms: "5 yr" };
+    const eur = { ...base.fields, currency: "EUR", maturity_terms: "8 yr" };
+    return stagedDeal({
+      fields: usd,
+      original_fields: { ...usd },
+      orders: [
+        { label: "USD 5yr", fields: usd, original_fields: { ...usd }, evidence: {} },
+        { label: "EUR 8yr", fields: eur, original_fields: { ...eur }, evidence: {} },
+      ],
+      ...over,
+    });
+  }
+
+  beforeEach(() => {
+    table.dl_1 = twoTranches();
+  });
+
+  it("applies a shared field to every order as one override, one lesson and every CSV row", async () => {
+    const resp = await patch("dl_1", {
+      fields: { left_agent: "Silverline" },
+      reasons: { left_agent: "the desk books the short name" },
+      orders: [0, 1],
+    });
+    expect(resp.status).toBe(200);
+    const deal = (await resp.json()) as DealRecord;
+    expect(deal.orders!.map((o) => o.fields.left_agent)).toEqual(["Silverline", "Silverline"]);
+    expect(deal.fields.left_agent).toBe("Silverline"); // the top level mirrors the first order
+    expect(overridesOf(deal)).toHaveLength(1);
+    expect(overridesOf(deal)[0]).toMatchObject({ field: "left_agent", order_indexes: [0, 1] });
+    expect(deal.history.at(-1)!.detail).toMatch(/^\[all 2 orders\] Left Agent: "Silverline Partners" → "Silverline"/);
+
+    const sent = lessons();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toContain("Applies to all 2 orders of the deal: USD 5yr, EUR 8yr");
+
+    const csvPut = s3Send.mock.calls.map((c) => c[0]).find((c) => c.__cmd === "PutObject");
+    const rows = csvPut.Body.split("\n").filter(Boolean).slice(1);
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r: string) => r.includes(",Silverline,"))).toBe(true);
+  });
+
+  it("changes one order alone and says which in the history and the lesson", async () => {
+    const resp = await patch("dl_1", {
+      fields: { maturity_terms: "7 yr" },
+      reasons: { maturity_terms: "the EUR notes are 7 years, per the term sheet" },
+      orders: [1],
+    });
+    expect(resp.status).toBe(200);
+    const deal = (await resp.json()) as DealRecord;
+    expect(deal.orders!.map((o) => o.fields.maturity_terms)).toEqual(["5 yr", "7 yr"]);
+    expect(deal.fields.maturity_terms).toBe("5 yr");
+    expect(overridesOf(deal)[0]).toMatchObject({ order_indexes: [1], previous_value: "8 yr", parsed_value: "8 yr" });
+    expect(deal.history.at(-1)!.detail).toMatch(/^\[EUR 8yr\] Maturity Terms/);
+    expect(lessons()[0].text).toContain("Order: EUR 8yr (of 2: USD 5yr, EUR 8yr)");
+    expect(lessons()[0].text).toContain("Currency = EUR"); // that order's attributes, not the first's
+  });
+
+  it("defaults to the first order, and refuses an order that does not exist", async () => {
+    const first = await patch("dl_1", { fields: { maturity_terms: "6 yr" }, reasons: { maturity_terms: "r" } });
+    expect(((await first.json()) as DealRecord).orders!.map((o) => o.fields.maturity_terms)).toEqual(["6 yr", "8 yr"]);
+
+    const missing = await patch("dl_1", { fields: { notes: "x" }, reasons: { notes: "r" }, orders: [2] });
+    expect(missing.status).toBe(400);
+    expect((await missing.json()).error).toMatch(/has 2 order\(s\); there is no order 2/);
+
+    table.dl_1 = stagedDeal(); // a single-order deal has only order 0
+    expect((await patch("dl_1", { fields: { notes: "x" }, reasons: { notes: "r" }, orders: [1] })).status).toBe(400);
+  });
+
+  it("refuses one override across orders whose current values differ, and malformed order lists", async () => {
+    const resp = await patch("dl_1", {
+      fields: { maturity_terms: "7 yr" },
+      reasons: { maturity_terms: "r" },
+      orders: [0, 1],
+    });
+    expect(resp.status).toBe(400);
+    expect((await resp.json()).error).toMatch(/maturity_terms differs across USD 5yr, EUR 8yr; override each order on its own/);
+    for (const orders of [[], [0, 0], [-1], [0.5], "0"]) {
+      expect((await patch("dl_1", { fields: { notes: "x" }, reasons: { notes: "r" }, orders })).status).toBe(400);
+    }
+    expect(s3Send).not.toHaveBeenCalled();
+  });
+
+  it("gives a break fix the rejection codes from its own order's row only", async () => {
+    // A fresh failed deal per case: the first override reopens the deal to STAGED, after which an
+    // override is a review, not a break fix.
+    const failed = () => twoTranches({
+      status: "UPLOAD_FAILED",
+      upload: {
+        attempted_at: "t",
+        accepted: false,
+        staging_key: null,
+        errors: [{ code: "COVENANT_STATUS_REQUIRED", field: "covenant_status_num", message: "m", row: 1 }],
+        validator_version: "1",
+      },
+    });
+    table.dl_1 = failed();
+    let resp = await patch("dl_1", { fields: { covenant_status_num: "3" }, reasons: { covenant_status_num: "r" }, orders: [0] });
+    expect(overridesOf(await resp.json())[0].upload_error_codes).toBeUndefined();
+    table.dl_1 = failed();
+    resp = await patch("dl_1", { fields: { covenant_status_num: "3" }, reasons: { covenant_status_num: "r" }, orders: [1] });
+    expect(overridesOf(await resp.json()).at(-1)!.upload_error_codes).toEqual(["COVENANT_STATUS_REQUIRED"]);
+  });
+});
+
 describe("GET /api/pipeline/deals/[id]/csv", () => {
   it("serves the current fields as a CSV download", async () => {
     const resp = await csv.GET(new Request("http://x/api/pipeline/deals/dl_1/csv"), routeParams({ id: "dl_1" }));

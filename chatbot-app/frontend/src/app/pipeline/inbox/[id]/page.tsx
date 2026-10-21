@@ -11,6 +11,7 @@ import {
 } from "@/lib/pipelineApi";
 import type { DealRecord, EmailRecord, FieldOverride } from "@/lib/pipeline/types";
 import { useAppSubject } from "@/hooks/useAppSubject";
+import { isMultiOrder } from "@/lib/pipeline/orders";
 import { EmailViewer } from "@/components/pipeline/EmailViewer";
 import { ParsedFieldsPanel } from "@/components/pipeline/ParsedFieldsPanel";
 import { Placeholder } from "@/components/app-ui/ui";
@@ -80,9 +81,11 @@ export default function EmailDetailPage({ params }: { params: Promise<{ id: stri
   }, [dealId]);
   const shownDeal = deal && deal.deal_id === dealId ? deal : null;
 
-  const override = async (key: string, value: string, reason: string) => {
+  const override = async (key: string, value: string, reason: string, orders: number[]) => {
     if (!shownDeal) return;
-    setDeal(await updateDealFields(shownDeal.deal_id, { [key]: value }, { [key]: reason }));
+    // A single-order deal sends no `orders`, exactly the request it always sent.
+    const scope = isMultiOrder(shownDeal) ? orders : undefined;
+    setDeal(await updateDealFields(shownDeal.deal_id, { [key]: value }, { [key]: reason }, scope));
   };
 
   // The route decides; this only hides the action from viewers it would refuse.

@@ -7,6 +7,7 @@
  */
 
 import type { DealRecord, FieldOverride } from "@/lib/pipeline/types";
+import { overrideOrders } from "@/lib/pipeline/orders";
 
 /**
  * Ceiling on one override reason, in characters. A reason becomes part of a memory event, and a
@@ -19,11 +20,18 @@ export function overridesOf(deal: Pick<DealRecord, "overrides">): FieldOverride[
   return deal.overrides ?? [];
 }
 
-/** The override that explains each field's current value, keyed by field key. */
+/**
+ * The override that explains each field's current value in one order, keyed by field key.
+ *
+ * @param orderIndex the order to read (0, the only one, on a single-order deal).
+ */
 export function latestOverrides(
   deal: Pick<DealRecord, "overrides">,
+  orderIndex: number = 0,
 ): Record<string, FieldOverride> {
   const out: Record<string, FieldOverride> = {};
-  for (const o of overridesOf(deal)) out[o.field] = o;
+  for (const o of overridesOf(deal)) {
+    if (overrideOrders(o).includes(orderIndex)) out[o.field] = o;
+  }
   return out;
 }
